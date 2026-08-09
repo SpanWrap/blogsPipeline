@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Runtime storage
+.data/
+coverage/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Tooling
+*.tsbuildinfo
+.DS_Store
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# IDE
+.idea/
+.vscode/

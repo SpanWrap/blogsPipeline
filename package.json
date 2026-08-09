@@ -1,0 +1,36 @@
+{
+  "name": "spanwrap-blog-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone blog research and generation pipeline that publishes approved posts to Spanwrap via HTTP",
+  "type": "module",
+  "bin": {
+    "blog-pipeline": "./src/cli/index.ts"
+  },
+  "scripts": {
+    "pipeline": "tsx src/cli/index.ts",
+    "start": "tsx src/cli/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "commander": "^14.0.3",
+    "dotenv": "^17.4.2",
+    "robots-parser": "^3.0.1",
+    "sanitize-html": "^2.17.5",
+    "slugify": "^1.6.9",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/sanitize-html": "^2.16.1",
+    "tsx": "^4.23.11",
+    "typescript": "^5",
+    "vitest": "^4.1.10"
+  }
+}
