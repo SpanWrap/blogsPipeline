@@ -296,24 +296,42 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
 export function startUiServer() {
   const host = appConfig.ui.host;
   const port = appConfig.ui.port;
+  const onVercel = Boolean(process.env.VERCEL);
 
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", `http://${host}:${port}`);
+    const forwardedProto = req.headers["x-forwarded-proto"];
+    const proto =
+      (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto) ===
+      "https"
+        ? "https"
+        : "http";
+    const origin = req.headers.host
+      ? `${proto}://${req.headers.host}`
+      : `http://${host}:${port}`;
+    const url = new URL(req.url ?? "/", origin);
     if (url.pathname.startsWith("/api/")) {
       return handleApi(req, res, url);
     }
     return serveStatic(res, url.pathname);
   });
 
-  server.listen(port, host, () => {
+  const onListen = () => {
+    const url = onVercel ? `port ${port}` : `http://${host}:${port}`;
     logger.info("Pipeline UI listening", {
-      url: `http://${host}:${port}`,
+      url,
       storage: appConfig.storage.backend,
     });
-    console.log(`\nPipeline UI → http://${host}:${port}\n`);
-  });
+    if (!onVercel) {
+      console.log(`\nPipeline UI → http://${host}:${port}\n`);
+    }
+  };
+
+  // Vercel intercepts listen() and ignores host/port; do not bind 127.0.0.1.
+  if (onVercel) {
+    server.listen(port, onListen);
+  } else {
+    server.listen(port, host, onListen);
+  }
 
   return server;
 }
-
-startUiServer();

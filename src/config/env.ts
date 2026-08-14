@@ -74,8 +74,9 @@ export const appConfig = {
     mongoCollection: env("MONGODB_COLLECTION", "pipeline_runs")!,
   },
   ui: {
-    host: env("UI_HOST", "127.0.0.1")!,
-    port: envInt("UI_PORT", 8787),
+    host: env("UI_HOST", process.env.VERCEL ? "0.0.0.0" : "127.0.0.1")!,
+    /** Vercel sets PORT; locally UI_PORT (default 8787) is used. */
+    port: envInt("PORT", envInt("UI_PORT", 8787)),
   },
   trends: {
     /** comma list: hackernews,reddit,devto,mock */

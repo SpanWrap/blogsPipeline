@@ -39,6 +39,16 @@ npm run ui
 
 Create runs, **upload Markdown templates**, run stages, edit outline/article JSON, approve, and publish from the browser.
 
+## Deploy on Vercel
+
+1. Push `main` to GitHub, then import the repo at [vercel.com/new](https://vercel.com/new).
+2. Leave the framework as **Other**. Vercel detects root `server.ts`.
+3. Add every variable from [`.env.vercel.example`](.env.vercel.example) in **Settings → Environment Variables** (Production + Preview). Copy `GROQ_API_KEY` and `MONGODB_URI` from your local `.env`. Set `SPANWRAP_API_URL` to the live Spanwrap site, not `localhost`.
+4. In MongoDB Atlas → **Network Access**, allow `0.0.0.0/0` (Vercel has no fixed IPs).
+5. Deploy. The review UI is the deployment URL.
+
+Long research/generate stages can exceed the Hobby timeout. Pro + Fluid (up to 300s) is recommended.
+
 ## Markdown templates (intern format)
 
 Interns can hand you a `.md` file defining structure and optional placeholders. Research writing is generated to fit that template.

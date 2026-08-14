@@ -10,7 +10,7 @@
   "scripts": {
     "pipeline": "tsx src/cli/index.ts",
     "start": "tsx src/cli/index.ts",
-    "ui": "tsx src/server/index.ts",
+    "ui": "tsx server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"

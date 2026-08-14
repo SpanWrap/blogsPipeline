@@ -9,6 +9,10 @@ coverage/
 .env
 .env.*
 !.env.example
+!.env.vercel.example
+
+# Vercel
+.vercel/
 
 # Tooling
 *.tsbuildinfo

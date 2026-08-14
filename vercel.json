@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "fluid": true,
+  "functions": {
+    "server.ts": {
+      "maxDuration": 300,
+      "includeFiles": "src/server/public/**"
+    }
+  }
+}

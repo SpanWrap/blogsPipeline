@@ -40,9 +40,9 @@ export function formatMongoError(error: unknown): string {
   ) {
     return [
       "MongoDB authentication failed.",
-      "Check MONGODB_URI username/password in pipeline/.env,",
+      "Check MONGODB_URI username/password in .env or Vercel env vars,",
       "reset the database user password in Atlas → Database Access,",
-      "and ensure Network Access allows your IP.",
+      "and ensure Network Access allows your IP (use 0.0.0.0/0 on Vercel).",
     ].join(" ");
   }
   if (lower.includes("enotfound") || lower.includes("getaddrinfo")) {
