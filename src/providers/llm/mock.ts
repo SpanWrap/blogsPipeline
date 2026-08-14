@@ -94,33 +94,60 @@ export class MockLLMProvider implements LLMProvider {
       const topic = extractField(prompt, "topic") ?? "AI agents in customer support";
       const title = `${topic}: a practical guide for founders`;
       const sources = extractSourcesFromPrompt(prompt);
-      const content = [
-        `# ${title}`,
-        "",
+      const bodySections = [
         "Customer support teams are under constant pressure to answer faster without losing quality. AI agents can help, but only when they are grounded in clear workflows and human escalation.",
-        "",
-        "## Why this matters now",
-        "",
         "Startups often treat support automation as pure cost reduction. The more useful framing is reliability: reduced wait times, consistent answers, and cleaner handoffs when a person is required.",
-        "",
-        "## What the research shows",
-        "",
         sources.length
           ? `Public sources such as ${sources[0]?.title ?? "referenced materials"} discuss how agent systems succeed when scope is limited and tools are observable.`
           : "Research-backed practice favors narrow automation first, then expansion.",
-        "",
         "Teams that skip escalation design tend to create silent failure modes. The safer pattern is supervised automation with explicit ownership.",
-        "",
-        "## How to apply it",
-        "",
-        "1. Pick one high-volume, low-risk intent and document the success criteria.",
-        "2. Wire monitoring so every automated resolution is inspectable.",
-        "3. Keep an easy path to a human for account, billing, and emotional cases.",
-        "",
-        "## Conclusion",
-        "",
+        "1. Pick one high-volume, low-risk intent and document the success criteria.\n2. Wire monitoring so every automated resolution is inspectable.\n3. Keep an easy path to a human for account, billing, and emotional cases.",
         "AI agents are useful in customer support when they are treated as production systems, not demos. Start small, measure carefully, and keep humans in the critical path.",
-      ].join("\n");
+      ];
+      let content: string;
+      if (prompt.includes("ARTICLE MARKDOWN TEMPLATE") || prompt.includes("```markdown")) {
+        // If template has placeholders, body-only content is enough (fill happens later).
+        // If structure-only, mirror common section headings from the template string.
+        const headingMatches = [...prompt.matchAll(/^##\s+(.+)$/gm)].map((m) => m[1]!.trim());
+        if (headingMatches.length >= 2 && !prompt.includes("{{body}}")) {
+          content = [
+            `# ${title}`,
+            "",
+            ...headingMatches.flatMap((h, i) => [
+              `## ${h}`,
+              "",
+              bodySections[i % bodySections.length]!,
+              "",
+            ]),
+          ].join("\n");
+        } else {
+          content = bodySections.join("\n\n");
+        }
+      } else {
+        content = [
+          `# ${title}`,
+          "",
+          bodySections[0],
+          "",
+          "## Why this matters now",
+          "",
+          bodySections[1],
+          "",
+          "## What the research shows",
+          "",
+          bodySections[2],
+          "",
+          bodySections[3],
+          "",
+          "## How to apply it",
+          "",
+          bodySections[4],
+          "",
+          "## Conclusion",
+          "",
+          bodySections[5],
+        ].join("\n");
+      }
 
       const data = {
         title,

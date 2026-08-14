@@ -9,6 +9,11 @@ import { GeneratedBlogSchema } from "@/models";
 import type { LLMProvider } from "@/providers/llm";
 import { buildGenerationPrompt } from "@/prompts/generation/v1";
 import { toSlug } from "@/utils/slug";
+import {
+  applyMarkdownTemplate,
+  describeTemplateForPrompt,
+  templateHasPlaceholders,
+} from "@/utils/template";
 
 export async function generationStage(
   brief: ContentBrief,
@@ -16,6 +21,7 @@ export async function generationStage(
   analysis: ResearchAnalysis,
   outline: BlogOutline,
   llm: LLMProvider,
+  templateMarkdown?: string | null,
 ): Promise<GeneratedBlog> {
   const known = new Set(sources.map((s) => s.id));
   const sourcesJson = JSON.stringify(
@@ -30,17 +36,21 @@ export async function generationStage(
     2,
   );
 
+  const templateGuidance = templateMarkdown?.trim()
+    ? describeTemplateForPrompt(templateMarkdown)
+    : null;
+
   const prompt = buildGenerationPrompt({
     briefJson: JSON.stringify(brief, null, 2),
     outlineJson: JSON.stringify(outline, null, 2),
     analysisJson: JSON.stringify(analysis, null, 2),
     sourcesJson,
+    templateGuidance,
   });
 
   const article = await llm.generateStructured(prompt, GeneratedBlogSchema);
   const slug = article.slug ? toSlug(article.slug) : toSlug(article.title);
 
-  // Ensure sources refer only to known research URLs / map
   const sourceById = new Map(sources.map((s) => [s.id, s]));
   const listed =
     article.sources.length > 0
@@ -58,7 +68,6 @@ export async function generationStage(
     }))
     .filter((m) => m.sourceIds.length > 0);
 
-  // Prefer canonical source URLs from research when IDs known
   const cleanedSources = listed.map((s) => {
     const match = [...sourceById.values()].find((r) => r.url === s.url);
     return {
@@ -68,9 +77,26 @@ export async function generationStage(
     };
   });
 
+  let content = article.content;
+  if (templateMarkdown?.trim() && templateHasPlaceholders(templateMarkdown)) {
+    content = applyMarkdownTemplate(templateMarkdown, {
+      title: article.title,
+      subtitle: article.subtitle,
+      slug,
+      excerpt: article.excerpt,
+      seoTitle: article.seoTitle || article.title,
+      seoDescription: article.seoDescription || article.excerpt,
+      tags: article.tags,
+      keywords: article.keywords,
+      body: article.content,
+      sources: cleanedSources,
+    });
+  }
+
   return GeneratedBlogSchema.parse({
     ...article,
     slug,
+    content,
     seoTitle: article.seoTitle || article.title,
     seoDescription: article.seoDescription || article.excerpt,
     sources: cleanedSources,

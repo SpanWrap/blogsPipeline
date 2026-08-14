@@ -28,7 +28,83 @@ cp .env.example .env
 
 With no API keys configured, mock research, mock LLM, and mock publisher are used automatically (local + CI).
 
-## Run
+**AI API keys:** set `GROQ_API_KEY` in `.env` (preferred). The pipeline uses Groq’s OpenAI-compatible API for analysis, outline, and generation (`llama-3.3-70b-versatile` by default). Also set `SERPER_API_KEY` / `TAVILY_API_KEY` if you want live web research.
+
+## Review UI
+
+```bash
+npm run ui
+# open http://127.0.0.1:8787
+```
+
+Create runs, **upload Markdown templates**, run stages, edit outline/article JSON, approve, and publish from the browser.
+
+## Markdown templates (intern format)
+
+Interns can hand you a `.md` file defining structure and optional placeholders. Research writing is generated to fit that template.
+
+Example: `examples/templates/intern-blog-v1.md`
+
+Supported placeholders:
+
+| Placeholder | Filled with |
+|-------------|-------------|
+| `{{title}}` | Article title |
+| `{{subtitle}}` | Subtitle |
+| `{{excerpt}}` | Short summary |
+| `{{body}}` | Research-based body |
+| `{{sources}}` | Markdown list of sources |
+| `{{slug}}` `{{seoTitle}}` `{{seoDescription}}` `{{tags}}` `{{keywords}}` | SEO fields |
+
+If the file has **no** placeholders, generation mirrors the template’s heading order and style as Markdown content.
+
+### CLI
+
+```bash
+npm run pipeline -- templates upload ./path/to/template.md --name "Founder blog v1"
+npm run pipeline -- templates list
+npm run pipeline -- create --topic "..." --template <templateId>
+npm run pipeline -- set-template <runId> <templateId>
+```
+
+### UI
+
+Use **Markdown templates** panel to upload a `.md` file or paste content, then pick the template when creating a run.
+
+## Hot topics (social / developer trends)
+
+Discover trending discussion themes for blog ideas. Uses **public JSON APIs** only:
+
+- Hacker News (Algolia HN API)
+- Reddit public `hot.json` feeds (configured subreddits)
+- Dev.to public articles API
+
+Does **not** scrape private Instagram/X/TikTok walls or bypass CAPTCHAs/logins.
+
+```bash
+npm run pipeline -- topics discover
+npm run pipeline -- topics list
+npm run pipeline -- topics start <topicId> --template <optionalTemplateId>
+```
+
+In the UI, open **Hot topics** → **Discover** → **Write this**.
+
+Config (`TRENDS_SOURCES`, `TRENDS_REDDIT_SUBREDDITS`, `TRENDS_LIMIT`) is documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
+## Storage
+
+Default is local JSON files (`.data/runs`). For MongoDB:
+
+```bash
+# .env
+STORAGE_BACKEND=mongodb
+MONGODB_URI=mongodb://127.0.0.1:27017
+MONGODB_DB=spanwrap_pipeline
+```
+
+CLI and UI share the same storage backend.
+
+## Run (CLI)
 
 ```bash
 # Create a run

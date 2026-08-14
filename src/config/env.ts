@@ -30,6 +30,29 @@ function resolveDataDir(): string {
     : path.join(/* turbopackIgnore: true */ process.cwd(), raw);
 }
 
+function normalizeMongoUri(uri: string): string {
+  const trimmed = uri.trim();
+  const match = trimmed.match(/^(mongodb(?:\+srv)?:\/\/)([^/?#]+)(@)(.+)$/i);
+  if (!match) return trimmed;
+  const [, scheme, userInfo, at, hostAndRest] = match;
+  const colon = userInfo!.indexOf(":");
+  if (colon < 0) return trimmed;
+  const username = userInfo!.slice(0, colon);
+  const password = userInfo!.slice(colon + 1);
+  if (!username || !password) return trimmed;
+  let userDecoded = username;
+  let passDecoded = password;
+  try {
+    userDecoded = decodeURIComponent(username);
+    passDecoded = decodeURIComponent(password);
+  } catch {
+    // keep raw
+  }
+  return `${scheme}${encodeURIComponent(userDecoded)}:${encodeURIComponent(passDecoded)}${at}${hostAndRest}`;
+}
+
+const rawMongoUri = env("MONGODB_URI");
+
 export const appConfig = {
   dataDir: resolveDataDir(),
   requestTimeoutMs: envInt("REQUEST_TIMEOUT_MS", 30_000),
@@ -41,6 +64,37 @@ export const appConfig = {
       "SpanwrapBlogPipeline/1.0 (+https://spanwrap.com; research bot; contact: pipeline)",
     )!,
   respectRobotsTxt: envBool("RESPECT_ROBOTS_TXT", true),
+  storage: {
+    /** file (default) or mongodb */
+    backend: (env("STORAGE_BACKEND", "file") === "mongodb" ? "mongodb" : "file") as
+      | "file"
+      | "mongodb",
+    mongoUri: rawMongoUri ? normalizeMongoUri(rawMongoUri) : undefined,
+    mongoDb: env("MONGODB_DB", "spanwrap_pipeline")!,
+    mongoCollection: env("MONGODB_COLLECTION", "pipeline_runs")!,
+  },
+  ui: {
+    host: env("UI_HOST", "127.0.0.1")!,
+    port: envInt("UI_PORT", 8787),
+  },
+  trends: {
+    /** comma list: hackernews,reddit,devto,mock */
+    sources: (env("TRENDS_SOURCES", "hackernews,reddit") || "hackernews,reddit")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    redditSubreddits: (
+      env(
+        "TRENDS_REDDIT_SUBREDDITS",
+        "technology,programming,MachineLearning,startups,saas,artificial",
+      ) || "technology,programming"
+    )
+      .split(",")
+      .map((s) => s.trim().replace(/^r\//, ""))
+      .filter(Boolean),
+    limit: envInt("TRENDS_LIMIT", 12),
+    cacheTtlMinutes: envInt("TRENDS_CACHE_TTL_MINUTES", 60),
+  },
   research: {
     provider: env("RESEARCH_PROVIDER", "auto") as
       | "auto"
@@ -51,10 +105,16 @@ export const appConfig = {
     tavilyApiKey: env("TAVILY_API_KEY"),
   },
   llm: {
-    provider: env("LLM_PROVIDER", "auto") as "auto" | "openai" | "mock",
-    apiKey: env("LLM_API_KEY") ?? env("OPENAI_API_KEY"),
-    baseUrl: env("LLM_BASE_URL", "https://api.openai.com/v1")!,
-    model: env("LLM_MODEL", "gpt-4o-mini")!,
+    /**
+     * auto | groq | openai | mock
+     * auto uses Groq when GROQ_API_KEY / LLM_API_KEY is set.
+     */
+    provider: env("LLM_PROVIDER", "auto") as "auto" | "groq" | "openai" | "mock",
+    apiKey:
+      env("GROQ_API_KEY") ?? env("LLM_API_KEY") ?? env("OPENAI_API_KEY"),
+    baseUrl: env("LLM_BASE_URL", "https://api.groq.com/openai/v1")!,
+    /** Good default on Groq for structured blog generation */
+    model: env("LLM_MODEL", "llama-3.3-70b-versatile")!,
   },
   spanwrap: {
     apiUrl: env("SPANWRAP_API_URL", "http://localhost:4000")!,

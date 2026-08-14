@@ -1,61 +1,43 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { appConfig } from "@/config";
-import { PipelineRun, PipelineRunSchema } from "@/models";
+import { FileRunStore } from "./file-store";
+import { MongoRunStore } from "./mongo-store";
+import type { RunStore } from "./store";
 
-export class FileRunStore {
-  constructor(private readonly rootDir = appConfig.dataDir) {}
+export type { RunStore } from "./store";
+export { FileRunStore } from "./file-store";
+export { MongoRunStore } from "./mongo-store";
 
-  private runsDir() {
-    return path.join(this.rootDir, "runs");
-  }
+let defaultStore: RunStore | null = null;
 
-  private runPath(id: string) {
-    return path.join(this.runsDir(), `${id}.json`);
-  }
-
-  async ensureReady(): Promise<void> {
-    await mkdir(this.runsDir(), { recursive: true });
-  }
-
-  async save(run: PipelineRun): Promise<PipelineRun> {
-    await this.ensureReady();
-    const parsed = PipelineRunSchema.parse({
-      ...run,
-      updatedAt: new Date().toISOString(),
-    });
-    await writeFile(this.runPath(parsed.id), JSON.stringify(parsed, null, 2), "utf8");
-    return parsed;
-  }
-
-  async get(id: string): Promise<PipelineRun | null> {
-    try {
-      const raw = await readFile(this.runPath(id), "utf8");
-      return PipelineRunSchema.parse(JSON.parse(raw));
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return null;
-      throw error;
+export function createRunStore(backend = appConfig.storage.backend): RunStore {
+  if (backend === "mongodb") {
+    const uri = appConfig.storage.mongoUri;
+    if (!uri) {
+      throw new Error(
+        "STORAGE_BACKEND=mongodb requires MONGODB_URI (e.g. mongodb://127.0.0.1:27017)",
+      );
     }
+    return new MongoRunStore(
+      uri,
+      appConfig.storage.mongoDb,
+      appConfig.storage.mongoCollection,
+    );
   }
-
-  async require(id: string): Promise<PipelineRun> {
-    const run = await this.get(id);
-    if (!run) throw new Error(`Pipeline run not found: ${id}`);
-    return run;
-  }
-
-  async list(): Promise<PipelineRun[]> {
-    await this.ensureReady();
-    const files = await readdir(this.runsDir());
-    const runs: PipelineRun[] = [];
-    for (const file of files) {
-      if (!file.endsWith(".json")) continue;
-      const raw = await readFile(path.join(this.runsDir(), file), "utf8");
-      runs.push(PipelineRunSchema.parse(JSON.parse(raw)));
-    }
-    return runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }
+  return new FileRunStore(appConfig.dataDir);
 }
 
-export const runStore = new FileRunStore();
+/** Shared store for CLI and UI (lazily created). */
+export function getRunStore(): RunStore {
+  if (!defaultStore) {
+    defaultStore = createRunStore();
+  }
+  return defaultStore;
+}
+
+/** @deprecated use getRunStore / createRunStore */
+export const runStore = {
+  save: (run: Parameters<RunStore["save"]>[0]) => getRunStore().save(run),
+  get: (id: string) => getRunStore().get(id),
+  require: (id: string) => getRunStore().require(id),
+  list: () => getRunStore().list(),
+};

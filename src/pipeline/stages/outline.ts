@@ -8,6 +8,7 @@ export async function outlineStage(
   sources: ResearchSource[],
   analysis: ResearchAnalysis,
   llm: LLMProvider,
+  templateMarkdown?: string | null,
 ): Promise<BlogOutline> {
   const sourceIds = sources.map((s) => s.id);
   const known = new Set(sourceIds);
@@ -15,6 +16,7 @@ export async function outlineStage(
     briefJson: JSON.stringify(brief, null, 2),
     analysisJson: JSON.stringify(analysis, null, 2),
     sourceIds,
+    templateMarkdown,
   });
 
   const outline = await llm.generateStructured(prompt, BlogOutlineSchema);

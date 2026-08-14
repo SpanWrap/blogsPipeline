@@ -19,24 +19,53 @@ function extractJson(text: string): unknown {
   }
 }
 
+function isGroqBaseUrl(baseUrl: string): boolean {
+  return /groq\.com/i.test(baseUrl);
+}
+
 export class OpenAICompatibleLLMProvider implements LLMProvider {
-  readonly name = "openai-compatible";
+  readonly name: string;
 
   constructor(
     private readonly apiKey = appConfig.llm.apiKey,
     private readonly baseUrl = appConfig.llm.baseUrl,
     public readonly model = appConfig.llm.model,
+    name?: string,
   ) {
     if (!this.apiKey) {
-      throw new Error("LLM_API_KEY or OPENAI_API_KEY is required for OpenAI-compatible provider");
+      throw new Error(
+        "GROQ_API_KEY, LLM_API_KEY, or OPENAI_API_KEY is required for the LLM provider",
+      );
     }
+    this.name =
+      name ??
+      (isGroqBaseUrl(this.baseUrl) || appConfig.llm.provider === "groq"
+        ? "groq"
+        : "openai-compatible");
   }
 
-  private async chat(messages: Array<{ role: string; content: string }>): Promise<string> {
+  private async chat(
+    messages: Array<{ role: string; content: string }>,
+    options?: { json?: boolean },
+  ): Promise<string> {
     return withRetry(async () => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), appConfig.requestTimeoutMs);
       try {
+        // Groq supports OpenAI-compatible JSON mode; use it for structured stages.
+        const useJsonMode =
+          options?.json &&
+          (isGroqBaseUrl(this.baseUrl) || appConfig.llm.provider === "groq");
+
+        const body: Record<string, unknown> = {
+          model: this.model,
+          temperature: 0.4,
+          messages,
+        };
+        if (useJsonMode) {
+          body.response_format = { type: "json_object" };
+        }
+
         const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           signal: controller.signal,
@@ -44,17 +73,13 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
             "Content-Type": "application/json",
             Authorization: `Bearer ${this.apiKey}`,
           },
-          body: JSON.stringify({
-            model: this.model,
-            temperature: 0.4,
-            messages,
-          }),
+          body: JSON.stringify(body),
         });
         if (!response.ok) {
-          const body = await response.text();
-          const error = new Error(`LLM HTTP ${response.status}: ${body.slice(0, 200)}`) as Error & {
-            status: number;
-          };
+          const errBody = await response.text();
+          const error = new Error(
+            `LLM HTTP ${response.status}: ${errBody.slice(0, 300)}`,
+          ) as Error & { status: number };
           error.status = response.status;
           throw error;
         }
@@ -74,6 +99,8 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
         logger.warn("Retrying LLM request", {
           attempt,
           delayMs,
+          provider: this.name,
+          model: this.model,
           error: error instanceof Error ? error.message : String(error),
         });
       },
@@ -92,13 +119,16 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     const system =
       options?.system ??
       "You are a careful research assistant. Respond with valid JSON only matching the requested schema. Never invent source IDs or URLs.";
-    const text = await this.chat([
-      { role: "system", content: system },
-      {
-        role: "user",
-        content: `${prompt}\n\nReturn ONLY valid JSON.`,
-      },
-    ]);
+    const text = await this.chat(
+      [
+        { role: "system", content: system },
+        {
+          role: "user",
+          content: `${prompt}\n\nReturn ONLY valid JSON (a single JSON object).`,
+        },
+      ],
+      { json: true },
+    );
     const parsed = extractJson(text);
     return schema.parse(parsed);
   }

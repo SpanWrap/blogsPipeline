@@ -6,7 +6,17 @@ Environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PIPELINE_DATA_DIR` | `.data` | JSON run storage root |
+| `STORAGE_BACKEND` | `file` | `file` or `mongodb` |
+| `PIPELINE_DATA_DIR` | `.data` | JSON run storage root (file backend) |
+| `MONGODB_URI` | — | Required when `STORAGE_BACKEND=mongodb` |
+| `MONGODB_DB` | `spanwrap_pipeline` | Mongo database name |
+| `MONGODB_COLLECTION` | `pipeline_runs` | Mongo collection |
+| `UI_HOST` | `127.0.0.1` | Review UI bind host |
+| `UI_PORT` | `8787` | Review UI port |
+| `TRENDS_SOURCES` | `hackernews,reddit` | Comma list: `hackernews`, `reddit`, `devto`, `mock` |
+| `TRENDS_REDDIT_SUBREDDITS` | technology,programming,… | Subreddits for Reddit hot feed |
+| `TRENDS_LIMIT` | `12` | Max ranked recommendations kept |
+| `TRENDS_CACHE_TTL_MINUTES` | `60` | Soft expiry metadata on recommendations |
 | `REQUEST_TIMEOUT_MS` | `30000` | HTTP timeout for fetch/LLM/publish |
 | `MAX_SOURCES` | `8` | Max research sources retained |
 | `MAX_FETCH_CONCURRENCY` | `2` | Parallel page fetches |
@@ -28,12 +38,15 @@ Environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `auto` | `auto` \| `openai` \| `mock` |
-| `LLM_API_KEY` / `OPENAI_API_KEY` | — | API key |
-| `LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
-| `LLM_MODEL` | `gpt-4o-mini` | Model name |
+| `LLM_PROVIDER` | `auto` | `auto` \| `groq` \| `openai` \| `mock` |
+| `GROQ_API_KEY` | — | Groq API key (preferred) |
+| `LLM_API_KEY` / `OPENAI_API_KEY` | — | Alternatives accepted by the same client |
+| `LLM_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible base URL (Groq default) |
+| `LLM_MODEL` | `llama-3.3-70b-versatile` | Chat model id |
 
-`auto` uses OpenAI-compatible when a key exists, else mock.
+Default stack is **Groq**. Set `GROQ_API_KEY` from https://console.groq.com/keys.
+
+`auto` uses Groq/OpenAI-compatible client when any of the keys above is set; otherwise mock.
 
 ## Spanwrap publishing
 

@@ -50,12 +50,14 @@ program
   .option("--audience <audience>", "Target audience", "general readers")
   .option("--tone <tone>", "Tone", "clear and professional")
   .option("--keywords <list>", "Comma-separated keywords")
+  .option("--template <id>", "Article template id")
   .action(async (opts: {
     topic?: string;
     file?: string;
     audience: string;
     tone: string;
     keywords?: string;
+    template?: string;
   }) => {
     try {
       let brief: ContentBrief;
@@ -78,9 +80,10 @@ program
         process.exitCode = 1;
         return;
       }
-      const run = await orch().create(brief);
+      const run = await orch().create(brief, { templateId: opts.template ?? null });
       console.log("Created pipeline run");
       printRun(run);
+      if (run.templateName) console.log(`template: ${run.templateName}`);
     } catch (error) {
       logger.error("create failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -211,6 +214,166 @@ program
       const article = JSON.parse(await readFile(file, "utf8"));
       const run = await orch().updateArticle(id, article);
       printRun(run);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  });
+
+const templates = program.command("templates").description("Manage Markdown article templates");
+
+templates
+  .command("list")
+  .description("List uploaded templates")
+  .action(async () => {
+    const { getTemplateStore } = await import("../services/templates.js");
+    const list = await getTemplateStore().list();
+    if (!list.length) {
+      console.log("No templates.");
+      return;
+    }
+    for (const t of list) {
+      console.log(`${t.id}\t${t.name}\t${t.filename || "-"}`);
+    }
+  });
+
+templates
+  .command("upload <file>")
+  .description("Upload a .md template file")
+  .option("-n, --name <name>", "Template name")
+  .action(async (file: string, opts: { name?: string }) => {
+    try {
+      const { uploadTemplate } = await import("../services/templates.js");
+      const markdown = await readFile(file, "utf8");
+      const base = file.split(/[\\/]/).pop() ?? file;
+      const t = await uploadTemplate({
+        name: opts.name ?? base.replace(/\.md$/i, ""),
+        markdown,
+        filename: base,
+      });
+      console.log(`Saved template ${t.id} (${t.name})`);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  });
+
+templates
+  .command("show <id>")
+  .description("Print template markdown")
+  .action(async (id: string) => {
+    try {
+      const { getTemplateStore } = await import("../services/templates.js");
+      const t = await getTemplateStore().require(id);
+      console.log(`# ${t.name} (${t.id})\n`);
+      console.log(t.markdown);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  });
+
+templates
+  .command("delete <id>")
+  .description("Delete a template")
+  .action(async (id: string) => {
+    try {
+      const { getTemplateStore } = await import("../services/templates.js");
+      const ok = await getTemplateStore().delete(id);
+      console.log(ok ? "Deleted." : "Not found.");
+      if (!ok) process.exitCode = 1;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("set-template <id> <templateId>")
+  .description("Assign a template to a run (use 'none' to clear)")
+  .action(async (id: string, templateId: string) => {
+    try {
+      const run = await orch().assignTemplate(
+        id,
+        templateId === "none" || templateId === "-" ? null : templateId,
+      );
+      printRun(run);
+      if (run.templateName) console.log(`template: ${run.templateName}`);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  });
+
+const topicsCmd = program.command("topics").description("Hot topic recommendations from social/dev feeds");
+
+topicsCmd
+  .command("discover")
+  .description("Fetch trending topics (HN, Reddit, Dev.to)")
+  .option("--limit <n>", "Max topics", "12")
+  .option("--offline", "Use mock trends (no network)")
+  .action(async (opts: { limit?: string; offline?: boolean }) => {
+    try {
+      const { discoverTopicRecommendations } = await import("../services/topic-discovery.js");
+      const { getTopicStore } = await import("../services/topic-store.js");
+      const topics = await discoverTopicRecommendations({
+        offline: Boolean(opts.offline),
+        limit: opts.limit ? Number.parseInt(opts.limit, 10) : undefined,
+      });
+      const saved = await getTopicStore().saveMany(topics);
+      console.log(`Discovered ${saved.length} topics\n`);
+      for (const t of saved) {
+        console.log(
+          `[${t.heatScore}] ${t.topic}\n  ${t.platforms.join(", ")} · ${t.id}\n  ${t.whyItMatters}\n`,
+        );
+      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  });
+
+topicsCmd
+  .command("list")
+  .description("List cached topic recommendations")
+  .action(async () => {
+    const { getTopicStore } = await import("../services/topic-store.js");
+    const list = await getTopicStore().list();
+    if (!list.length) {
+      console.log("No topics. Run: blog-pipeline topics discover");
+      return;
+    }
+    for (const t of list) {
+      console.log(`${t.heatScore}\t${t.id}\t${t.topic}`);
+    }
+  });
+
+topicsCmd
+  .command("start <topicId>")
+  .description("Create a pipeline run from a recommended topic")
+  .option("--template <id>", "Template id")
+  .option("--audience <audience>", "Audience", "startup founders and product teams")
+  .action(async (topicId: string, opts: { template?: string; audience: string }) => {
+    try {
+      const { getTopicStore } = await import("../services/topic-store.js");
+      const topic = await getTopicStore().require(topicId);
+      const run = await orch().create(
+        {
+          topic: topic.topic,
+          targetAudience: opts.audience,
+          tone: "technical but easy to understand",
+          contentType: "educational",
+          keywords: topic.keywords,
+          referenceUrls: topic.signals
+            .map((s) => s.url)
+            .filter((u): u is string => Boolean(u))
+            .slice(0, 5),
+        },
+        { templateId: opts.template ?? null },
+      );
+      console.log("Created run from hot topic");
+      printRun(run);
+      console.log(`topic: ${run.brief.topic}`);
     } catch (error) {
       console.error(error instanceof Error ? error.message : error);
       process.exitCode = 1;

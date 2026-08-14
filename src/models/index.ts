@@ -11,6 +11,18 @@ export const ContentBriefSchema = z.object({
 
 export type ContentBrief = z.infer<typeof ContentBriefSchema>;
 
+export const ArticleTemplateSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1),
+  filename: z.string().default(""),
+  markdown: z.string().min(1),
+  notes: z.string().nullable().default(null),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export type ArticleTemplate = z.infer<typeof ArticleTemplateSchema>;
+
 export const SourceSchema = z.object({
   id: z.string(),
   url: z.string().url(),
@@ -170,6 +182,10 @@ export const PipelineRunSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   brief: ContentBriefSchema,
+  /** Optional article template selected for this run (snapshot stored for stable generation). */
+  templateId: z.string().nullable().default(null),
+  templateName: z.string().nullable().default(null),
+  templateMarkdown: z.string().nullable().default(null),
   sources: z.array(SourceSchema).default([]),
   analysis: ResearchAnalysisSchema.nullable().default(null),
   outline: BlogOutlineSchema.nullable().default(null),
@@ -197,3 +213,5 @@ export type PublishableBlog = {
   publishedAt: string | null;
   sources: Array<{ title: string; url: string; sourceName?: string }>;
 };
+
+export * from "./topics";

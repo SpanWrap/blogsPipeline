@@ -12,7 +12,8 @@ import { createLLMProvider, type LLMProvider } from "@/providers/llm";
 import { createPublisher, type Publisher } from "@/providers/publishing";
 import type { ResearchProvider } from "@/providers/research";
 import { logger } from "@/services/logger";
-import { FileRunStore, runStore as defaultStore } from "@/services/storage";
+import { getRunStore, type RunStore } from "@/services/storage";
+import { getTemplateStore, type TemplateStore } from "@/services/templates";
 import { createId, createIdempotencyKey } from "@/utils/idempotency";
 import {
   analysisStage,
@@ -25,7 +26,8 @@ import {
 import { completeStage, failStage, setStatus, startStage } from "./state";
 
 export type OrchestratorDeps = {
-  store?: FileRunStore;
+  store?: RunStore;
+  templateStore?: TemplateStore;
   llm?: LLMProvider;
   publisher?: Publisher;
   researchProvider?: ResearchProvider;
@@ -42,31 +44,53 @@ const EDITABLE_STATUSES: PipelineStatus[] = [
   "PUBLISH_FAILED",
 ];
 
+export type CreateRunOptions = {
+  templateId?: string | null;
+};
+
 export class BlogPipelineOrchestrator {
-  private readonly store: FileRunStore;
+  private readonly store: RunStore;
+  private readonly templateStore: TemplateStore;
   private readonly llm: LLMProvider;
   private readonly publisher: Publisher;
   private readonly researchProvider?: ResearchProvider;
   private readonly offlineExtract: boolean;
 
   constructor(deps: OrchestratorDeps = {}) {
-    this.store = deps.store ?? defaultStore;
+    this.store = deps.store ?? getRunStore();
+    this.templateStore = deps.templateStore ?? getTemplateStore();
     this.llm = deps.llm ?? createLLMProvider();
     this.publisher = deps.publisher ?? createPublisher();
     this.researchProvider = deps.researchProvider;
     this.offlineExtract = deps.offlineExtract ?? false;
   }
 
-  async create(briefInput: ContentBrief): Promise<PipelineRun> {
+  async create(
+    briefInput: ContentBrief,
+    options: CreateRunOptions = {},
+  ): Promise<PipelineRun> {
     const brief = ContentBriefSchema.parse(briefInput);
     const id = createId("run");
     const now = new Date().toISOString();
+    let templateId: string | null = options.templateId ?? null;
+    let templateName: string | null = null;
+    let templateMarkdown: string | null = null;
+
+    if (templateId) {
+      const tpl = await this.templateStore.require(templateId);
+      templateName = tpl.name;
+      templateMarkdown = tpl.markdown;
+    }
+
     const run: PipelineRun = {
       id,
       status: "CREATED",
       createdAt: now,
       updatedAt: now,
       brief,
+      templateId,
+      templateName,
+      templateMarkdown,
       sources: [],
       analysis: null,
       outline: null,
@@ -79,6 +103,34 @@ export class BlogPipelineOrchestrator {
       idempotencyKey: createIdempotencyKey([id, brief.topic, "publish"]),
     };
     return this.store.save(run);
+  }
+
+  async assignTemplate(id: string, templateId: string | null): Promise<PipelineRun> {
+    const run = await this.store.require(id);
+    if (["PUBLISHED", "CANCELLED"].includes(run.status)) {
+      throw new Error(`Cannot change template in status ${run.status}`);
+    }
+    if (!templateId) {
+      return this.store.save({
+        ...run,
+        templateId: null,
+        templateName: null,
+        templateMarkdown: null,
+        outline: null,
+        article: null,
+        quality: null,
+      });
+    }
+    const tpl = await this.templateStore.require(templateId);
+    return this.store.save({
+      ...run,
+      templateId: tpl.id,
+      templateName: tpl.name,
+      templateMarkdown: tpl.markdown,
+      outline: null,
+      article: null,
+      quality: null,
+    });
   }
 
   async get(id: string): Promise<PipelineRun> {
@@ -145,7 +197,13 @@ export class BlogPipelineOrchestrator {
     run = startStage(run, "outline", { provider: this.llm.name, model: this.llm.model });
     run = await this.store.save(run);
     try {
-      const outline = await outlineStage(run.brief, run.sources, analysis, this.llm);
+      const outline = await outlineStage(
+        run.brief,
+        run.sources,
+        analysis,
+        this.llm,
+        run.templateMarkdown,
+      );
       let next: PipelineRun = {
         ...run,
         outline,
@@ -199,6 +257,7 @@ export class BlogPipelineOrchestrator {
         analysis,
         outline,
         this.llm,
+        run.templateMarkdown,
       );
       let next: PipelineRun = { ...run, article, quality: null };
       next = completeStage(next, "generation", {
