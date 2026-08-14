@@ -1,4 +1,4 @@
-import type { PipelineRun, PipelineStatus, StageRecord } from "@/models";
+import type { PipelineRun, PipelineStatus, StageRecord } from "../models";
 
 export function nowIso(): string {
   return new Date().toISOString();

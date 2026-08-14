@@ -1,4 +1,4 @@
-import type { ArticleTemplate } from "@/models";
+import type { ArticleTemplate } from "../models";
 
 export interface TemplateStore {
   save(template: ArticleTemplate): Promise<ArticleTemplate>;

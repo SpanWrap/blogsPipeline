@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { appConfig } from "@/config";
-import { PipelineRun, PipelineRunSchema } from "@/models";
+import { appConfig } from "../config";
+import { PipelineRun, PipelineRunSchema } from "../models";
 import type { RunStore } from "./store";
 
 export class FileRunStore implements RunStore {

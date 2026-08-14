@@ -1,9 +1,9 @@
 import * as cheerio from "cheerio";
 import robotsParser from "robots-parser";
-import { appConfig } from "@/config";
-import { logger } from "@/services/logger";
-import { withRetry } from "@/utils/retry";
-import { assertSafeUrl, normalizeUrl } from "@/utils/url";
+import { appConfig } from "../config";
+import { logger } from "./logger";
+import { withRetry } from "../utils/retry";
+import { assertSafeUrl, normalizeUrl } from "../utils/url";
 
 export type ExtractedPage = {
   url: string;

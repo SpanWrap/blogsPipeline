@@ -1,6 +1,6 @@
-import { appConfig } from "@/config";
-import { ArticleTemplate, ArticleTemplateSchema } from "@/models";
-import { createId } from "@/utils/idempotency";
+import { appConfig } from "../config";
+import { ArticleTemplate, ArticleTemplateSchema } from "../models";
+import { createId } from "../utils/idempotency";
 import { FileTemplateStore } from "./file-template-store";
 import { MongoTemplateStore } from "./mongo-template-store";
 import type { TemplateStore } from "./template-store";

@@ -1,4 +1,4 @@
-import { appConfig } from "@/config";
+import { appConfig } from "../../config";
 import type { LLMProvider } from "./types";
 import { MockLLMProvider } from "./mock";
 import { OpenAICompatibleLLMProvider } from "./openai-compatible";

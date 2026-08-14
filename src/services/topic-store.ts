@@ -1,8 +1,8 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { type Collection, type Document } from "mongodb";
-import { appConfig } from "@/config";
-import { TopicRecommendation, TopicRecommendationSchema } from "@/models";
+import { appConfig } from "../config";
+import { TopicRecommendation, TopicRecommendationSchema } from "../models";
 import { connectMongo, formatMongoError } from "./mongo-connection";
 
 export interface TopicStore {

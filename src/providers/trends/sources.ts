@@ -1,4 +1,4 @@
-import type { TrendSignal } from "@/models";
+import type { TrendSignal } from "../../models";
 import type { TrendDiscoveryContext, TrendProvider } from "./types";
 
 async function fetchJson<T>(

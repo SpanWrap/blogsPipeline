@@ -1,4 +1,4 @@
-import type { PipelineRun } from "@/models";
+import type { PipelineRun } from "../models";
 
 export interface RunStore {
   save(run: PipelineRun): Promise<PipelineRun>;

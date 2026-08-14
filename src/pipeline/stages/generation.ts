@@ -4,16 +4,16 @@ import type {
   GeneratedBlog,
   ResearchAnalysis,
   ResearchSource,
-} from "@/models";
-import { GeneratedBlogSchema } from "@/models";
-import type { LLMProvider } from "@/providers/llm";
-import { buildGenerationPrompt } from "@/prompts/generation/v1";
-import { toSlug } from "@/utils/slug";
+} from "../../models";
+import { GeneratedBlogSchema } from "../../models";
+import type { LLMProvider } from "../../providers/llm";
+import { buildGenerationPrompt } from "../../prompts/generation/v1";
+import { toSlug } from "../../utils/slug";
 import {
   applyMarkdownTemplate,
   describeTemplateForPrompt,
   templateHasPlaceholders,
-} from "@/utils/template";
+} from "../../utils/template";
 
 export async function generationStage(
   brief: ContentBrief,

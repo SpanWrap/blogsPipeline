@@ -2,13 +2,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { appConfig } from "@/config";
-import { ContentBriefSchema } from "@/models";
-import { createOrchestrator } from "@/pipeline";
-import { logger } from "@/services/logger";
-import { getTemplateStore, uploadTemplate } from "@/services/templates";
-import { discoverTopicRecommendations } from "@/services/topic-discovery";
-import { getTopicStore } from "@/services/topic-store";
+import { appConfig } from "../config";
+import { ContentBriefSchema } from "../models";
+import { createOrchestrator } from "../pipeline";
+import { logger } from "../services/logger";
+import { getTemplateStore, uploadTemplate } from "../services/templates";
+import { discoverTopicRecommendations } from "../services/topic-discovery";
+import { getTopicStore } from "../services/topic-store";
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "public");
 
@@ -293,12 +293,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
   }
 }
 
-export function startUiServer() {
+export function createUiServer() {
   const host = appConfig.ui.host;
   const port = appConfig.ui.port;
-  const onVercel = Boolean(process.env.VERCEL);
 
-  const server = createServer(async (req, res) => {
+  return createServer(async (req, res) => {
     const forwardedProto = req.headers["x-forwarded-proto"];
     const proto =
       (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto) ===
@@ -314,24 +313,20 @@ export function startUiServer() {
     }
     return serveStatic(res, url.pathname);
   });
+}
 
-  const onListen = () => {
-    const url = onVercel ? `port ${port}` : `http://${host}:${port}`;
+export function startUiServer() {
+  const host = appConfig.ui.host;
+  const port = appConfig.ui.port;
+  const server = createUiServer();
+
+  server.listen(port, host, () => {
     logger.info("Pipeline UI listening", {
-      url,
+      url: `http://${host}:${port}`,
       storage: appConfig.storage.backend,
     });
-    if (!onVercel) {
-      console.log(`\nPipeline UI → http://${host}:${port}\n`);
-    }
-  };
-
-  // Vercel intercepts listen() and ignores host/port; do not bind 127.0.0.1.
-  if (onVercel) {
-    server.listen(port, onListen);
-  } else {
-    server.listen(port, host, onListen);
-  }
+    console.log(`\nPipeline UI → http://${host}:${port}\n`);
+  });
 
   return server;
 }

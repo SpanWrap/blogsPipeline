@@ -1,4 +1,4 @@
-import { appConfig } from "@/config";
+import { appConfig } from "../config";
 import { FileRunStore } from "./file-store";
 import { MongoRunStore } from "./mongo-store";
 import type { RunStore } from "./store";

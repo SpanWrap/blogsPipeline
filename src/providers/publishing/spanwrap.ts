@@ -1,7 +1,7 @@
-import { appConfig } from "@/config";
-import type { PublishResult, PublishableBlog } from "@/models";
-import { logger } from "@/services/logger";
-import { withRetry } from "@/utils/retry";
+import { appConfig } from "../../config";
+import type { PublishResult, PublishableBlog } from "../../models";
+import { logger } from "../../services/logger";
+import { withRetry } from "../../utils/retry";
 import type { Publisher } from "./types";
 
 /**

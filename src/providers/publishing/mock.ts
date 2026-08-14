@@ -1,4 +1,4 @@
-import type { PublishResult, PublishableBlog } from "@/models";
+import type { PublishResult, PublishableBlog } from "../../models";
 import type { Publisher } from "./types";
 
 const publishedKeys = new Map<string, PublishResult>();

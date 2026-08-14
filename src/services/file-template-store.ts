@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { appConfig } from "@/config";
-import { ArticleTemplate, ArticleTemplateSchema } from "@/models";
+import { appConfig } from "../config";
+import { ArticleTemplate, ArticleTemplateSchema } from "../models";
 import type { TemplateStore } from "./template-store";
 
 export class FileTemplateStore implements TemplateStore {

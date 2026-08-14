@@ -1,9 +1,9 @@
-import type { TopicRecommendation, TrendSignal } from "@/models";
-import { TopicRecommendationSchema } from "@/models";
-import { createTrendProviders, type TrendProvider } from "@/providers/trends";
-import { appConfig } from "@/config";
-import { createId } from "@/utils/idempotency";
-import { logger } from "@/services/logger";
+import type { TopicRecommendation, TrendSignal } from "../models";
+import { TopicRecommendationSchema } from "../models";
+import { createTrendProviders, type TrendProvider } from "../providers/trends";
+import { appConfig } from "../config";
+import { createId } from "../utils/idempotency";
+import { logger } from "./logger";
 
 function normalizeTitle(title: string): string {
   return title

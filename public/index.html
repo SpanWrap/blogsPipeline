@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spanwrap Blog Pipeline</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div>
+          <p class="brand">Spanwrap Pipeline</p>
+          <h1>Blog content runs</h1>
+        </div>
+        <div id="health" class="health">Loading…</div>
+      </header>
+
+      <section class="panel topics">
+        <div class="panel-head">
+          <h2>Hot topics</h2>
+          <button type="button" id="discover-topics" class="btn primary">Discover</button>
+        </div>
+        <p class="hint">
+          Pulls trending posts from public feeds (Hacker News, Reddit, Dev.to when enabled)—
+          not private social scrapers. Ranked recommendations can start a blog pipeline run.
+        </p>
+        <ul id="topic-list" class="topic-list"></ul>
+      </section>
+
+      <section class="panel create">
+        <h2>New run</h2>
+        <form id="create-form" class="form-grid">
+          <label>
+            Topic
+            <input name="topic" required placeholder="AI agents in customer support" />
+          </label>
+          <label>
+            Audience
+            <input name="targetAudience" value="startup founders" />
+          </label>
+          <label>
+            Tone
+            <input name="tone" value="technical but easy to understand" />
+          </label>
+          <label>
+            Keywords (comma-separated)
+            <input name="keywords" placeholder="AI agents, customer support" />
+          </label>
+          <label class="full">
+            Article template
+            <select name="templateId" id="template-select">
+              <option value="">None (default structure)</option>
+            </select>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">Create run</button>
+            <button type="button" id="create-and-run" class="btn">Create & run to review</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel templates">
+        <div class="panel-head">
+          <h2>Markdown templates</h2>
+        </div>
+        <p class="hint">
+          Upload <code>.md</code> templates from interns. Generated articles follow the structure.
+          Optional placeholders: <code>{{title}}</code>, <code>{{body}}</code>, <code>{{sources}}</code>, etc.
+        </p>
+        <form id="template-form" class="form-grid">
+          <label>
+            Name
+            <input name="name" placeholder="Founder blog v1" required />
+          </label>
+          <label>
+            Markdown file
+            <input name="file" type="file" accept=".md,text/markdown,text/plain" />
+          </label>
+          <label class="full">
+            Or paste markdown
+            <textarea name="markdown" placeholder="# {{title}}&#10;&#10;## Hook&#10;…&#10;&#10;{{body}}&#10;&#10;## Sources&#10;{{sources}}"></textarea>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">Save template</button>
+          </div>
+        </form>
+        <ul id="template-list" class="template-list"></ul>
+      </section>
+
+      <div class="layout">
+        <aside class="panel list">
+          <div class="panel-head">
+            <h2>Runs</h2>
+            <button type="button" id="refresh" class="btn ghost">Refresh</button>
+          </div>
+          <ul id="run-list"></ul>
+        </aside>
+
+        <main class="panel detail" id="detail">
+          <p class="empty">Select a run to inspect sources, outline, article, and actions.</p>
+        </main>
+      </div>
+
+      <p id="toast" class="toast" hidden></p>
+    </div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

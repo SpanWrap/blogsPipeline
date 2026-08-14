@@ -1,6 +1,6 @@
-import { appConfig } from "@/config";
-import type { ContentBrief } from "@/models";
-import { isValidHttpUrl } from "@/utils/url";
+import { appConfig } from "../../config";
+import type { ContentBrief } from "../../models";
+import { isValidHttpUrl } from "../../utils/url";
 import type { ResearchDiscovery, ResearchProvider } from "./types";
 
 export class SerperResearchProvider implements ResearchProvider {

@@ -1,4 +1,4 @@
-import type { PublishResult, PublishableBlog } from "@/models";
+import type { PublishResult, PublishableBlog } from "../../models";
 
 export interface Publisher {
   readonly name: string;

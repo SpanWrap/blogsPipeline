@@ -1,15 +1,15 @@
-import { appConfig } from "@/config";
-import type { ContentBrief, ResearchSource } from "@/models";
+import { appConfig } from "../../config";
+import type { ContentBrief, ResearchSource } from "../../models";
 import {
   createResearchProvider,
   DirectURLProvider,
   type ResearchDiscovery,
   type ResearchProvider,
-} from "@/providers/research";
-import { fetchAndExtract } from "@/services/extraction";
-import { logger } from "@/services/logger";
-import { createId } from "@/utils/idempotency";
-import { normalizeUrl, sourceNameFromUrl } from "@/utils/url";
+} from "../../providers/research";
+import { fetchAndExtract } from "../../services/extraction";
+import { logger } from "../../services/logger";
+import { createId } from "../../utils/idempotency";
+import { normalizeUrl, sourceNameFromUrl } from "../../utils/url";
 
 function scoreRelevance(brief: ContentBrief, d: ResearchDiscovery, content: string): number {
   const base = d.relevanceScore ?? 0.5;

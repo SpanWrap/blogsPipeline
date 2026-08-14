@@ -1,4 +1,4 @@
-import { appConfig } from "@/config";
+import { appConfig } from "../../config";
 import type { ResearchProvider } from "./types";
 import { MockResearchProvider } from "./mock";
 import { SerperResearchProvider, TavilyResearchProvider } from "./web-search";

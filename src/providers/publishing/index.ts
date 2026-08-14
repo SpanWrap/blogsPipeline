@@ -1,4 +1,4 @@
-import { appConfig } from "@/config";
+import { appConfig } from "../../config";
 import type { Publisher } from "./types";
 import { MockPublisher } from "./mock";
 import { SpanwrapPublisher } from "./spanwrap";

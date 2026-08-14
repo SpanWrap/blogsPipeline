@@ -1,5 +1,5 @@
 import { type Collection, type Document } from "mongodb";
-import { PipelineRun, PipelineRunSchema } from "@/models";
+import { PipelineRun, PipelineRunSchema } from "../models";
 import type { RunStore } from "./store";
 import { connectMongo, formatMongoError } from "./mongo-connection";
 

@@ -1,6 +1,6 @@
 import { type Collection, type Document } from "mongodb";
-import { appConfig } from "@/config";
-import { ArticleTemplate, ArticleTemplateSchema } from "@/models";
+import { appConfig } from "../config";
+import { ArticleTemplate, ArticleTemplateSchema } from "../models";
 import type { TemplateStore } from "./template-store";
 import { connectMongo, formatMongoError } from "./mongo-connection";
 

@@ -1,9 +1,11 @@
 /**
- * Vercel + local UI entrypoint.
- * Vercel detects server.ts (project root) and captures server.listen().
+ * Vercel detects this file by name and by a top-level server.listen() / default export.
  */
-import { startUiServer } from "./src/server/index";
+import { createUiServer } from "./src/server/index";
 
 export const maxDuration = 300;
 
-startUiServer();
+const server = createUiServer();
+server.listen(Number(process.env.PORT ?? 8787));
+
+export default server;

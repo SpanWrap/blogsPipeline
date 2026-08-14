@@ -1,4 +1,4 @@
-import type { ContentBrief, ResearchSource } from "@/models";
+import type { ContentBrief, ResearchSource } from "../../models";
 
 export type ResearchDiscovery = {
   url: string;

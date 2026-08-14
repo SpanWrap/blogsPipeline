@@ -1,7 +1,7 @@
-import type { ContentBrief, ResearchAnalysis, ResearchSource } from "@/models";
-import { ResearchAnalysisSchema } from "@/models";
-import type { LLMProvider } from "@/providers/llm";
-import { buildAnalysisPrompt } from "@/prompts/analysis/v1";
+import type { ContentBrief, ResearchAnalysis, ResearchSource } from "../../models";
+import { ResearchAnalysisSchema } from "../../models";
+import type { LLMProvider } from "../../providers/llm";
+import { buildAnalysisPrompt } from "../../prompts/analysis/v1";
 
 export async function analysisStage(
   brief: ContentBrief,

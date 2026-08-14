@@ -1,4 +1,4 @@
-import type { ContentBrief } from "@/models";
+import type { ContentBrief } from "../../models";
 import type { ResearchDiscovery, ResearchProvider } from "./types";
 
 /**

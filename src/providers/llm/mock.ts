@@ -5,8 +5,8 @@ import {
   ResearchAnalysisSchema,
   type ContentBrief,
   type ResearchSource,
-} from "@/models";
-import { toSlug } from "@/utils/slug";
+} from "../../models";
+import { toSlug } from "../../utils/slug";
 import type { LLMProvider } from "./types";
 
 /**

@@ -1,5 +1,5 @@
-import type { GeneratedBlog, PublishResult, PublishableBlog } from "@/models";
-import type { Publisher } from "@/providers/publishing";
+import type { GeneratedBlog, PublishResult, PublishableBlog } from "../../models";
+import type { Publisher } from "../../providers/publishing";
 import sanitizeHtml from "sanitize-html";
 
 function sanitizeContent(content: string): string {

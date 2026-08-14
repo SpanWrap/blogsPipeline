@@ -3,8 +3,8 @@ import type {
   QualityIssue,
   QualityResult,
   ResearchSource,
-} from "@/models";
-import { isValidHttpUrl } from "@/utils/url";
+} from "../../models";
+import { isValidHttpUrl } from "../../utils/url";
 
 function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;

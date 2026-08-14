@@ -1,7 +1,7 @@
 import type { z } from "zod";
-import { appConfig } from "@/config";
-import { logger } from "@/services/logger";
-import { withRetry } from "@/utils/retry";
+import { appConfig } from "../../config";
+import { logger } from "../../services/logger";
+import { withRetry } from "../../utils/retry";
 import type { LLMProvider } from "./types";
 
 function extractJson(text: string): unknown {

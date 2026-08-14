@@ -1,4 +1,4 @@
-import type { TrendSignal } from "@/models";
+import type { TrendSignal } from "../../models";
 
 export type TrendDiscoveryContext = {
   limit?: number;
