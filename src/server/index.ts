@@ -51,10 +51,24 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
 }
 
 async function serveStatic(res: ServerResponse, urlPath: string) {
+  const traced = tracedStatic[urlPath as keyof typeof tracedStatic];
+  if (traced) {
+    try {
+      const data = await readFile(traced);
+      const ext = path.extname(traced.pathname);
+      res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
+      res.end(data);
+      return;
+    } catch {
+      // fall through to path candidates
+    }
+  }
+
   const rel = urlPath === "/" ? "/index.html" : urlPath;
   for (const publicDir of publicCandidates) {
-    const filePath = path.normalize(path.join(publicDir, rel));
-    if (!filePath.startsWith(path.normalize(publicDir + path.sep)) && filePath !== publicDir) {
+    const root = path.normalize(publicDir);
+    const filePath = path.normalize(path.join(root, rel));
+    if (!filePath.startsWith(root + path.sep) && filePath !== root) {
       continue;
     }
     try {
