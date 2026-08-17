@@ -10,7 +10,20 @@ import { getTemplateStore, uploadTemplate } from "../services/templates";
 import { discoverTopicRecommendations } from "../services/topic-discovery";
 import { getTopicStore } from "../services/topic-store";
 
-const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "public");
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const publicCandidates = [
+  path.join(moduleDir, "public"),
+  path.join(process.cwd(), "public"),
+  path.join(process.cwd(), "src/server/public"),
+];
+
+/** Explicit URLs so Vercel file tracing includes these assets in the function bundle. */
+const tracedStatic = {
+  "/": new URL("./public/index.html", import.meta.url),
+  "/index.html": new URL("./public/index.html", import.meta.url),
+  "/styles.css": new URL("./public/styles.css", import.meta.url),
+  "/app.js": new URL("./public/app.js", import.meta.url),
+} as const;
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -39,19 +52,22 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
 
 async function serveStatic(res: ServerResponse, urlPath: string) {
   const rel = urlPath === "/" ? "/index.html" : urlPath;
-  const filePath = path.normalize(path.join(publicDir, rel));
-  if (!filePath.startsWith(publicDir)) {
-    res.writeHead(403).end("Forbidden");
-    return;
+  for (const publicDir of publicCandidates) {
+    const filePath = path.normalize(path.join(publicDir, rel));
+    if (!filePath.startsWith(path.normalize(publicDir + path.sep)) && filePath !== publicDir) {
+      continue;
+    }
+    try {
+      const data = await readFile(filePath);
+      const ext = path.extname(filePath);
+      res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
+      res.end(data);
+      return;
+    } catch {
+      // try next candidate
+    }
   }
-  try {
-    const data = await readFile(filePath);
-    const ext = path.extname(filePath);
-    res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
-    res.end(data);
-  } catch {
-    res.writeHead(404).end("Not found");
-  }
+  res.writeHead(404).end("Not found");
 }
 
 function orch() {
@@ -297,21 +313,33 @@ export function createUiServer() {
   const host = appConfig.ui.host;
   const port = appConfig.ui.port;
 
-  return createServer(async (req, res) => {
-    const forwardedProto = req.headers["x-forwarded-proto"];
-    const proto =
-      (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto) ===
-      "https"
-        ? "https"
-        : "http";
-    const origin = req.headers.host
-      ? `${proto}://${req.headers.host}`
-      : `http://${host}:${port}`;
-    const url = new URL(req.url ?? "/", origin);
-    if (url.pathname.startsWith("/api/")) {
-      return handleApi(req, res, url);
-    }
-    return serveStatic(res, url.pathname);
+  return createServer((req, res) => {
+    void (async () => {
+      try {
+        const forwardedProto = req.headers["x-forwarded-proto"];
+        const proto =
+          (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto) ===
+          "https"
+            ? "https"
+            : "http";
+        const origin = req.headers.host
+          ? `${proto}://${req.headers.host}`
+          : `http://${host}:${port}`;
+        const url = new URL(req.url ?? "/", origin);
+        if (url.pathname.startsWith("/api/")) {
+          await handleApi(req, res, url);
+          return;
+        }
+        await serveStatic(res, url.pathname);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("Unhandled request error", { error: message });
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Internal Server Error");
+        }
+      }
+    })();
   });
 }
 
