@@ -9,9 +9,9 @@
   },
   "scripts": {
     "pipeline": "tsx src/cli/index.ts",
-    "dev": "tsx server.ts",
+    "dev": "tsx local-server.ts",
     "start": "tsx src/cli/index.ts",
-    "ui": "tsx server.ts",
+    "ui": "tsx local-server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"

@@ -16,6 +16,12 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["server.ts", "src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"],
+  "include": [
+    "local-server.ts",
+    "api/**/*.ts",
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "vitest.config.ts"
+  ],
   "exclude": ["node_modules", ".data"]
 }
