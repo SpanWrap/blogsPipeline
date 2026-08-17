@@ -17,8 +17,7 @@
     }
   },
   "include": [
-    "local-server.ts",
-    "api/**/*.ts",
+    "server.ts",
     "src/**/*.ts",
     "tests/**/*.ts",
     "vitest.config.ts"

@@ -42,7 +42,7 @@ Create runs, **upload Markdown templates**, run stages, edit outline/article JSO
 ## Deploy on Vercel
 
 1. Push `main` to GitHub, then import the repo at [vercel.com/new](https://vercel.com/new).
-2. Leave the framework as **Other**. Static UI comes from `public/`; API routes from `api/`.
+2. Leave the framework as **Other**. Entrypoint is root `server.ts` (`package.json` `"main"`).
 3. Add every variable from [`.env.vercel.example`](.env.vercel.example) in **Settings → Environment Variables** (Production + Preview). Copy `GROQ_API_KEY` and `MONGODB_URI` from your local `.env`. Set `SPANWRAP_API_URL` to the live Spanwrap site, not `localhost`.
 4. In MongoDB Atlas → **Network Access**, allow `0.0.0.0/0` (Vercel has no fixed IPs).
 5. Deploy. The review UI is the deployment URL.

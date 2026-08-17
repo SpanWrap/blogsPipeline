@@ -4,14 +4,15 @@
   "private": true,
   "description": "Standalone blog research and generation pipeline that publishes approved posts to Spanwrap via HTTP",
   "type": "module",
+  "main": "server.ts",
   "bin": {
     "blog-pipeline": "./src/cli/index.ts"
   },
   "scripts": {
     "pipeline": "tsx src/cli/index.ts",
-    "dev": "tsx local-server.ts",
+    "dev": "tsx server.ts",
     "start": "tsx src/cli/index.ts",
-    "ui": "tsx local-server.ts",
+    "ui": "tsx server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
