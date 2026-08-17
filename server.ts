@@ -1,14 +1,45 @@
 /**
  * Vercel + local UI entrypoint.
- * Vercel requires one of server.ts / app.ts / index.ts and a default export
- * that is a function or HTTP server, plus server.listen().
+ *
+ * Vercel detects this file by name and by a top-level server.listen().
+ * Do NOT default-export the http.Server — Vercel would invoke the object as a
+ * (req, res) handler and return INTERNAL_FUNCTION_INVOCATION_FAILED.
+ * Do NOT list this file under vercel.json "functions" (that glob is for /api).
  */
-import { createUiServer } from "./src/ui-server/index";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Server } from "node:http";
 
 export const maxDuration = 300;
 
-const server = createUiServer();
+let innerPromise: Promise<Server> | null = null;
 
-export default server;
+function getInner(): Promise<Server> {
+  if (!innerPromise) {
+    innerPromise = import("./src/ui-server/index")
+      .then((m) => m.createUiServer())
+      .catch((error) => {
+        innerPromise = null;
+        throw error;
+      });
+  }
+  return innerPromise;
+}
+
+const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+  void (async () => {
+    try {
+      const ui = await getInner();
+      ui.emit("request", req, res);
+    } catch (error) {
+      const message = error instanceof Error ? error.stack ?? error.message : String(error);
+      console.error("Pipeline boot failure:", message);
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.end(`Pipeline boot failure\n\n${message}`);
+      }
+    }
+  })();
+});
 
 server.listen(Number(process.env.PORT ?? 8787));
