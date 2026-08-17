@@ -14,7 +14,9 @@ export function createRunStore(backend = appConfig.storage.backend): RunStore {
     const uri = appConfig.storage.mongoUri;
     if (!uri) {
       throw new Error(
-        "STORAGE_BACKEND=mongodb requires MONGODB_URI (e.g. mongodb://127.0.0.1:27017)",
+        process.env.VERCEL
+          ? "Vercel deploys need MONGODB_URI (Atlas). File storage is ephemeral on serverless."
+          : "STORAGE_BACKEND=mongodb requires MONGODB_URI (e.g. mongodb://127.0.0.1:27017)",
       );
     }
     return new MongoRunStore(

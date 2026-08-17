@@ -9,6 +9,7 @@ import { GeneratedBlogSchema } from "../../models";
 import type { LLMProvider } from "../../providers/llm";
 import { buildGenerationPrompt } from "../../prompts/generation/v1";
 import { toSlug } from "../../utils/slug";
+import { resolveFeaturedImage } from "../../utils/images";
 import {
   applyMarkdownTemplate,
   describeTemplateForPrompt,
@@ -101,5 +102,10 @@ export async function generationStage(
     seoDescription: article.seoDescription || article.excerpt,
     sources: cleanedSources,
     sourceMap,
+    featuredImage: resolveFeaturedImage({
+      featuredImage: article.featuredImage,
+      content,
+      sourceUrls: cleanedSources.map((s) => s.url),
+    }),
   });
 }

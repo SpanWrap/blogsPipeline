@@ -2,11 +2,13 @@ import {
   BlogOutlineSchema,
   ContentBriefSchema,
   GeneratedBlogSchema,
+  parsePublishTargets,
   type BlogOutline,
   type ContentBrief,
   type GeneratedBlog,
   type PipelineRun,
   type PipelineStatus,
+  type PublishTarget,
 } from "../models";
 import { createLLMProvider, type LLMProvider } from "../providers/llm";
 import { createPublisher, type Publisher } from "../providers/publishing";
@@ -96,7 +98,9 @@ export class BlogPipelineOrchestrator {
       outline: null,
       article: null,
       quality: null,
+      publishTargets: ["spanwrap"],
       publishResult: null,
+      publishResults: [],
       stages: [],
       reviewNotes: null,
       error: null,
@@ -287,6 +291,32 @@ export class BlogPipelineOrchestrator {
     });
   }
 
+  /** Save Quality-tab edits (draft + destination sites) without resetting review status. */
+  async saveReview(
+    id: string,
+    input: { article?: GeneratedBlog; publishTargets?: unknown },
+  ): Promise<PipelineRun> {
+    const run = await this.store.require(id);
+    if (["PUBLISHED", "CANCELLED"].includes(run.status)) {
+      throw new Error(`Cannot edit review in status ${run.status}`);
+    }
+    if (!run.article && !input.article) {
+      throw new Error("No article to save");
+    }
+    const article = input.article ? GeneratedBlogSchema.parse(input.article) : run.article;
+    const publishTargets =
+      input.publishTargets !== undefined
+        ? parsePublishTargets(input.publishTargets)
+        : run.publishTargets?.length
+          ? run.publishTargets
+          : (["spanwrap"] as PublishTarget[]);
+    return this.store.save({
+      ...run,
+      article,
+      publishTargets,
+    });
+  }
+
   async qualityCheck(id: string): Promise<PipelineRun> {
     let run = await this.store.require(id);
     if (!run.article) throw new Error("Article required for quality check");
@@ -345,33 +375,64 @@ export class BlogPipelineOrchestrator {
     if (!run.article) throw new Error("No approved article to publish");
     const article = run.article;
 
-    run = startStage(run, "publish", { provider: this.publisher.name });
+    const targets: PublishTarget[] = run.publishTargets?.length
+      ? run.publishTargets
+      : ["spanwrap"];
+    run = startStage(run, "publish", {
+      provider: this.publisher.name,
+      meta: { targets },
+    });
     run = await this.store.save(run);
     try {
-      const result = await publishingStage(
+      const { primary, results } = await publishingStage(
         article,
         this.publisher,
         run.idempotencyKey,
+        targets,
       );
-      let next: PipelineRun = { ...run, publishResult: result };
-      if (result.success) {
+      const live = results.filter((r) => r.target === "spanwrap");
+      let next: PipelineRun = {
+        ...run,
+        publishResult: primary,
+        publishResults: results,
+      };
+      if (live.length === 0) {
         next = completeStage(next, "publish", {
-          externalId: result.externalId,
-          statusCode: result.statusCode,
+          plannedOnly: true,
+          targets,
+        });
+        return this.store.save({
+          ...next,
+          status: "APPROVED",
+          error: null,
+          publishResult: {
+            ...primary,
+            message:
+              primary.message ||
+              "Selected sites are not wired yet. Draft stays approved.",
+          },
+        });
+      }
+      const liveFailed = live.find((r) => !r.success);
+      if (!liveFailed) {
+        next = completeStage(next, "publish", {
+          externalId: primary.externalId,
+          statusCode: primary.statusCode,
+          targets,
         });
         next = setStatus(next, "PUBLISHED");
       } else {
         next = failStage(
           { ...next, status: "PUBLISH_FAILED" },
           "publish",
-          result.message,
+          liveFailed.message,
         );
-        // failStage forces FAILED; restore publish-failed semantics
         next = {
           ...next,
           status: "PUBLISH_FAILED",
-          error: result.message,
-          publishResult: result,
+          error: liveFailed.message,
+          publishResult: primary,
+          publishResults: results,
         };
       }
       return this.store.save(next);

@@ -6,17 +6,26 @@ Environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STORAGE_BACKEND` | `file` | `file` or `mongodb` |
+| `STORAGE_BACKEND` | `file` | `file` or `mongodb`. **On Vercel this is always `mongodb`.** |
 | `PIPELINE_DATA_DIR` | `.data` | JSON run storage root (file backend) |
 | `MONGODB_URI` | — | Required when `STORAGE_BACKEND=mongodb` |
 | `MONGODB_DB` | `spanwrap_pipeline` | Mongo database name |
 | `MONGODB_COLLECTION` | `pipeline_runs` | Mongo collection |
 | `UI_HOST` | `127.0.0.1` | Review UI bind host |
 | `UI_PORT` | `8787` | Review UI port |
-| `TRENDS_SOURCES` | `hackernews,reddit` | Comma list: `hackernews`, `reddit`, `devto`, `mock` |
-| `TRENDS_REDDIT_SUBREDDITS` | technology,programming,… | Subreddits for Reddit hot feed |
-| `TRENDS_LIMIT` | `12` | Max ranked recommendations kept |
-| `TRENDS_CACHE_TTL_MINUTES` | `60` | Soft expiry metadata on recommendations |
+| `TRENDS_SOURCES` | `hackernews,reddit` | Comma list: `hackernews`, `reddit`, `devto`, `github`, `x`, `arxiv`, `huggingface`, `lobsters`, `news`, `mock` |
+| `TRENDS_REDDIT_SUBREDDITS` | technology,programming,… | Subreddits for Reddit topic discovery (`/top`) |
+| `TRENDS_DIGEST_REDDIT_SUBREDDITS` | artificial,MachineLearning,… | Subreddits for the digest (`/r/{sub}/top/`) |
+| `TRENDS_GITHUB_TOPICS` | ai,machine-learning,… | Keywords/topics for GitHub Search |
+| `TRENDS_GITHUB_SOURCE` | `trending` | `trending` (`github.com/trending` stars today), `search` (new repos `created:>`), or `both` |
+| `TRENDS_GITHUB_DAYS` | `7` | Date window for Search (`created:>` / `pushed:>`) |
+| `TRENDS_GITHUB_LANGUAGE` | — | Optional Search `language:` filter |
+| `TRENDS_DIGEST_LIMIT` | `8` | Max digest items per source |
+| `GITHUB_TOKEN` | — | Optional; 5000 req/hr vs 60 unauthenticated. Search is also 30 req/min |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | OAuth script app for `oauth.reddit.com/r/{sub}/top` |
+| `X_BEARER_TOKEN` / `TWITTER_BEARER_TOKEN` | — | Twitter API v2 bearer for daily X posts |
+| `TRENDS_LIMIT` | `12` | Max ranked topic recommendations kept |
+| `TRENDS_CACHE_TTL_MINUTES` | `60` | In-memory digest cache TTL |
 | `REQUEST_TIMEOUT_MS` | `30000` | HTTP timeout for fetch/LLM/publish |
 | `MAX_SOURCES` | `8` | Max research sources retained |
 | `MAX_FETCH_CONCURRENCY` | `2` | Parallel page fetches |
@@ -38,15 +47,16 @@ Environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `auto` | `auto` \| `groq` \| `openai` \| `mock` |
-| `GROQ_API_KEY` | — | Groq API key (preferred) |
-| `LLM_API_KEY` / `OPENAI_API_KEY` | — | Alternatives accepted by the same client |
+| `LLM_PROVIDER` | `auto` | `auto` \| `groq` \| `openai` \| `gemini` \| `anthropic` \| `mock` |
+| `GROQ_API_KEY` | — | Groq API key (preferred free default) |
+| `OPENAI_API_KEY` / `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` | — | Keys for other providers |
+| `LLM_API_KEY` | — | Alias accepted by the Groq/OpenAI-compatible client |
 | `LLM_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible base URL (Groq default) |
-| `LLM_MODEL` | `llama-3.3-70b-versatile` | Chat model id |
+| `LLM_MODEL` | `openai/gpt-oss-20b` | Chat model (`llama-3.3-70b-versatile` was retired 2026-08-16) |
 
-Default stack is **Groq**. Set `GROQ_API_KEY` from https://console.groq.com/keys.
+Default stack is **Groq**. Set `GROQ_API_KEY` from https://console.groq.com/keys, or pick a provider and paste a key in the review UI **LLM** panel.
 
-`auto` uses Groq/OpenAI-compatible client when any of the keys above is set; otherwise mock.
+`auto` uses Groq/OpenAI-compatible client when any of the keys above is set; otherwise mock. Retired Groq model IDs are remapped to `openai/gpt-oss-20b`.
 
 ## Spanwrap publishing
 
@@ -67,3 +77,16 @@ Without `SPANWRAP_API_KEY`, the mock publisher is used (CI/local).
 | `RETRY_BASE_DELAY_MS` | `500` |
 
 Transient: timeouts, 429, 5xx. Permanent: 401/403/404/invalid input (no endless retries).
+
+## Review UI authentication
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_USERNAME` | — | Optional. Creates the first account on boot if no users exist |
+| `AUTH_PASSWORD` | — | Password for `AUTH_USERNAME` (min 8 characters) |
+| `AUTH_SECRET` | generated locally | HMAC secret for session cookies. **Required on Vercel** |
+| `AUTH_SESSION_DAYS` | `7` | Signed-cookie lifetime |
+
+The review UI is login-gated. Users are stored in `.data/users.json` (file backend) or Mongo `auth_users`. Activity is in `.data/activity-log.json` or Mongo `activity_logs`. The CLI is not gated.
+
+Locally, if `AUTH_SECRET` is unset, a secret is written to `.data/auth-secret`. On Vercel set `AUTH_SECRET` to a long random string so sessions survive cold starts.

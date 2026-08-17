@@ -19,6 +19,7 @@ export function isTransientError(error: unknown): boolean {
     message?: string;
   };
   const status = e.status ?? e.statusCode;
+  if (status === 413) return false;
   if (status === 429 || status === 408) return true;
   if (typeof status === "number" && status >= 500) return true;
   if (e.name === "AbortError" || e.name === "TimeoutError") return true;

@@ -28,7 +28,7 @@ cp .env.example .env
 
 With no API keys configured, mock research, mock LLM, and mock publisher are used automatically (local + CI).
 
-**AI API keys:** set `GROQ_API_KEY` in `.env` (preferred). The pipeline uses Groq’s OpenAI-compatible API for analysis, outline, and generation (`llama-3.3-70b-versatile` by default). Also set `SERPER_API_KEY` / `TAVILY_API_KEY` if you want live web research.
+**AI API keys:** set `GROQ_API_KEY` in `.env`, or pick Groq / OpenAI / Gemini / Claude in the review UI and paste a key. Default Groq model is `openai/gpt-oss-20b` (`llama-3.3-70b-versatile` was retired). Also set `SERPER_API_KEY` / `TAVILY_API_KEY` if you want live web research.
 
 ## Review UI
 
@@ -37,17 +37,28 @@ npm run ui
 # open http://127.0.0.1:8787
 ```
 
-Create runs, **upload Markdown templates**, run stages, edit outline/article JSON, approve, and publish from the browser.
+The UI requires a signed-in account. On first launch, create an admin username and password (or set `AUTH_USERNAME` / `AUTH_PASSWORD` in `.env`). Add teammates under **Settings → People**. Sign-ins and edits are recorded in **Settings → Activity log**.
+
+The CLI does not use this login.
 
 ## Deploy on Vercel
 
-1. Push `main` to GitHub, then import the repo at [vercel.com/new](https://vercel.com/new).
-2. Leave the framework as **Other**. Entrypoint is root `server.ts` (`package.json` `"main"`).
-3. Add every variable from [`.env.vercel.example`](.env.vercel.example) in **Settings → Environment Variables** (Production + Preview). Copy `GROQ_API_KEY` and `MONGODB_URI` from your local `.env`. Set `SPANWRAP_API_URL` to the live Spanwrap site, not `localhost`.
-4. In MongoDB Atlas → **Network Access**, allow `0.0.0.0/0` (Vercel has no fixed IPs).
-5. Deploy. The review UI is the deployment URL.
+Yes — this app is a Node HTTP server. Vercel detects root `server.ts` and runs it (Fluid). You do **not** need Next.js.
 
-Long research/generate stages can exceed the Hobby timeout. Pro + Fluid (up to 300s) is recommended.
+1. Push the repo to GitHub and import it at [vercel.com/new](https://vercel.com/new).
+2. Framework preset: **Other**. Root directory: repo root (where `server.ts` is).
+3. In **Settings → Environment Variables** (Production + Preview), paste values from [`.env.vercel.example`](.env.vercel.example). Required:
+   - `MONGODB_URI` — Atlas connection string (serverless disk is ephemeral; file storage will not persist)
+   - `GROQ_API_KEY` — or another LLM key
+   - `AUTH_SECRET` — `openssl rand -hex 32`
+   - `AUTH_USERNAME` / `AUTH_PASSWORD` — first admin (or create the account on first visit)
+   - `SPANWRAP_API_URL` / `SPANWRAP_API_KEY` — live site, not localhost
+4. MongoDB Atlas → **Network Access** → allow `0.0.0.0/0` (Vercel has no fixed IPs).
+5. Deploy. The review UI is the deployment URL (`https://….vercel.app`).
+
+Hobby plans cap function time (~60s). Research + generate can exceed that; **Pro** (Fluid, up to 300s via `maxDuration`) is recommended.
+
+`STORAGE_BACKEND` is forced to MongoDB on Vercel even if you leave it as `file` locally.
 
 ## Markdown templates (intern format)
 
@@ -81,25 +92,30 @@ npm run pipeline -- set-template <runId> <templateId>
 
 Use **Markdown templates** panel to upload a `.md` file or paste content, then pick the template when creating a run.
 
-## Hot topics (social / developer trends)
+## Hot topics (review UI)
 
-Discover trending discussion themes for blog ideas. Uses **public JSON APIs** only:
-
-- Hacker News (Algolia HN API)
-- Reddit public `hot.json` feeds (configured subreddits)
-- Dev.to public articles API
-
-Does **not** scrape private Instagram/X/TikTok walls or bypass CAPTCHAs/logins.
+Open the review UI to browse trending AI/ML stories, then start a run:
 
 ```bash
-npm run pipeline -- topics discover
-npm run pipeline -- topics list
-npm run pipeline -- topics start <topicId> --template <optionalTemplateId>
+npm run ui
+# http://127.0.0.1:8787
 ```
 
-In the UI, open **Hot topics** → **Discover** → **Write this**.
+On load, **Hot topics** fetches (in parallel):
 
-Config (`TRENDS_SOURCES`, `TRENDS_REDDIT_SUBREDDITS`, `TRENDS_LIMIT`) is documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+- GitHub trending today (stars today). Set `GITHUB_TOKEN` for higher rate limits.
+- Reddit `/top` via OAuth when `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` are set.
+- X posts when `X_BEARER_TOKEN` is set (official API, no scraping).
+- Hacker News (Algolia API, AI/LLM query).
+- Dev.to tagged `ai`.
+- arXiv latest `cs.AI` / `cs.LG` / `cs.CL` papers.
+- Hugging Face daily papers.
+- Lobsters `ai` / `ml` tags.
+- Tech press RSS: TechCrunch AI, The Verge AI, MIT Technology Review, Ars Technica, IEEE Spectrum.
+
+Click **Write this** on a card to create a pipeline run (picks the template in **New run**). **Refresh** bypasses the in-memory cache (`TRENDS_CACHE_TTL_MINUTES`).
+
+Does **not** scrape private Instagram/X/TikTok walls. Config is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Storage
 
@@ -149,7 +165,7 @@ npm run pipeline -- quality-check <id>
 |----------|---------|
 | `LLM_API_KEY` / `OPENAI_API_KEY` | OpenAI-compatible chat API |
 | `LLM_BASE_URL` | Default `https://api.openai.com/v1` |
-| `LLM_MODEL` | Default `gpt-4o-mini` |
+| `LLM_MODEL` | Default `openai/gpt-oss-120b` on Groq |
 | `SERPER_API_KEY` or `TAVILY_API_KEY` | Web research |
 | `SPANWRAP_API_URL` | Spanwrap site base URL |
 | `SPANWRAP_API_KEY` | Bearer token for publish |

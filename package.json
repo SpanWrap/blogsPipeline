@@ -11,7 +11,7 @@
   "scripts": {
     "pipeline": "tsx src/cli/index.ts",
     "dev": "tsx server.ts",
-    "start": "tsx src/cli/index.ts",
+    "start": "tsx server.ts",
     "ui": "tsx server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

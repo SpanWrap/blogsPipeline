@@ -55,6 +55,12 @@ function normalizeMongoUri(uri: string): string {
 }
 
 const rawMongoUri = env("MONGODB_URI");
+const onVercel = Boolean(process.env.VERCEL);
+
+function resolveStorageBackend(): "file" | "mongodb" {
+  if (onVercel) return "mongodb";
+  return env("STORAGE_BACKEND", "file") === "mongodb" ? "mongodb" : "file";
+}
 
 export const appConfig = {
   dataDir: resolveDataDir(),
@@ -68,10 +74,8 @@ export const appConfig = {
     )!,
   respectRobotsTxt: envBool("RESPECT_ROBOTS_TXT", true),
   storage: {
-    /** file (default) or mongodb */
-    backend: (env("STORAGE_BACKEND", "file") === "mongodb" ? "mongodb" : "file") as
-      | "file"
-      | "mongodb",
+    /** file (default locally) or mongodb. Vercel always uses mongodb (ephemeral disk). */
+    backend: resolveStorageBackend(),
     mongoUri: rawMongoUri ? normalizeMongoUri(rawMongoUri) : undefined,
     mongoDb: env("MONGODB_DB", "spanwrap_pipeline")!,
     mongoCollection: env("MONGODB_COLLECTION", "pipeline_runs")!,
@@ -96,6 +100,34 @@ export const appConfig = {
       .split(",")
       .map((s) => s.trim().replace(/^r\//, ""))
       .filter(Boolean),
+    digestRedditSubreddits: (
+      env(
+        "TRENDS_DIGEST_REDDIT_SUBREDDITS",
+        "artificial,MachineLearning,LocalLLaMA,OpenAI,ChatGPT,LanguageTechnology",
+      ) || "artificial,MachineLearning"
+    )
+      .split(",")
+      .map((s) => s.trim().replace(/^r\//, ""))
+      .filter(Boolean),
+    githubTopics: (
+      env("TRENDS_GITHUB_TOPICS", "ai,machine-learning,llm,generative-ai,deep-learning") ||
+      "ai,machine-learning"
+    )
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    githubToken: env("GITHUB_TOKEN") ?? env("GH_TOKEN"),
+    githubSource: ((): "search" | "trending" | "both" => {
+      const raw = (env("TRENDS_GITHUB_SOURCE", "trending") || "trending").toLowerCase();
+      if (raw === "search" || raw === "both") return raw;
+      return "trending";
+    })(),
+    githubDays: envInt("TRENDS_GITHUB_DAYS", 7),
+    githubLanguage: env("TRENDS_GITHUB_LANGUAGE"),
+    redditClientId: env("REDDIT_CLIENT_ID"),
+    redditClientSecret: env("REDDIT_CLIENT_SECRET") ?? env("REDDIT_SECRET"),
+    xBearerToken: env("X_BEARER_TOKEN") ?? env("TWITTER_BEARER_TOKEN"),
+    digestLimit: envInt("TRENDS_DIGEST_LIMIT", 8),
     limit: envInt("TRENDS_LIMIT", 12),
     cacheTtlMinutes: envInt("TRENDS_CACHE_TTL_MINUTES", 60),
   },
@@ -110,15 +142,27 @@ export const appConfig = {
   },
   llm: {
     /**
-     * auto | groq | openai | mock
+     * auto | groq | openai | gemini | anthropic | mock
      * auto uses Groq when GROQ_API_KEY / LLM_API_KEY is set.
      */
-    provider: env("LLM_PROVIDER", "auto") as "auto" | "groq" | "openai" | "mock",
+    provider: env("LLM_PROVIDER", "auto") as
+      | "auto"
+      | "groq"
+      | "openai"
+      | "gemini"
+      | "anthropic"
+      | "mock",
     apiKey:
-      env("GROQ_API_KEY") ?? env("LLM_API_KEY") ?? env("OPENAI_API_KEY"),
+      env("GROQ_API_KEY") ??
+      env("LLM_API_KEY") ??
+      env("OPENAI_API_KEY") ??
+      env("GEMINI_API_KEY") ??
+      env("GOOGLE_API_KEY") ??
+      env("ANTHROPIC_API_KEY") ??
+      env("CLAUDE_API_KEY"),
     baseUrl: env("LLM_BASE_URL", "https://api.groq.com/openai/v1")!,
-    /** Good default on Groq for structured blog generation */
-    model: env("LLM_MODEL", "llama-3.3-70b-versatile")!,
+    /** Groq retired llama-3.3-70b-versatile on 2026-08-16; gpt-oss-20b is the free production replacement. */
+    model: env("LLM_MODEL", "openai/gpt-oss-20b")!,
   },
   spanwrap: {
     apiUrl: env("SPANWRAP_API_URL", "http://localhost:4000")!,
@@ -128,6 +172,14 @@ export const appConfig = {
   retry: {
     maxAttempts: envInt("RETRY_MAX_ATTEMPTS", 3),
     baseDelayMs: envInt("RETRY_BASE_DELAY_MS", 500),
+  },
+  auth: {
+    /** Optional bootstrap account created on first boot if no users exist. */
+    username: env("AUTH_USERNAME"),
+    password: env("AUTH_PASSWORD"),
+    /** HMAC secret for session cookies. Generated into .data/auth-secret when unset locally. */
+    secret: env("AUTH_SECRET"),
+    sessionDays: envInt("AUTH_SESSION_DAYS", 7),
   },
 } as const;
 

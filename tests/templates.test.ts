@@ -10,6 +10,7 @@ import { FileRunStore } from "@/services/storage";
 import { FileTemplateStore, uploadTemplate } from "@/services/templates";
 import {
   applyMarkdownTemplate,
+  describeTemplateForPrompt,
   listPlaceholders,
   templateHasPlaceholders,
 } from "@/utils/template";
@@ -35,6 +36,13 @@ describe("template helpers", () => {
       body: "# Generated\n\nContent",
     });
     expect(out).toBe("# Generated\n\nContent");
+  });
+
+  it("describes templates as section guidelines for the LLM", () => {
+    const guidance = describeTemplateForPrompt("## Hook\nWrite a sharp opening.\n\n## Body\n{{body}}");
+    expect(guidance).toMatch(/GUIDELINES AND REQUIRED SECTIONS/);
+    expect(guidance).toContain("## Hook");
+    expect(guidance).toContain("{{body}}");
   });
 });
 

@@ -9,16 +9,19 @@ export function buildOutlinePrompt(input: {
   const templateBlock = input.templateMarkdown?.trim()
     ? `
 
-Markdown article template to respect (derive outline sections from its headings/order when present):
+Article template (guidelines and required sections). Derive the outline from its headings and instructions:
 \`\`\`markdown
 ${input.templateMarkdown.slice(0, 8000)}
 \`\`\`
-- Prefer section headings that match the template.
+- Use the template's section headings and order.
+- Treat non-heading template prose as instructions for that section's purpose and key points.
 - Do not invent major sections missing from the template unless required for research coverage.
 `
     : "";
 
   return `Create a blog outline for this content brief.
+
+Primary inputs: topic/brief, research analysis, and (when present) the article template's sections and instructions.
 
 Prompt version: ${OUTLINE_PROMPT_VERSION}
 

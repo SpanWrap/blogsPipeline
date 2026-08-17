@@ -127,6 +127,8 @@ export class MockLLMProvider implements LLMProvider {
         content = [
           `# ${title}`,
           "",
+          "![Support workflow](https://opengraph.githubassets.com/1/example/weekly-ai-agent)",
+          "",
           bodySections[0],
           "",
           "## Why this matters now",
@@ -161,6 +163,7 @@ export class MockLLMProvider implements LLMProvider {
         seoTitle: title.slice(0, 60),
         seoDescription:
           "Practical guidance for founders on using AI agents in customer support with clear escalation and measurement.",
+        featuredImage: "https://opengraph.githubassets.com/1/example/weekly-ai-agent",
         sources: sources.map((s) => ({
           title: s.title,
           url: s.url,

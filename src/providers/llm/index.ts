@@ -1,37 +1,16 @@
-import { appConfig } from "../../config";
 import type { LLMProvider } from "./types";
 import { MockLLMProvider } from "./mock";
-import { OpenAICompatibleLLMProvider } from "./openai-compatible";
+import {
+  OpenAICompatibleLLMProvider,
+  createOpenAICompatibleFromSettings,
+} from "./openai-compatible";
+import { getResolvedLlmConfig } from "../../services/llm-settings";
 
-export function createLLMProvider(
-  override?: "auto" | "groq" | "openai" | "mock",
-): LLMProvider {
-  const mode = override ?? appConfig.llm.provider;
-
-  if (mode === "mock") return new MockLLMProvider();
-
-  if (mode === "groq" || mode === "openai") {
-    return new OpenAICompatibleLLMProvider(
-      appConfig.llm.apiKey,
-      appConfig.llm.baseUrl,
-      appConfig.llm.model,
-      mode === "groq" ? "groq" : "openai-compatible",
-    );
-  }
-
-  // auto
-  if (appConfig.llm.apiKey) {
-    const isGroq =
-      /groq\.com/i.test(appConfig.llm.baseUrl) || Boolean(process.env.GROQ_API_KEY);
-    return new OpenAICompatibleLLMProvider(
-      appConfig.llm.apiKey,
-      appConfig.llm.baseUrl,
-      appConfig.llm.model,
-      isGroq ? "groq" : "openai-compatible",
-    );
-  }
-
-  return new MockLLMProvider();
+export function createLLMProvider(override?: "auto" | "groq" | "openai" | "gemini" | "anthropic" | "mock"): LLMProvider {
+  if (override === "mock") return new MockLLMProvider();
+  const cfg = getResolvedLlmConfig();
+  if (cfg.provider === "mock" || !cfg.apiKey) return new MockLLMProvider();
+  return createOpenAICompatibleFromSettings();
 }
 
 export type { LLMProvider } from "./types";

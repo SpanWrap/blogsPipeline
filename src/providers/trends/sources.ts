@@ -1,5 +1,14 @@
 import type { TrendSignal } from "../../models";
 import type { TrendDiscoveryContext, TrendProvider } from "./types";
+import { getTrendingRepos } from "../../clients/github";
+import { getTopPosts } from "../../clients/reddit";
+
+export {
+  parseGitHubTrendingHtml,
+  parseCompactCount,
+  looksLikeAiTopic,
+} from "../../clients/github";
+export { parseRedditListingHtml, redditTopUrls } from "../../clients/reddit";
 
 async function fetchJson<T>(
   url: string,
@@ -29,6 +38,14 @@ async function fetchJson<T>(
   }
 }
 
+function decodeHtmlUrl(url?: string | null): string | null {
+  if (!url) return null;
+  const cleaned = url.replace(/&amp;/g, "&").trim();
+  if (!cleaned.startsWith("http")) return null;
+  if (["self", "default", "nsfw", "spoiler"].includes(cleaned)) return null;
+  return cleaned;
+}
+
 /**
  * Hacker News front page / popular stories via official Algolia HN API.
  * https://hn.algolia.com/api
@@ -38,6 +55,9 @@ export class HackerNewsTrendProvider implements TrendProvider {
 
   async discover(ctx: TrendDiscoveryContext): Promise<TrendSignal[]> {
     const limit = Math.min(ctx.limit ?? 20, 30);
+    const endpoint = ctx.hnQuery
+      ? `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(ctx.hnQuery)}&tags=story&hitsPerPage=${limit}`
+      : `https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=${limit}`;
     const data = await fetchJson<{
       hits?: Array<{
         title?: string;
@@ -48,10 +68,7 @@ export class HackerNewsTrendProvider implements TrendProvider {
         objectID?: string;
         created_at?: string;
       }>;
-    }>(
-      `https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=${limit}`,
-      ctx,
-    );
+    }>(endpoint, ctx);
 
     const now = new Date().toISOString();
     return (data.hits ?? [])
@@ -64,69 +81,126 @@ export class HackerNewsTrendProvider implements TrendProvider {
         comments: h.num_comments ?? 0,
         author: h.author,
         community: "HN",
+        description: h.title!.trim(),
+        imageUrl: "https://news.ycombinator.com/y18.svg",
         capturedAt: now,
       }));
   }
 }
 
-/**
- * Reddit public JSON listings (officially supported for personal/read use).
- * Respects rate limits; uses a descriptive User-Agent. No login/CAPTCHA bypass.
- */
+/** Official Search API (new repos created in the date window) as fallback. */
+export class GitHubTrendProvider implements TrendProvider {
+  readonly name = "github";
+
+  async discover(ctx: TrendDiscoveryContext): Promise<TrendSignal[]> {
+    return getTrendingRepos({
+      token: ctx.githubToken,
+      userAgent: ctx.userAgent,
+      timeoutMs: ctx.timeoutMs,
+      topics: ctx.githubTopics,
+      days: ctx.githubDays,
+      language: ctx.githubLanguage,
+      source: ctx.githubSource,
+      limit: ctx.limit,
+    });
+  }
+}
+
+/** Reddit /top via OAuth when configured, else public JSON/HTML. */
 export class RedditTrendProvider implements TrendProvider {
   readonly name = "reddit";
 
   async discover(ctx: TrendDiscoveryContext): Promise<TrendSignal[]> {
-    const subs = (ctx.subreddits?.length ? ctx.subreddits : ["technology"]).slice(0, 6);
-    const perSub = Math.max(3, Math.ceil((ctx.limit ?? 15) / Math.max(1, subs.length)));
-    const now = new Date().toISOString();
-    const signals: TrendSignal[] = [];
+    return getTopPosts({
+      userAgent: ctx.userAgent,
+      timeoutMs: ctx.timeoutMs,
+      subreddits: ctx.subreddits,
+      limit: ctx.limit,
+      clientId: ctx.redditClientId,
+      clientSecret: ctx.redditClientSecret,
+    });
+  }
+}
 
-    for (const sub of subs) {
-      try {
-        const data = await fetchJson<{
-          data?: {
-            children?: Array<{
-              data?: {
-                title?: string;
-                url?: string;
-                permalink?: string;
-                score?: number;
-                num_comments?: number;
-                author?: string;
-                subreddit?: string;
-                stickied?: boolean;
-              };
-            }>;
-          };
-        }>(`https://www.reddit.com/r/${encodeURIComponent(sub)}/hot.json?limit=${perSub}`, ctx, {
-          Accept: "application/json",
-        });
+/**
+ * X (Twitter) recent posts via official API v2 — requires X_BEARER_TOKEN.
+ * Does not scrape x.com.
+ */
+export class XTrendProvider implements TrendProvider {
+  readonly name = "x";
 
-        for (const child of data.data?.children ?? []) {
-          const d = child.data;
-          if (!d?.title || d.stickied) continue;
-          if (d.title.trim().length < 8) continue;
-          signals.push({
-            platform: "reddit",
-            title: d.title.trim(),
-            url: d.url?.startsWith("http")
-              ? d.url
-              : `https://www.reddit.com${d.permalink ?? ""}`,
-            score: d.score ?? 0,
-            comments: d.num_comments ?? 0,
-            author: d.author,
-            community: `r/${d.subreddit ?? sub}`,
-            capturedAt: now,
-          });
-        }
-        // gentle pacing between subreddit calls
-        await new Promise((r) => setTimeout(r, 350));
-      } catch {
-        // Skip blocked/failed subreddit; other sources still work
-      }
+  async discover(ctx: TrendDiscoveryContext): Promise<TrendSignal[]> {
+    if (!ctx.xBearerToken) {
+      return [];
     }
-    return signals;
+    const limit = Math.min(Math.max(ctx.limit ?? 10, 10), 20);
+    const query =
+      '(AI OR "machine learning" OR LLM OR "generative AI" OR ChatGPT OR OpenAI) lang:en -is:retweet -is:reply';
+    const params = new URLSearchParams({
+      query,
+      max_results: String(limit),
+      "tweet.fields": "created_at,public_metrics,text,attachments,author_id",
+      expansions: "attachments.media_keys,author_id",
+      "media.fields": "url,preview_image_url,type",
+      "user.fields": "name,username,profile_image_url",
+    });
+    const data = await fetchJson<{
+      data?: Array<{
+        id?: string;
+        text?: string;
+        author_id?: string;
+        public_metrics?: { like_count?: number; reply_count?: number; retweet_count?: number };
+        attachments?: { media_keys?: string[] };
+      }>;
+      includes?: {
+        media?: Array<{
+          media_key?: string;
+          type?: string;
+          url?: string;
+          preview_image_url?: string;
+        }>;
+        users?: Array<{
+          id?: string;
+          name?: string;
+          username?: string;
+          profile_image_url?: string;
+        }>;
+      };
+    }>(`https://api.twitter.com/2/tweets/search/recent?${params.toString()}`, ctx, {
+      Authorization: `Bearer ${ctx.xBearerToken}`,
+    });
+
+    const mediaByKey = new Map((data.includes?.media ?? []).map((m) => [m.media_key ?? "", m]));
+    const userById = new Map((data.includes?.users ?? []).map((u) => [u.id ?? "", u]));
+    const now = new Date().toISOString();
+
+    return (data.data ?? [])
+      .filter((t) => t.id && t.text)
+      .map((t) => {
+        const user = userById.get(t.author_id ?? "");
+        const mediaKey = t.attachments?.media_keys?.[0];
+        const media = mediaKey ? mediaByKey.get(mediaKey) : undefined;
+        const imageUrl =
+          decodeHtmlUrl(media?.url) ??
+          decodeHtmlUrl(media?.preview_image_url) ??
+          decodeHtmlUrl(user?.profile_image_url?.replace("_normal", "_bigger")) ??
+          null;
+        const text = t.text!.replace(/\s+/g, " ").trim();
+        const handle = user?.username ? `@${user.username}` : "x";
+        return {
+          platform: "x",
+          title: text.slice(0, 140),
+          url: `https://x.com/${user?.username ?? "i"}/status/${t.id}`,
+          score:
+            (t.public_metrics?.like_count ?? 0) + (t.public_metrics?.retweet_count ?? 0) * 2,
+          comments: t.public_metrics?.reply_count ?? 0,
+          author: handle,
+          community: "x/ai",
+          description: text.slice(0, 280),
+          imageUrl,
+          capturedAt: now,
+        };
+      });
   }
 }
 
@@ -140,12 +214,15 @@ export class DevToTrendProvider implements TrendProvider {
       Array<{
         title?: string;
         url?: string;
+        description?: string;
+        cover_image?: string | null;
+        social_image?: string | null;
         public_reactions_count?: number;
         comments_count?: number;
-        user?: { name?: string };
+        user?: { name?: string; profile_image?: string };
         tag_list?: string[];
       }>
-    >(`https://dev.to/api/articles?top=1&per_page=${limit}`, ctx);
+    >(`https://dev.to/api/articles?tag=ai&top=7&per_page=${limit}`, ctx);
 
     const now = new Date().toISOString();
     return (data ?? [])
@@ -158,6 +235,12 @@ export class DevToTrendProvider implements TrendProvider {
         comments: a.comments_count ?? 0,
         author: a.user?.name,
         community: (a.tag_list ?? []).slice(0, 3).join(", ") || "dev.to",
+        description: (a.description ?? a.title ?? "").trim().slice(0, 280),
+        imageUrl:
+          decodeHtmlUrl(a.cover_image) ??
+          decodeHtmlUrl(a.social_image) ??
+          decodeHtmlUrl(a.user?.profile_image) ??
+          null,
         capturedAt: now,
       }));
   }
@@ -177,6 +260,8 @@ export class MockTrendProvider implements TrendProvider {
         score: 920,
         comments: 140,
         community: "mock/startups",
+        description: "Mock discussion of AI agents in B2B support.",
+        imageUrl: null,
         capturedAt: now,
       },
       {
@@ -186,6 +271,8 @@ export class MockTrendProvider implements TrendProvider {
         score: 640,
         comments: 88,
         community: "mock/engineering",
+        description: "Mock thread on observability for agent workflows.",
+        imageUrl: null,
         capturedAt: now,
       },
       {
@@ -195,6 +282,8 @@ export class MockTrendProvider implements TrendProvider {
         score: 510,
         comments: 62,
         community: "mock/saas",
+        description: "Mock thread on multi-tenant SaaS patterns.",
+        imageUrl: null,
         capturedAt: now,
       },
     ];

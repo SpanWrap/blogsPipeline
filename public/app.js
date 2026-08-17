@@ -2,13 +2,143 @@ const state = {
   runs: [],
   templates: [],
   topics: [],
+  digest: null,
+  digestFilter: "all",
   selectedId: null,
   run: null,
-  tab: "article",
+  tab: "quality",
   busy: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
+
+const LLM_PROVIDERS = [
+  {
+    id: "groq",
+    label: "Groq",
+    defaultModel: "openai/gpt-oss-20b",
+    keyLabel: "Groq API key",
+    models: [
+      { id: "openai/gpt-oss-20b", label: "GPT-OSS 20B (free, fast)" },
+      { id: "openai/gpt-oss-120b", label: "GPT-OSS 120B (higher quality, 8k TPM on free tier)" },
+      { id: "qwen/qwen3.6-27b", label: "Qwen 3.6 27B" },
+    ],
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    defaultModel: "gpt-4o-mini",
+    keyLabel: "OpenAI API key",
+    models: [
+      { id: "gpt-4o-mini", label: "GPT-4o mini" },
+      { id: "gpt-4o", label: "GPT-4o" },
+      { id: "gpt-4.1-mini", label: "GPT-4.1 mini" },
+    ],
+  },
+  {
+    id: "gemini",
+    label: "Gemini",
+    defaultModel: "gemini-2.5-flash",
+    keyLabel: "Gemini API key",
+    models: [
+      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+      { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+      { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+    ],
+  },
+  {
+    id: "anthropic",
+    label: "Claude",
+    defaultModel: "claude-sonnet-4-0",
+    keyLabel: "Anthropic API key",
+    models: [
+      { id: "claude-sonnet-4-0", label: "Claude Sonnet 4" },
+      { id: "claude-3-5-haiku-latest", label: "Claude Haiku 3.5" },
+      { id: "claude-3-5-sonnet-latest", label: "Claude Sonnet 3.5" },
+    ],
+  },
+  {
+    id: "mock",
+    label: "Mock (no API)",
+    defaultModel: "mock-1",
+    keyLabel: "No key needed",
+    models: [{ id: "mock-1", label: "Mock" }],
+  },
+];
+
+function isSettingsPage() {
+  return /^\/settings\/?$/.test(location.pathname);
+}
+
+function applyPage() {
+  const settings = isSettingsPage();
+  const home = $("#page-home");
+  const settingsEl = $("#page-settings");
+  if (home) home.hidden = settings;
+  if (settingsEl) settingsEl.hidden = !settings;
+  const title = $("#page-title");
+  if (title) title.textContent = settings ? "Settings" : "Blog content runs";
+  document.title = settings ? "Settings · Spanwrap Pipeline" : "Spanwrap Blog Pipeline";
+  const settingsLink = $("#settings-link");
+  const homeLink = $("#home-link");
+  if (settingsLink) settingsLink.hidden = settings;
+  if (homeLink) homeLink.hidden = !settings;
+}
+
+let setupMode = false;
+
+function showAppShell(username) {
+  const gate = $("#auth-gate");
+  const shell = $("#app-shell");
+  if (gate) gate.hidden = true;
+  if (shell) shell.hidden = false;
+  const userEl = $("#auth-user");
+  const logout = $("#logout-btn");
+  if (userEl) {
+    userEl.hidden = !username;
+    userEl.textContent = username || "";
+  }
+  if (logout) logout.hidden = !username;
+}
+
+function showAuthGate(setupRequired) {
+  setupMode = Boolean(setupRequired);
+  const gate = $("#auth-gate");
+  const shell = $("#app-shell");
+  if (shell) shell.hidden = true;
+  if (gate) gate.hidden = false;
+  const title = $("#auth-title");
+  const hint = $("#auth-hint");
+  const submit = $("#auth-submit");
+  const pass = $("#auth-password");
+  const err = $("#auth-error");
+  if (title) title.textContent = setupMode ? "Create admin account" : "Sign in";
+  if (hint) {
+    hint.textContent = setupMode
+      ? "No accounts yet. Create the first username and password for this pipeline UI."
+      : "Only people with an account can use this review UI.";
+  }
+  if (submit) submit.textContent = setupMode ? "Create account" : "Sign in";
+  if (pass) pass.autocomplete = setupMode ? "new-password" : "current-password";
+  if (err) {
+    err.hidden = true;
+    err.textContent = "";
+  }
+}
+
+async function ensureAuth() {
+  const me = await fetch("/api/auth/me", { credentials: "same-origin" }).then((r) => r.json()).catch(() => ({}));
+  if (me.authenticated) {
+    showAppShell(me.username);
+    return true;
+  }
+  showAuthGate(me.setupRequired);
+  return false;
+}
+
+function activityLabel(action) {
+  return String(action || "").replace(/_/g, " ");
+}
 
 function toast(message, isError = false) {
   const el = $("#toast");
@@ -18,15 +148,28 @@ function toast(message, isError = false) {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => {
     el.hidden = true;
-  }, 4000);
+  }, isError ? 14000 : 4000);
+}
+
+function toastRunResult(run, okPrefix) {
+  if (run?.status === "FAILED" || run?.status === "PUBLISH_FAILED") {
+    toast(run.error || "Run failed", true);
+  } else {
+    toast(`${okPrefix} → ${run.status}`);
+  }
 }
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    credentials: "same-origin",
     ...options,
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && path !== "/api/auth/me" && path !== "/api/auth/login") {
+    await showAuthGate();
+    throw new Error(data.error || "Sign in required");
+  }
   if (!res.ok) throw new Error(data.error || res.statusText || "Request failed");
   return data;
 }
@@ -38,18 +181,326 @@ function statusClass(status) {
   return "";
 }
 
+let llmCatalog = null;
+
+function llmProviderList(data) {
+  return data?.providers?.length ? data.providers : LLM_PROVIDERS;
+}
+
+function fillLlmForm(data) {
+  const providers = llmProviderList(data);
+  llmCatalog = { ...(data || {}), providers };
+  const providerSel = $("#llm-provider");
+  const modelSel = $("#llm-model-select");
+  const customWrap = $("#llm-model-custom-wrap");
+  const custom = $("#llm-model-custom");
+  const keyWrap = $("#llm-key-wrap");
+  const keyInput = $("#llm-api-key");
+  const status = $("#llm-status");
+  if (!providerSel || !modelSel) return;
+
+  const providerId = data?.provider || providerSel.value || "groq";
+  providerSel.innerHTML = providers
+    .map(
+      (p) =>
+        `<option value="${p.id}" ${p.id === providerId ? "selected" : ""}>${escapeHtml(p.label)}</option>`,
+    )
+    .join("");
+  providerSel.value = providers.some((p) => p.id === providerId) ? providerId : providers[0].id;
+
+  const current = providers.find((p) => p.id === providerSel.value) || providers[0];
+  const modelId = data?.model || current?.defaultModel || "";
+  const known = (current?.models || []).some((m) => m.id === modelId);
+  modelSel.innerHTML =
+    (current?.models || [])
+      .map(
+        (m) =>
+          `<option value="${escapeHtml(m.id)}" ${m.id === modelId ? "selected" : ""}>${escapeHtml(m.label)}</option>`,
+      )
+      .join("") + `<option value="__custom__" ${known ? "" : "selected"}>Custom…</option>`;
+  if (customWrap && custom) {
+    customWrap.hidden = known;
+    if (!known) custom.value = modelId || "";
+  }
+  if (keyWrap) keyWrap.hidden = providerSel.value === "mock";
+  if (keyInput) {
+    keyInput.value = "";
+    keyInput.placeholder = data?.hasKey
+      ? `Saved ${data.keyPreview || "••••"} — paste to replace`
+      : `Paste ${current?.keyLabel || "API key"}`;
+  }
+  if (status) {
+    const remap = data?.remappedFrom
+      ? ` · remapped ${data.remappedFrom} → ${data.model}`
+      : "";
+    status.textContent = data?.hasKey
+      ? `${data.provider} · ${data.model}${remap}`
+      : "No key — using mock until you paste one";
+  }
+}
+
+function selectedLlmModel() {
+  const modelSel = $("#llm-model-select");
+  const custom = $("#llm-model-custom");
+  if (modelSel?.value === "__custom__") return String(custom?.value || "").trim();
+  return String(modelSel?.value || "").trim();
+}
+
+async function loadLlm() {
+  try {
+    const data = await api("/api/llm");
+    fillLlmForm(data);
+    return data;
+  } catch (error) {
+    fillLlmForm({
+      provider: "groq",
+      model: "openai/gpt-oss-20b",
+      hasKey: false,
+      providers: LLM_PROVIDERS,
+    });
+    throw error;
+  }
+}
+
 async function loadHealth() {
   try {
     const h = await api("/api/health");
-    $("#health").innerHTML = [
-      `storage: <strong>${h.storage}</strong>`,
-      `llm: <strong>${h.llmProvider}</strong>${h.hasLlmKey ? ` · ${h.llmModel || ""}` : " (no key → mock)"}`,
-      `research: <strong>${h.researchProvider}</strong>`,
-      `publish key: <strong>${h.hasSpanwrapKey ? "set" : "missing"}</strong>`,
-    ].join("<br>");
+    const rows = [
+      ["storage", h.storage],
+      ["llm", h.hasLlmKey ? `${h.llmProvider} · ${h.llmModel || ""}`.trim() : `${h.llmProvider} (no key → mock)`],
+      ["research", h.researchProvider],
+      ["publish key", h.hasSpanwrapKey ? "set" : "missing"],
+      ["github", h.hasGithubToken ? "token" : "public"],
+      ["reddit", h.hasRedditOAuth ? "oauth" : "public"],
+      ["x", h.hasXBearer ? "api" : "off"],
+    ];
+    const dl = $("#settings-health");
+    if (dl) {
+      dl.innerHTML = rows
+        .map(
+          ([k, v]) =>
+            `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd></div>`,
+        )
+        .join("");
+    }
   } catch (e) {
-    $("#health").textContent = e.message;
+    const msg = e.message;
+    const dl = $("#settings-health");
+    if (dl) dl.innerHTML = `<div><dt>error</dt><dd>${escapeHtml(msg)}</dd></div>`;
   }
+}
+
+function formatWhen(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString();
+}
+
+function digestScoreLabel(item) {
+  const score = item.score ?? 0;
+  const extra = item.comments ?? 0;
+  if (item.platform === "github") {
+    const today = String(item.community || "").match(/([\d,]+)\s+stars today/i);
+    if (today) return `${today[1]} stars today`;
+    return `${score.toLocaleString()} stars · ${extra.toLocaleString()} forks`;
+  }
+  if (item.platform === "reddit") {
+    return `${score.toLocaleString()} upvotes · ${extra.toLocaleString()} comments`;
+  }
+  if (item.platform === "arxiv") return "new paper";
+  if (item.platform === "huggingface") return `${score.toLocaleString()} upvotes`;
+  if (item.platform === "news") return item.community || "press";
+  return `${score.toLocaleString()} score`;
+}
+
+function sourceIcon(platform) {
+  const icons = {
+    github:
+      '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8"/></svg>',
+    reddit:
+      '<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M16.5 10.2a1.5 1.5 0 0 0-2.55-1.07 7.4 7.4 0 0 0-3.7-1.17l.63-3 2.05.44a1.2 1.2 0 1 0 .12-.56l-2.3-.5a.5.5 0 0 0-.58.38l-.72 3.4a7.4 7.4 0 0 0-3.82 1.18 1.5 1.5 0 1 0-1.66 2.4c-.05.28-.08.56-.08.85 0 2.43 2.83 4.4 6.31 4.4s6.31-1.97 6.31-4.4c0-.27-.03-.54-.07-.8a1.5 1.5 0 0 0 .96-1.38Z"/></svg>',
+    x: '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12.6.75h2.45l-5.36 6.13L16 15.25h-4.94L7.6 10.14 3.16 15.25H.7l5.73-6.55L0 .75h5.06l3.4 4.6L12.6.75Zm-.86 13.07h1.36L4.32 2.13H2.86l8.88 11.69Z"/></svg>',
+    hackernews:
+      '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect width="16" height="16" rx="2" fill="#ff6600"/><path fill="#fff" d="M4.4 3.2h2.1l1.5 3.1 1.5-3.1h2.1L8.9 8.1V12.8H7.1V8.1L4.4 3.2Z"/></svg>',
+    devto:
+      '<svg viewBox="0 0 32 16" width="22" height="14" aria-hidden="true"><text x="0" y="13" fill="currentColor" font-size="12" font-weight="700" font-family="ui-sans-serif,system-ui">DEV</text></svg>',
+    arxiv:
+      '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect width="16" height="16" rx="2" fill="#b31b1b"/><path fill="#fff" d="M4 4.2h8v1.4H5.7V7.4h5.6v1.3H5.7v3.1H4V4.2Z"/></svg>',
+    huggingface:
+      '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="7" fill="#ffd21e" stroke="#1c1915" stroke-width="1"/><circle cx="5.6" cy="6.6" r="1.1" fill="#1c1915"/><circle cx="10.4" cy="6.6" r="1.1" fill="#1c1915"/><path d="M5.2 10c.8 1.3 4.8 1.3 5.6 0" fill="none" stroke="#1c1915" stroke-width="1.2" stroke-linecap="round"/></svg>',
+    lobsters:
+      '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect width="16" height="16" rx="2" fill="#ac130d"/><text x="3" y="12" fill="#fff" font-size="9" font-weight="700" font-family="ui-sans-serif,system-ui">L</text></svg>',
+    news:
+      '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M2 2.5h9.5A2.5 2.5 0 0 1 14 5v8.5H4.5A2.5 2.5 0 0 1 2 11V2.5Zm1.5 1.5v7A1 1 0 0 0 4.5 12H12.5V5A1 1 0 0 0 11.5 4H3.5ZM5 6h6v1.2H5V6Zm0 2.2h6V9.4H5V8.2Z"/></svg>',
+  };
+  const svg = icons[platform] || "";
+  const labels = {
+    github: "GitHub",
+    reddit: "Reddit",
+    x: "X",
+    hackernews: "Hacker News",
+    devto: "Dev.to",
+    arxiv: "arXiv",
+    huggingface: "Hugging Face",
+    lobsters: "Lobsters",
+    news: "Tech press",
+  };
+  const label = labels[platform] || platform;
+  return `<span class="source-badge" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${svg}</span>`;
+}
+
+function digestItems() {
+  const digest = state.digest;
+  if (!digest || digest === "loading") return [];
+  return [...(digest.github || []), ...(digest.reddit || []), ...(digest.x || []), ...(digest.more || [])];
+}
+
+function digestCard(item) {
+  const title = encodeURIComponent(item.title || "");
+  const url = encodeURIComponent(item.url || "");
+  const description = encodeURIComponent(item.description || "");
+  return `
+    <li class="hot-item" data-platform="${escapeHtml(item.platform || "")}">
+      <div class="hot-item-head">
+        <a class="topic-title" href="${escapeHtml(item.url || "#")}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a>
+        ${sourceIcon(item.platform)}
+      </div>
+      ${
+        item.imageUrl
+          ? `<img class="topic-thumb" src="${escapeHtml(item.imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+          : ""
+      }
+      <p class="hot-item-desc">${escapeHtml(item.description || "")}</p>
+      <div class="meta">
+        <span>${escapeHtml(item.community || item.platform || "")}</span>
+        <span>${digestScoreLabel(item)}</span>
+      </div>
+      <div class="actions-row">
+        <button type="button" class="btn primary" data-digest-title="${title}" data-digest-url="${url}" data-digest-description="${description}">Write this</button>
+      </div>
+    </li>`;
+}
+
+function renderSourceFilters(items) {
+  const root = $("#source-filters");
+  if (!root) return;
+  const counts = {};
+  for (const item of items) {
+    const key = item.platform || "other";
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  const chips = [
+    { id: "all", label: "All", count: items.length },
+    { id: "github", label: "GitHub", count: counts.github || 0 },
+    { id: "reddit", label: "Reddit", count: counts.reddit || 0 },
+    { id: "x", label: "X", count: counts.x || 0 },
+    { id: "hackernews", label: "HN", count: counts.hackernews || 0 },
+    { id: "devto", label: "Dev.to", count: counts.devto || 0 },
+    { id: "arxiv", label: "arXiv", count: counts.arxiv || 0 },
+    { id: "huggingface", label: "HF papers", count: counts.huggingface || 0 },
+    { id: "lobsters", label: "Lobsters", count: counts.lobsters || 0 },
+    { id: "news", label: "Press", count: counts.news || 0 },
+  ].filter((c) => c.id === "all" || c.count > 0);
+  if (state.digestFilter !== "all" && !chips.some((c) => c.id === state.digestFilter)) {
+    state.digestFilter = "all";
+  }
+  root.innerHTML = chips
+    .map(
+      (c) =>
+        `<button type="button" class="source-filter ${state.digestFilter === c.id ? "active" : ""}" data-filter="${c.id}">${escapeHtml(c.label)} · ${c.count}</button>`,
+    )
+    .join("");
+  root.querySelectorAll("[data-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.digestFilter = btn.dataset.filter || "all";
+      renderDigest();
+    });
+  });
+}
+
+function bindDigestWrite(root) {
+  root.querySelectorAll("[data-digest-title]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      setBusy(true);
+      try {
+        const templateId = $("#template-select")?.value || null;
+        const result = await api("/api/digest/start-run", {
+          method: "POST",
+          body: JSON.stringify({
+            title: decodeURIComponent(btn.dataset.digestTitle || ""),
+            url: decodeURIComponent(btn.dataset.digestUrl || ""),
+            description: decodeURIComponent(btn.dataset.digestDescription || ""),
+            templateId,
+          }),
+        });
+        toast(`Created run ${result.run.id}`);
+        await loadRuns();
+        state.selectedId = result.run.id;
+        state.run = result.run;
+        renderList();
+        renderDetail();
+        document.getElementById("detail")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        setBusy(false);
+      }
+    });
+  });
+}
+
+function renderDigest() {
+  const list = $("#topic-list");
+  const notes = $("#digest-notes");
+  const updated = $("#digest-updated");
+  if (!list) return;
+  const digest = state.digest;
+  if (digest === "loading") {
+    list.innerHTML = `<li class="empty">Loading GitHub, Reddit, HN, arXiv, Hugging Face, and tech press…</li>`;
+    if (notes) notes.hidden = true;
+    if (updated) updated.textContent = "Loading feeds…";
+    renderSourceFilters([]);
+    return;
+  }
+  if (!digest) {
+    list.innerHTML = `<li class="empty">Could not load topics. Click Refresh to try again.</li>`;
+    if (notes) notes.hidden = true;
+    if (updated) updated.textContent = "Not loaded";
+    renderSourceFilters([]);
+    return;
+  }
+  if (updated) {
+    updated.textContent = digest.generatedAt ? `Updated ${formatWhen(digest.generatedAt)}` : "Ready";
+  }
+  if (notes) {
+    notes.hidden = !(digest.notes && digest.notes.length);
+    notes.textContent = (digest.notes || []).join(" ");
+  }
+  const items = digestItems();
+  renderSourceFilters(items);
+  const filtered =
+    state.digestFilter === "all" ? items : items.filter((i) => i.platform === state.digestFilter);
+  list.innerHTML = filtered.length
+    ? filtered.map(digestCard).join("")
+    : `<li class="empty">No topics for this source yet.</li>`;
+  bindDigestWrite(list);
+}
+
+async function loadDigest(opts = {}) {
+  state.digest = "loading";
+  renderDigest();
+  try {
+    state.digest = await api("/api/digest", {
+      method: "POST",
+      body: JSON.stringify({ refresh: Boolean(opts.refresh) }),
+    });
+  } catch (error) {
+    state.digest = null;
+    renderDigest();
+    throw error;
+  }
+  renderDigest();
 }
 
 async function loadTopics() {
@@ -72,6 +523,11 @@ function renderTopics() {
     .map(
       (t) => `
     <li>
+      ${
+        t.signals?.find((s) => s.imageUrl)?.imageUrl
+          ? `<img class="topic-thumb" src="${escapeHtml(t.signals.find((s) => s.imageUrl).imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+          : ""
+      }
       <div class="topic-title">${escapeHtml(t.topic)}</div>
       <div class="meta">
         <span class="heat">heat ${t.heatScore}</span>
@@ -109,6 +565,7 @@ function renderTopics() {
         state.run = result.run;
         renderList();
         renderDetail();
+        document.getElementById("detail")?.scrollIntoView({ behavior: "smooth", block: "start" });
       } catch (e) {
         toast(e.message, true);
       } finally {
@@ -120,17 +577,22 @@ function renderTopics() {
 
 async function loadTemplates() {
   state.templates = await api("/api/templates");
-  const select = $("#template-select");
-  const current = select.value;
-  select.innerHTML =
+  const options =
     `<option value="">None (default structure)</option>` +
     state.templates
       .map((t) => `<option value="${t.id}">${escapeHtml(t.name)}</option>`)
       .join("");
-  if (current && state.templates.some((t) => t.id === current)) {
-    select.value = current;
+  for (const sel of ["#template-select", "#runs-template"]) {
+    const select = $(sel);
+    if (!select) continue;
+    const current = select.value;
+    select.innerHTML = options;
+    if (current && state.templates.some((t) => t.id === current)) {
+      select.value = current;
+    }
   }
   const list = $("#template-list");
+  if (!list) return;
   if (!state.templates.length) {
     list.innerHTML = `<li class="empty">No templates uploaded yet.</li>`;
     return;
@@ -141,7 +603,11 @@ async function loadTemplates() {
     <li>
       <div>
         <strong>${escapeHtml(t.name)}</strong>
-        <div class="meta">${escapeHtml(t.id)} · ${escapeHtml(t.filename || "pasted")}</div>
+        <div class="meta">${escapeHtml(t.id)} · ${escapeHtml(t.filename || "pasted")}${
+          t.chars
+            ? ` · ~${Math.ceil(t.chars / 4)} tokens`
+            : ""
+        }</div>
       </div>
       <button type="button" class="btn ghost" data-del-tpl="${t.id}">Delete</button>
     </li>`,
@@ -178,6 +644,7 @@ async function loadRuns() {
 
 function renderList() {
   const list = $("#run-list");
+  if (!list) return;
   if (!state.runs.length) {
     list.innerHTML = `<li class="empty">No runs yet.</li>`;
     return;
@@ -218,24 +685,98 @@ function escapeHtml(s) {
 
 function setBusy(busy) {
   state.busy = busy;
-  document.querySelectorAll(".actions .btn, .form-actions .btn").forEach((b) => {
-    b.disabled = busy;
-  });
+  document
+    .querySelectorAll(
+      ".actions .btn, .form-actions .btn, .template-bar .btn, #load-digest, #runs-write, #save-llm",
+    )
+    .forEach((b) => {
+      b.disabled = busy;
+    });
+}
+
+const PUBLISH_SITES = [
+  { id: "spanwrap", label: "Spanwrap", note: "Live HTTP publish" },
+  { id: "medium", label: "Medium", note: "Planned" },
+  { id: "substack", label: "Substack", note: "Planned" },
+];
+
+const TAB_LABELS = {
+  quality: "Quality",
+  article: "Article",
+  publish: "Publish",
+  outline: "Outline",
+  template: "Template",
+  sources: "Sources",
+  analysis: "Analysis",
+  stages: "Stages",
+  raw: "Raw",
+};
+
+function selectedTargets(run) {
+  return Array.isArray(run.publishTargets) && run.publishTargets.length
+    ? run.publishTargets
+    : ["spanwrap"];
+}
+
+function collectReviewPayload(root, run) {
+  const a = run.article;
+  if (!a) throw new Error("No article to save");
+  const title = String(root.querySelector("#draft-title")?.value || "").trim();
+  const excerpt = String(root.querySelector("#draft-excerpt")?.value || "").trim();
+  const content = String(root.querySelector("#draft-content")?.value || "").trim();
+  const featured = String(root.querySelector("#draft-featured")?.value || "").trim();
+  const publishTargets = [...root.querySelectorAll("input[name=publish-target]:checked")].map(
+    (el) => el.value,
+  );
+  if (!title) throw new Error("Title is required");
+  if (!excerpt) throw new Error("Excerpt is required");
+  if (!content) throw new Error("Body is required");
+  if (!publishTargets.length) throw new Error("Select at least one publishing site");
+  return {
+    article: {
+      ...a,
+      title,
+      excerpt,
+      content,
+      featuredImage: featured || null,
+      seoTitle: a.seoTitle || title,
+      seoDescription: a.seoDescription || excerpt,
+    },
+    publishTargets,
+  };
+}
+
+function insertAtCursor(textarea, text) {
+  const start = textarea.selectionStart ?? textarea.value.length;
+  const end = textarea.selectionEnd ?? textarea.value.length;
+  const next = textarea.value.slice(0, start) + text + textarea.value.slice(end);
+  textarea.value = next;
+  const caret = start + text.length;
+  textarea.selectionStart = textarea.selectionEnd = caret;
+  textarea.focus();
 }
 
 async function act(action, body) {
-  if (!state.selectedId) return;
+  if (!state.selectedId) return null;
   setBusy(true);
   try {
     state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/${action}`, {
       method: "POST",
       body: body ? JSON.stringify(body) : "{}",
     });
-    toast(`${action} complete → ${state.run.status}`);
+    toastRunResult(state.run, `${action} complete`);
+    if (state.run?.article && ["run", "generate", "quality-check"].includes(action)) {
+      state.tab = "quality";
+    }
+    if (action === "approve") {
+      state.tab = "publish";
+    }
     await loadRuns();
     renderDetail();
+    return state.run;
   } catch (e) {
     toast(e.message, true);
+    return null;
   } finally {
     setBusy(false);
   }
@@ -273,7 +814,8 @@ async function createRun(andRun) {
         method: "POST",
         body: "{}",
       });
-      toast(`Run finished → ${state.run.status}`);
+      toastRunResult(state.run, "Run finished");
+      if (state.run?.article) state.tab = "quality";
       await loadRuns();
     } else {
       state.run = run;
@@ -295,8 +837,15 @@ function renderDetail() {
     return;
   }
 
-    const tabs = ["article", "outline", "template", "sources", "analysis", "quality", "stages", "raw"];
+  const tabs = ["quality", "article", "publish", "outline", "template", "sources", "analysis", "stages", "raw"];
   const content = renderTab(run, state.tab);
+  const templateOptions = [
+    `<option value="">None (default structure)</option>`,
+    ...state.templates.map(
+      (t) =>
+        `<option value="${t.id}" ${run.templateId === t.id ? "selected" : ""}>${escapeHtml(t.name)}</option>`,
+    ),
+  ].join("");
 
   root.innerHTML = `
     <div class="detail-head">
@@ -307,25 +856,35 @@ function renderDetail() {
           <span class="status ${statusClass(run.status)}">${run.status}</span>
           ${run.templateName ? ` · template: ${escapeHtml(run.templateName)}` : " · no template"}
           ${run.quality ? ` · quality ${run.quality.score} (${run.quality.passed ? "pass" : "flag"})` : ""}
-          ${run.error ? ` · <span style="color:var(--danger)">${escapeHtml(run.error)}</span>` : ""}
         </p>
+        ${run.error ? `<p class="run-error">${escapeHtml(run.error)}</p>` : ""}
       </div>
     </div>
+    <div class="template-bar">
+      <label>
+        Assign template
+        <select id="detail-template">${templateOptions}</select>
+      </label>
+      <button type="button" class="btn primary" id="assign-template">Assign template</button>
+    </div>
+    <p class="hint">
+      The template's sections and instructions go to the LLM with this topic and the research sources.
+      Assign before <strong>Run to review</strong> or <strong>Generate</strong>.
+      Keep templates short — a large template can exceed the model's input/TPM limit.
+    </p>
     <div class="actions">
       <button class="btn primary" data-act="run">Run to review</button>
       <button class="btn" data-act="research">Research</button>
       <button class="btn" data-act="outline">Outline</button>
       <button class="btn" data-act="generate">Generate</button>
-      <button class="btn" data-act="quality-check">Quality</button>
-      <button class="btn" data-act="approve">Approve</button>
-      <button class="btn" data-act="reject">Reject</button>
-      <button class="btn" data-act="publish">Publish</button>
+      <button class="btn" data-act="quality-check">Quality score</button>
+      <button class="btn" data-act="publish-preview">Open publish</button>
     </div>
     <div class="tabs">
       ${tabs
         .map(
           (t) =>
-            `<button type="button" data-tab="${t}" class="${state.tab === t ? "active" : ""}">${t}</button>`,
+            `<button type="button" data-tab="${t}" class="${state.tab === t ? "active" : ""}">${TAB_LABELS[t] || t}</button>`,
         )
         .join("")}
     </div>
@@ -335,6 +894,11 @@ function renderDetail() {
   root.querySelectorAll("[data-act]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const action = btn.dataset.act;
+      if (action === "publish-preview") {
+        state.tab = "publish";
+        renderDetail();
+        return;
+      }
       if (action === "approve" || action === "reject") {
         const notes = prompt(`${action} notes (optional)`) ?? undefined;
         await act(action, notes ? { notes } : {});
@@ -374,16 +938,284 @@ function renderDetail() {
   const assignTpl = root.querySelector("#assign-template");
   if (assignTpl) {
     assignTpl.addEventListener("click", async () => {
-      const templateId = root.querySelector("#run-template").value || null;
+      const templateId =
+        root.querySelector("#detail-template")?.value ||
+        root.querySelector("#run-template")?.value ||
+        null;
       await act("assign-template", { templateId });
     });
   }
+  const confirmPublish = root.querySelector("#confirm-publish");
+  if (confirmPublish) {
+    confirmPublish.addEventListener("click", async () => {
+      await act("publish");
+    });
+  }
+  bindQualityEditor(root, run);
+}
+
+function featuredImageFor(run, articleOverride) {
+  const a = articleOverride || run.article;
+  if (!a) return null;
+  if (a.featuredImage && /^https?:\/\//i.test(a.featuredImage)) return a.featuredImage;
+  const md = String(a.content || "").match(/!\[[^\]]*]\(\s*(https?:\/\/[^)\s]+)\s*\)/);
+  if (md?.[1]) return md[1];
+  const gh = (a.sources || [])
+    .map((s) => s.url)
+    .find((u) => /github\.com\/[^/]+\/[^/]+/i.test(u || ""));
+  if (gh) {
+    const m = gh.match(/github\.com\/([^/]+)\/([^/#?]+)/i);
+    if (m) return `https://opengraph.githubassets.com/1/${m[1]}/${m[2]}`;
+  }
+  return null;
+}
+
+function renderPostArticle(run, article) {
+  const a = article || run.article;
+  if (!a) return `<p class="empty">No draft yet.</p>`;
+  const hero = featuredImageFor(run, a);
+  return `
+    <article class="post-preview">
+      <p class="post-kicker">${escapeHtml(a.slug || "")} · ${escapeHtml((a.tags || []).join(" · "))}</p>
+      ${
+        hero
+          ? `<img class="post-hero" src="${escapeHtml(hero)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+          : ""
+      }
+      <h1>${escapeHtml(a.title)}</h1>
+      ${a.subtitle ? `<p class="post-dek">${escapeHtml(a.subtitle)}</p>` : ""}
+      <p class="post-excerpt">${escapeHtml(a.excerpt || "")}</p>
+      <div class="post-body">${renderMarkdown(a.content)}</div>
+      ${
+        (a.sources || []).length
+          ? `<aside class="post-sources"><h3>Sources</h3><ul>${a.sources
+              .map(
+                (s) =>
+                  `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title || s.url)}</a></li>`,
+              )
+              .join("")}</ul></aside>`
+          : ""
+      }
+    </article>`;
+}
+
+function liveDraftFromEditor(root, run) {
+  const a = run.article;
+  if (!a) return null;
+  return {
+    ...a,
+    title: String(root.querySelector("#draft-title")?.value || a.title),
+    excerpt: String(root.querySelector("#draft-excerpt")?.value || a.excerpt),
+    content: String(root.querySelector("#draft-content")?.value || a.content),
+    featuredImage: String(root.querySelector("#draft-featured")?.value || "").trim() || a.featuredImage,
+  };
+}
+
+function refreshQualityPreview(root, run) {
+  const mount = root.querySelector("#quality-preview-mount");
+  if (!mount) return;
+  const live = liveDraftFromEditor(root, run);
+  mount.innerHTML = renderPostArticle(run, live);
+}
+
+function bindQualityEditor(root, run) {
+  const previewInputs = root.querySelectorAll("#draft-title, #draft-excerpt, #draft-content, #draft-featured");
+  previewInputs.forEach((el) => {
+    el.addEventListener("input", () => refreshQualityPreview(root, run));
+  });
+  const insertImage = root.querySelector("#insert-image");
+  if (insertImage) {
+    insertImage.addEventListener("click", () => {
+      const url = String(root.querySelector("#image-url")?.value || "").trim();
+      const alt = String(root.querySelector("#image-alt")?.value || "Image").trim() || "Image";
+      const textarea = root.querySelector("#draft-content");
+      if (!url || !/^https?:\/\//i.test(url)) {
+        toast("Enter an http(s) image URL", true);
+        return;
+      }
+      if (!textarea) return;
+      insertAtCursor(textarea, `\n\n![${alt}](${url})\n\n`);
+      const featured = root.querySelector("#draft-featured");
+      if (featured && !String(featured.value || "").trim()) featured.value = url;
+      refreshQualityPreview(root, run);
+    });
+  }
+  const saveReview = root.querySelector("#save-review");
+  if (saveReview) {
+    saveReview.addEventListener("click", async () => {
+      try {
+        await act("save-review", collectReviewPayload(root, run));
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  }
+  const approveReview = root.querySelector("#approve-review");
+  if (approveReview) {
+    approveReview.addEventListener("click", async () => {
+      try {
+        const saved = await act("save-review", collectReviewPayload(root, run));
+        if (!saved) return;
+        const notes = prompt("Approve notes (optional)") ?? undefined;
+        await act("approve", notes ? { notes } : {});
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  }
+  const rejectReview = root.querySelector("#reject-review");
+  if (rejectReview) {
+    rejectReview.addEventListener("click", async () => {
+      const notes = prompt("Reject notes (optional)") ?? undefined;
+      await act("reject", notes ? { notes } : {});
+    });
+  }
+}
+
+function renderMarkdown(md) {
+  const escaped = escapeHtml(md || "");
+  const blocks = escaped
+    .replace(/```[\s\S]*?```/g, (block) => `<pre class="pre">${block.replace(/```/g, "")}</pre>`)
+    .replace(/^### (.+)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.+)$/gm, "<h2>$1</h2>")
+    .replace(/^# (.+)$/gm, "<h1>$1</h1>")
+    .replace(/^\s*[-*] (.+)$/gm, "<li>$1</li>")
+    .replace(/(<li>.*<\/li>\n?)+/g, (list) => `<ul>${list}</ul>`)
+    .replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, (_all, alt, src) => {
+      return `<figure class="post-figure"><img src="${src}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer" /><figcaption>${alt}</figcaption></figure>`;
+    })
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\n\n+/g, "</p><p>");
+  return `<p>${blocks}</p>`;
+}
+
+function renderPublishPreview(run) {
+  const a = run.article;
+  if (!a) {
+    return `<p class="empty">No draft yet. Assign a template, then Run to review or Generate.</p>`;
+  }
+  const targets = selectedTargets(run);
+  const destLabels = targets
+    .map((id) => PUBLISH_SITES.find((s) => s.id === id)?.label || id)
+    .join(", ");
+  const canPublish = ["APPROVED", "PUBLISH_FAILED"].includes(run.status);
+  const results = Array.isArray(run.publishResults) && run.publishResults.length
+    ? run.publishResults
+    : run.publishResult
+      ? [run.publishResult]
+      : [];
+  return `
+    <p class="hint">
+      Approved draft for <strong>${escapeHtml(destLabels || "no sites selected")}</strong>.
+      Spanwrap publishes now. Medium and Substack are planned connectors.
+    </p>
+    ${renderPostArticle(run, a)}
+    ${
+      results.length
+        ? `<ul class="issues" style="margin-top:1rem">${results
+            .map((r) => {
+              const label = r.target
+                ? PUBLISH_SITES.find((s) => s.id === r.target)?.label || r.target
+                : "Publish";
+              const ok = r.success ? "Published" : r.statusCode === 501 ? "Planned" : "Failed";
+              return `<li><strong>${escapeHtml(label)}</strong> · ${ok} — ${escapeHtml(r.message || "")}${
+                r.externalId ? ` · id ${escapeHtml(r.externalId)}` : ""
+              }</li>`;
+            })
+            .join("")}</ul>`
+        : ""
+    }
+    <div class="form-actions" style="margin-top:1rem">
+      <button type="button" class="btn primary" id="confirm-publish" ${canPublish ? "" : "disabled"}>
+        Publish to selected sites
+      </button>
+    </div>
+    ${
+      canPublish
+        ? ""
+        : `<p class="hint">Approve this draft in the Quality tab first (current status: ${escapeHtml(run.status)}).</p>`
+    }
+  `;
+}
+
+function renderQualityTab(run) {
+  const a = run.article;
+  if (!a) {
+    return `<p class="empty">No draft yet. Assign a template above, then Run to review or Generate.</p>`;
+  }
+  const targets = selectedTargets(run);
+  const dest = PUBLISH_SITES.map(
+    (site) => `
+      <label class="check">
+        <input type="checkbox" name="publish-target" value="${site.id}" ${
+          targets.includes(site.id) ? "checked" : ""
+        } />
+        <span><strong>${escapeHtml(site.label)}</strong> · ${escapeHtml(site.note)}</span>
+      </label>`,
+  ).join("");
+  const q = run.quality;
+  return `
+    ${
+      q
+        ? `<div class="quality-score">
+            Score <strong>${q.score}</strong> · ${q.passed ? "pass" : "flag"}
+            <ul class="issues">
+              ${(q.issues || [])
+                .map(
+                  (i) =>
+                    `<li><strong>${escapeHtml(i.severity)}</strong> ${escapeHtml(i.type)} — ${escapeHtml(i.message)}</li>`,
+                )
+                .join("")}
+            </ul>
+          </div>`
+        : `<p class="hint">Optional: click <strong>Quality score</strong> after generating to flag issues. You can still edit and approve here.</p>`
+    }
+    <div class="quality-layout">
+      <div class="quality-editor">
+        <p class="hint">Edit the draft, add images, choose publishing sites, then Approve or Reject.</p>
+        <label>Title
+          <input id="draft-title" value="${escapeHtml(a.title || "")}" />
+        </label>
+        <label>Excerpt
+          <textarea id="draft-excerpt" class="short">${escapeHtml(a.excerpt || "")}</textarea>
+        </label>
+        <label>Featured image URL
+          <input id="draft-featured" placeholder="https://" value="${escapeHtml(a.featuredImage || "")}" />
+        </label>
+        <div class="image-insert">
+          <label>Image alt
+            <input id="image-alt" placeholder="Caption" />
+          </label>
+          <label>Image URL
+            <input id="image-url" placeholder="https://" />
+          </label>
+          <button type="button" class="btn" id="insert-image">Add image to draft</button>
+        </div>
+        <label>Body (Markdown)
+          <textarea id="draft-content">${escapeHtml(a.content || "")}</textarea>
+        </label>
+        <fieldset class="destinations">
+          <legend>Publish to</legend>
+          ${dest}
+        </fieldset>
+        <div class="form-actions">
+          <button type="button" class="btn" id="save-review">Save draft</button>
+          <button type="button" class="btn danger" id="reject-review">Reject</button>
+          <button type="button" class="btn primary" id="approve-review">Approve</button>
+        </div>
+      </div>
+      <div class="quality-preview">
+        <p class="hint">Preview</p>
+        <div id="quality-preview-mount">${renderPostArticle(run, a)}</div>
+      </div>
+    </div>`;
 }
 
 function renderTab(run, tab) {
   if (tab === "article") {
     const a = run.article;
-    if (!a) return `<p class="empty">No article yet. Run generate or full pipeline.</p>`;
+    if (!a) return `<p class="empty">No article yet. Run generate or Write blog from Runs.</p>`;
     return `
       <h3>${escapeHtml(a.title)}</h3>
       <p style="color:var(--muted)">${escapeHtml(a.excerpt || "")}</p>
@@ -396,6 +1228,9 @@ function renderTab(run, tab) {
         </div>
       </details>`;
   }
+  if (tab === "publish") {
+    return renderPublishPreview(run);
+  }
   if (tab === "outline") {
     if (!run.outline) return `<p class="empty">No outline yet.</p>`;
     return `
@@ -405,25 +1240,15 @@ function renderTab(run, tab) {
       </div>`;
   }
   if (tab === "template") {
-    const options = [
-      `<option value="">None</option>`,
-      ...state.templates.map(
-        (t) =>
-          `<option value="${t.id}" ${run.templateId === t.id ? "selected" : ""}>${escapeHtml(t.name)}</option>`,
-      ),
-    ].join("");
     return `
-      <p class="hint">Snapshot used at generation time is shown below. Changing assignment clears outline/article so you can regenerate.</p>
-      <label>Assign template
-        <select id="run-template">${options}</select>
-      </label>
-      <div class="form-actions" style="margin-top:0.6rem">
-        <button type="button" class="btn" id="assign-template">Save assignment</button>
-      </div>
+      <p class="hint">
+        This snapshot is sent to the LLM as section guidelines and instructions with the topic and sources.
+        Re-assign from the header above to change it (that clears outline and draft so they can regenerate).
+      </p>
       ${
         run.templateMarkdown
-          ? `<pre class="pre" style="margin-top:0.8rem">${escapeHtml(run.templateMarkdown)}</pre>`
-          : `<p class="empty">No template on this run.</p>`
+          ? `<pre class="pre">${escapeHtml(run.templateMarkdown)}</pre>`
+          : `<p class="empty">No template on this run. Use Assign template in the header.</p>`
       }`;
   }
   if (tab === "sources") {
@@ -444,17 +1269,7 @@ function renderTab(run, tab) {
     return `<pre class="pre">${escapeHtml(JSON.stringify(run.analysis, null, 2))}</pre>`;
   }
   if (tab === "quality") {
-    if (!run.quality) return `<p class="empty">No quality result yet.</p>`;
-    return `
-      <p>Score <strong>${run.quality.score}</strong> · passed=${run.quality.passed}</p>
-      <ul class="issues">
-        ${(run.quality.issues || [])
-          .map(
-            (i) =>
-              `<li><strong>${escapeHtml(i.severity)}</strong> ${escapeHtml(i.type)} — ${escapeHtml(i.message)}</li>`,
-          )
-          .join("")}
-      </ul>`;
+    return renderQualityTab(run);
   }
   if (tab === "stages") {
     return `<pre class="pre">${escapeHtml(JSON.stringify(run.stages || [], null, 2))}</pre>`;
@@ -462,12 +1277,88 @@ function renderTab(run, tab) {
   return `<pre class="pre">${escapeHtml(JSON.stringify(run, null, 2))}</pre>`;
 }
 
-$("#create-form").addEventListener("submit", (e) => {
+$("#create-form")?.addEventListener("submit", (e) => {
   e.preventDefault();
   createRun(false);
 });
-$("#create-and-run").addEventListener("click", () => createRun(true));
+$("#create-and-run")?.addEventListener("click", () => createRun(true));
+async function writeBlogFromRun() {
+  if (!state.selectedId) {
+    toast("Select a run in the list first", true);
+    return;
+  }
+  const templateId = $("#runs-template")?.value || null;
+  setBusy(true);
+  try {
+    let run = state.run;
+    if (!run || run.id !== state.selectedId) {
+      run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+      state.run = run;
+    }
+    const locked = ["PUBLISHED", "APPROVED"].includes(run.status);
+    if (locked) {
+      const created = await api("/api/runs", {
+        method: "POST",
+        body: JSON.stringify({
+          topic: run.brief.topic,
+          targetAudience: run.brief.targetAudience,
+          tone: run.brief.tone,
+          keywords: run.brief.keywords || [],
+          referenceUrls: run.brief.referenceUrls || [],
+          templateId,
+        }),
+      });
+      state.selectedId = created.id;
+      state.run = await api(`/api/runs/${encodeURIComponent(created.id)}/run`, {
+        method: "POST",
+        body: "{}",
+      });
+      toastRunResult(state.run, `Wrote new draft ${state.run.id}`);
+    } else {
+      if (templateId !== (run.templateId || null)) {
+        await api(`/api/runs/${encodeURIComponent(run.id)}/assign-template`, {
+          method: "POST",
+          body: JSON.stringify({ templateId }),
+        });
+      }
+      state.run = await api(`/api/runs/${encodeURIComponent(run.id)}/run`, {
+        method: "POST",
+        body: "{}",
+      });
+      toastRunResult(state.run, "Write blog finished");
+    }
+    if (state.run?.article) state.tab = "quality";
+    await loadRuns();
+    renderList();
+    renderDetail();
+    document.getElementById("detail")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) {
+    toast(e.message, true);
+    await loadRuns().catch(() => {});
+    if (state.selectedId) {
+      try {
+        state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+        renderDetail();
+      } catch {
+        /* keep current */
+      }
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
 $("#refresh").addEventListener("click", () => loadRuns().catch((e) => toast(e.message, true)));
+$("#runs-write")?.addEventListener("click", () => writeBlogFromRun());
+
+function updateTemplateSizeHint(markdown) {
+  const el = $("#template-size-hint");
+  if (!el) return;
+  const chars = String(markdown || "").length;
+  const tokens = Math.ceil(chars / 4);
+  el.textContent = `Rough size: ${chars.toLocaleString()} characters (~${tokens.toLocaleString()} tokens). Aim under ~1,500 tokens so topic + research still fit.`;
+  el.classList.toggle("hint-warn", tokens > 1500);
+}
 
 $("#template-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -483,15 +1374,78 @@ $("#template-form").addEventListener("submit", async (e) => {
       filename = file.name;
     }
     if (!markdown) throw new Error("Provide a .md file or paste markdown");
+    const tokens = Math.ceil(markdown.length / 4);
     await api("/api/templates", {
       method: "POST",
       body: JSON.stringify({ name, markdown, filename }),
     });
-    toast("Template saved");
+    if (tokens > 1500) {
+      toast(
+        `Template saved (~${tokens.toLocaleString()} tokens). That is large for Groq's free TPM cap — keep headings and short instructions so generation does not 413.`,
+      );
+    } else {
+      toast("Template saved");
+    }
     form.reset();
+    updateTemplateSizeHint("");
     await loadTemplates();
   } catch (err) {
     toast(err.message, true);
+  }
+});
+
+$("#llm-provider")?.addEventListener("change", () => {
+  const provider = $("#llm-provider").value;
+  const providers = llmProviderList(llmCatalog);
+  const info = providers.find((p) => p.id === provider);
+  fillLlmForm({
+    ...(llmCatalog || {}),
+    providers,
+    provider,
+    model: info?.defaultModel || "",
+    hasKey: llmCatalog && provider === llmCatalog.provider ? llmCatalog.hasKey : false,
+    keyPreview: llmCatalog && provider === llmCatalog.provider ? llmCatalog.keyPreview : null,
+    remappedFrom: null,
+  });
+});
+
+$("#llm-model-select")?.addEventListener("change", () => {
+  const wrap = $("#llm-model-custom-wrap");
+  if (wrap) wrap.hidden = $("#llm-model-select").value !== "__custom__";
+});
+
+$("#save-llm")?.addEventListener("click", async () => {
+  setBusy(true);
+  try {
+    const provider = $("#llm-provider")?.value;
+    const model = selectedLlmModel();
+    const apiKey = String($("#llm-api-key")?.value || "").trim();
+    const saved = await api("/api/llm", {
+      method: "POST",
+      body: JSON.stringify({ provider, model, apiKey: apiKey || undefined }),
+    });
+    fillLlmForm(saved);
+    toast(`LLM set to ${saved.provider} · ${saved.model}`);
+    await loadHealth();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$("#load-digest")?.addEventListener("click", async () => {
+  setBusy(true);
+  try {
+    await loadDigest({ refresh: true });
+    const d = state.digest;
+    toast(
+      `Digest: ${d.github?.length ?? 0} GitHub · ${d.reddit?.length ?? 0} Reddit · ${d.x?.length ?? 0} X`,
+    );
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    setBusy(false);
   }
 });
 
@@ -513,5 +1467,159 @@ $("#discover-topics")?.addEventListener("click", async () => {
   }
 });
 
-loadHealth();
-Promise.all([loadTemplates(), loadRuns(), loadTopics()]).catch((e) => toast(e.message, true));
+$("#llm-form")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  $("#save-llm")?.click();
+});
+
+async function loadLogs() {
+  const list = $("#activity-list");
+  if (!list) return;
+  try {
+    const data = await api("/api/logs?limit=80");
+    const entries = data.entries || [];
+    if (!entries.length) {
+      list.innerHTML = `<li class="empty">No activity yet.</li>`;
+      return;
+    }
+    list.innerHTML = entries
+      .map((entry) => {
+        const extra = [
+          entry.details?.topic,
+          entry.details?.runId,
+          entry.details?.name,
+          entry.details?.createdUsername,
+        ]
+          .filter(Boolean)
+          .map((v) => escapeHtml(String(v)))
+          .join(" · ");
+        return `<li>
+        <strong>${escapeHtml(activityLabel(entry.action))}</strong>
+        <div class="meta">${escapeHtml(entry.username || "—")} · ${escapeHtml(formatWhen(entry.at))}${
+          extra ? ` · ${extra}` : ""
+        }</div>
+      </li>`;
+      })
+      .join("");
+  } catch (e) {
+    list.innerHTML = `<li class="empty">${escapeHtml(e.message)}</li>`;
+  }
+}
+
+async function loadUsers() {
+  const list = $("#user-list");
+  if (!list) return;
+  try {
+    const data = await api("/api/auth/users");
+    const users = data.users || [];
+    if (!users.length) {
+      list.innerHTML = `<li class="empty">No people yet.</li>`;
+      return;
+    }
+    list.innerHTML = users
+      .map(
+        (u) => `<li>
+        <strong>${escapeHtml(u.username)}</strong>
+        <div class="meta">added ${escapeHtml(formatWhen(u.createdAt))}${
+          u.lastLoginAt ? ` · last sign-in ${escapeHtml(formatWhen(u.lastLoginAt))}` : ""
+        }</div>
+      </li>`,
+      )
+      .join("");
+  } catch (e) {
+    list.innerHTML = `<li class="empty">${escapeHtml(e.message)}</li>`;
+  }
+}
+
+$("#auth-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("#auth-error");
+  const username = String($("#auth-username")?.value || "").trim();
+  const password = String($("#auth-password")?.value || "");
+  try {
+    const path = setupMode ? "/api/auth/setup" : "/api/auth/login";
+    const data = await api(path, {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    showAppShell(data.username);
+    applyPage();
+    loadHealth();
+    const boot = [loadLlm(), loadTemplates()];
+    if (isSettingsPage()) boot.push(loadLogs(), loadUsers());
+    else boot.push(loadRuns(), loadDigest());
+    await Promise.all(boot);
+  } catch (ex) {
+    if (err) {
+      err.hidden = false;
+      err.textContent = ex.message;
+    } else {
+      toast(ex.message, true);
+    }
+  }
+});
+
+$("#logout-btn")?.addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST", body: "{}" });
+  } catch {
+    /* still lock the UI */
+  }
+  showAuthGate(false);
+});
+
+$("#refresh-logs")?.addEventListener("click", () => {
+  loadLogs().catch((e) => toast(e.message, true));
+});
+
+$("#add-user-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const fd = new FormData(form);
+  try {
+    await api("/api/auth/users", {
+      method: "POST",
+      body: JSON.stringify({
+        username: String(fd.get("username") || ""),
+        password: String(fd.get("password") || ""),
+      }),
+    });
+    form.reset();
+    toast("Person added");
+    await loadUsers();
+    await loadLogs();
+  } catch (ex) {
+    toast(ex.message, true);
+  }
+});
+
+applyPage();
+fillLlmForm({
+  provider: "groq",
+  model: "openai/gpt-oss-20b",
+  providers: LLM_PROVIDERS,
+  hasKey: false,
+});
+updateTemplateSizeHint("");
+$("#template-markdown")?.addEventListener("input", (e) => updateTemplateSizeHint(e.target.value));
+$("#template-form")?.querySelector('input[type="file"]')?.addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    updateTemplateSizeHint(await file.text());
+  } catch {
+    /* ignore */
+  }
+});
+
+async function bootApp() {
+  const ok = await ensureAuth();
+  if (!ok) return;
+  loadHealth();
+  const boot = [loadLlm(), loadTemplates()];
+  if (isSettingsPage()) boot.push(loadLogs(), loadUsers());
+  else boot.push(loadRuns(), loadDigest());
+  await Promise.all(boot);
+}
+
+bootApp().catch((e) => toast(e.message, true));

@@ -8,7 +8,24 @@ import { createOrchestrator } from "../pipeline";
 import { logger } from "../services/logger";
 import { getTemplateStore, uploadTemplate } from "../services/templates";
 import { discoverTopicRecommendations } from "../services/topic-discovery";
+import { discoverTechDigest } from "../services/tech-digest";
 import { getTopicStore } from "../services/topic-store";
+import { ensureLlmSettings, getResolvedLlmConfig, publicLlmStatus, saveLlmSettings } from "../services/llm-settings";
+import {
+  authenticateUser,
+  clearLoginFailures,
+  clearSessionCookieHeader,
+  clientIp,
+  createUser,
+  ensureSeedUser,
+  getUserStore,
+  loginRateLimited,
+  sessionCookieHeader,
+  sessionFromRequest,
+  signSession,
+  type SessionUser,
+} from "../services/auth";
+import { getActivityLogStore, recordActivity } from "../services/activity-log";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const publicCandidates = [
@@ -21,6 +38,8 @@ const publicCandidates = [
 const tracedStatic = {
   "/": new URL("./public/index.html", import.meta.url),
   "/index.html": new URL("./public/index.html", import.meta.url),
+  "/settings": new URL("./public/index.html", import.meta.url),
+  "/settings/": new URL("./public/index.html", import.meta.url),
   "/styles.css": new URL("./public/styles.css", import.meta.url),
   "/app.js": new URL("./public/app.js", import.meta.url),
 } as const;
@@ -41,22 +60,42 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown) {
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  extraHeaders?: Record<string, string>,
+) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
+    ...extraHeaders,
   });
   res.end(payload);
 }
 
+function isPublicAuthPath(method: string, pathname: string): boolean {
+  if (pathname === "/api/auth/me" && method === "GET") return true;
+  if (pathname === "/api/auth/login" && method === "POST") return true;
+  if (pathname === "/api/auth/setup" && method === "POST") return true;
+  return false;
+}
+
 async function serveStatic(res: ServerResponse, urlPath: string) {
+  if (urlPath === "/settings" || urlPath === "/settings/") {
+    urlPath = "/";
+  }
   const traced = tracedStatic[urlPath as keyof typeof tracedStatic];
   if (traced) {
     try {
       const data = await readFile(traced);
       const ext = path.extname(traced.pathname);
-      res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
+      const headers: Record<string, string> = {
+        "Content-Type": MIME[ext] ?? "application/octet-stream",
+      };
+      if (ext === ".html") headers["Cache-Control"] = "no-store";
+      res.writeHead(200, headers);
       res.end(data);
       return;
     } catch {
@@ -74,7 +113,11 @@ async function serveStatic(res: ServerResponse, urlPath: string) {
     try {
       const data = await readFile(filePath);
       const ext = path.extname(filePath);
-      res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
+      const headers: Record<string, string> = {
+        "Content-Type": MIME[ext] ?? "application/octet-stream",
+      };
+      if (ext === ".html") headers["Cache-Control"] = "no-store";
+      res.writeHead(200, headers);
       res.end(data);
       return;
     } catch {
@@ -91,26 +134,239 @@ function orch() {
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
   const method = req.method ?? "GET";
   const pathname = url.pathname;
+  const ip = clientIp(req);
 
   try {
+    await ensureSeedUser();
+    await ensureLlmSettings();
+
+    if (method === "GET" && pathname === "/api/auth/me") {
+      const session = sessionFromRequest(req);
+      const setupRequired = (await getUserStore().count()) === 0;
+      return sendJson(res, 200, {
+        authenticated: Boolean(session),
+        username: session?.username ?? null,
+        setupRequired,
+      });
+    }
+
+    if (method === "POST" && pathname === "/api/auth/setup") {
+      if ((await getUserStore().count()) > 0) {
+        return sendJson(res, 409, { error: "An account already exists. Sign in instead." });
+      }
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const created = await createUser(String(body.username ?? ""), String(body.password ?? ""));
+      const token = signSession(created.username);
+      await recordActivity({
+        username: created.username,
+        action: "account_setup",
+        method,
+        path: pathname,
+        ip,
+      });
+      return sendJson(res, 201, { username: created.username }, {
+        "Set-Cookie": sessionCookieHeader(token, req),
+      });
+    }
+
+    if (method === "POST" && pathname === "/api/auth/login") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const username = String(body.username ?? "");
+      const rateKey = `${ip}:${username.trim().toLowerCase()}`;
+      if (loginRateLimited(rateKey)) {
+        await recordActivity({
+          username: username.trim().toLowerCase() || null,
+          action: "login_blocked",
+          method,
+          path: pathname,
+          ip,
+        });
+        return sendJson(res, 429, { error: "Too many sign-in attempts. Try again in 15 minutes." });
+      }
+      try {
+        const user = await authenticateUser(username, String(body.password ?? ""));
+        clearLoginFailures(rateKey);
+        const token = signSession(user.username);
+        await recordActivity({
+          username: user.username,
+          action: "login",
+          method,
+          path: pathname,
+          ip,
+        });
+        return sendJson(res, 200, { username: user.username }, {
+          "Set-Cookie": sessionCookieHeader(token, req),
+        });
+      } catch (error) {
+        await recordActivity({
+          username: username.trim().toLowerCase() || null,
+          action: "login_failed",
+          method,
+          path: pathname,
+          ip,
+        });
+        const message = error instanceof Error ? error.message : "Invalid username or password";
+        return sendJson(res, 401, { error: message });
+      }
+    }
+
+    if (method === "POST" && pathname === "/api/auth/logout") {
+      const session = sessionFromRequest(req);
+      await recordActivity({
+        username: session?.username ?? null,
+        action: "logout",
+        method,
+        path: pathname,
+        ip,
+      });
+      return sendJson(res, 200, { ok: true }, {
+        "Set-Cookie": clearSessionCookieHeader(req),
+      });
+    }
+
+    if (!isPublicAuthPath(method, pathname)) {
+      const session = sessionFromRequest(req);
+      if (!session) {
+        return sendJson(res, 401, { error: "Sign in required" });
+      }
+      return handleAuthedApi(req, res, url, session, ip);
+    }
+
+    return sendJson(res, 404, { error: "Not found" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("API error", { path: pathname, error: message });
+    return sendJson(res, 400, { error: message });
+  }
+}
+
+async function handleAuthedApi(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  session: SessionUser,
+  ip: string,
+) {
+  const method = req.method ?? "GET";
+  const pathname = url.pathname;
+  const log = (action: string, details?: Record<string, unknown>) =>
+    recordActivity({
+      username: session.username,
+      action,
+      method,
+      path: pathname,
+      ip,
+      details,
+    });
+
+  try {
+    if (method === "GET" && pathname === "/api/logs") {
+      const limitRaw = url.searchParams.get("limit");
+      const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 80;
+      const entries = await getActivityLogStore().list(Number.isFinite(limit) ? limit : 80);
+      return sendJson(res, 200, { entries });
+    }
+
+    if (method === "GET" && pathname === "/api/auth/users") {
+      const users = await getUserStore().list();
+      return sendJson(res, 200, { users });
+    }
+
+    if (method === "POST" && pathname === "/api/auth/users") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const created = await createUser(String(body.username ?? ""), String(body.password ?? ""));
+      await recordActivity({
+        username: session.username,
+        action: "user_created",
+        method,
+        path: pathname,
+        ip,
+        details: { createdUsername: created.username },
+      });
+      return sendJson(res, 201, created);
+    }
+
     if (method === "GET" && pathname === "/api/health") {
+      const llm = getResolvedLlmConfig();
       return sendJson(res, 200, {
         ok: true,
         storage: appConfig.storage.backend,
-        llmProvider:
-          appConfig.llm.provider === "auto"
-            ? appConfig.llm.apiKey
-              ? /groq\.com/i.test(appConfig.llm.baseUrl)
-                ? "groq"
-                : "openai-compatible"
-              : "mock"
-            : appConfig.llm.provider,
-        llmModel: appConfig.llm.model,
+        llmProvider: llm.provider,
+        llmModel: llm.model,
         researchProvider: appConfig.research.provider,
-        hasLlmKey: Boolean(appConfig.llm.apiKey),
+        hasLlmKey: Boolean(llm.apiKey),
         hasSpanwrapKey: Boolean(appConfig.spanwrap.apiKey),
         trendsSources: appConfig.trends.sources,
+        hasGithubToken: Boolean(appConfig.trends.githubToken),
+        hasRedditOAuth: Boolean(appConfig.trends.redditClientId && appConfig.trends.redditClientSecret),
+        hasXBearer: Boolean(appConfig.trends.xBearerToken),
       });
+    }
+
+    if (method === "GET" && pathname === "/api/llm") {
+      return sendJson(res, 200, publicLlmStatus());
+    }
+
+    if (method === "POST" && pathname === "/api/llm") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      await saveLlmSettings({
+        provider: body.provider,
+        model: body.model,
+        apiKey: body.apiKey,
+        baseUrl: body.baseUrl,
+      });
+      await log("llm_settings_saved", { provider: body.provider, model: body.model });
+      return sendJson(res, 200, publicLlmStatus());
+    }
+
+    if ((pathname === "/api/digest" || pathname === "/api/topics/digest" || pathname === "/api/trending") && method === "GET") {
+      const offline = url.searchParams.get("offline") === "1" || process.env.TRENDS_OFFLINE === "1";
+      const limitRaw = url.searchParams.get("limit");
+      const digest = await discoverTechDigest({
+        offline,
+        refresh: url.searchParams.get("refresh") === "1",
+        limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
+      });
+      return sendJson(res, 200, digest);
+    }
+
+    if ((pathname === "/api/digest" || pathname === "/api/topics/digest" || pathname === "/api/trending") && method === "POST") {
+      const bodyText = await readBody(req);
+      const body = bodyText ? JSON.parse(bodyText) : {};
+      const offline = body.offline === true || process.env.TRENDS_OFFLINE === "1";
+      const digest = await discoverTechDigest({
+        offline,
+        refresh: body.refresh === true,
+        limit: typeof body.limit === "number" ? body.limit : undefined,
+      });
+      if (body.refresh === true) await log("digest_refreshed");
+      return sendJson(res, 200, digest);
+    }
+
+    if (pathname === "/api/digest/start-run" && method === "POST") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const title = String(body.title ?? "").trim();
+      if (title.length < 3) {
+        return sendJson(res, 400, { error: "title is required" });
+      }
+      const description = String(body.description ?? "").trim();
+      const sourceUrl = typeof body.url === "string" && body.url.startsWith("http") ? body.url : null;
+      const extraKeywords = description
+        .split(/\s+/)
+        .map((w) => w.replace(/[^a-zA-Z0-9-]/g, ""))
+        .filter((w) => w.length > 3)
+        .slice(0, 5);
+      const brief = ContentBriefSchema.parse({
+        topic: title.slice(0, 140),
+        targetAudience: body.targetAudience ?? "startup founders and product teams",
+        tone: body.tone ?? "technical but easy to understand",
+        contentType: "educational",
+        keywords: ["AI", "machine learning", "technology", ...extraKeywords],
+        referenceUrls: sourceUrl ? [sourceUrl] : [],
+      });
+      const run = await orch().create(brief, { templateId: body.templateId || null });
+      await log("run_created", { runId: run.id, topic: run.brief.topic, source: "digest" });
+      return sendJson(res, 201, { run });
     }
 
     // Hot topic discovery
@@ -130,6 +386,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
       });
       try {
         const saved = await getTopicStore().saveMany(topics);
+        await log("topics_discovered", { count: saved.length });
         return sendJson(res, 200, { count: saved.length, topics: saved });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -170,6 +427,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
         const run = await orch().create(brief, {
           templateId: body.templateId || null,
         });
+        await log("run_created", { runId: run.id, topic: run.brief.topic, source: "topic" });
         return sendJson(res, 201, { topic, run });
       }
     }
@@ -211,6 +469,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
       const run = await orch().create(brief, {
         templateId: raw.templateId || null,
       });
+      await log("run_created", { runId: run.id, topic: run.brief.topic });
       return sendJson(res, 201, run);
     }
 
@@ -228,6 +487,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
           createdAt: t.createdAt,
           notes: t.notes,
           preview: t.markdown.slice(0, 200),
+          chars: t.markdown.length,
         })),
       );
     }
@@ -239,6 +499,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
         markdown: raw.markdown ?? "",
         filename: raw.filename,
         notes: raw.notes ?? null,
+      });
+      await log("template_saved", {
+        templateId: template.id,
+        name: template.name,
+        chars: template.markdown.length,
       });
       return sendJson(res, 201, template);
     }
@@ -252,6 +517,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
       }
       if (method === "DELETE") {
         const ok = await getTemplateStore().delete(tid);
+        if (ok) await log("template_deleted", { templateId: tid });
         return sendJson(res, ok ? 200 : 404, { deleted: ok });
       }
     }
@@ -305,12 +571,37 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
           case "article-update":
             run = await o.updateArticle(id, body.article ?? body);
             break;
+          case "save-review":
+            run = await o.saveReview(id, {
+              article: body.article,
+              publishTargets: body.publishTargets,
+            });
+            break;
           case "assign-template":
             run = await o.assignTemplate(id, body.templateId ?? null);
             break;
           default:
             return sendJson(res, 404, { error: `Unknown action: ${action}` });
         }
+        const actionNames: Record<string, string> = {
+          research: "run_research",
+          outline: "run_outline",
+          generate: "run_generate",
+          "quality-check": "run_quality",
+          run: "run_started",
+          approve: "run_approved",
+          reject: "run_rejected",
+          publish: "run_published",
+          cancel: "run_cancelled",
+          "outline-update": "outline_edited",
+          "article-update": "article_edited",
+          "save-review": "review_saved",
+          "assign-template": "template_assigned",
+        };
+        await log(actionNames[action] ?? `run_${action}`, {
+          runId: id,
+          status: run.status,
+        });
         return sendJson(res, 200, run);
       }
     }

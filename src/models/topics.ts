@@ -8,6 +8,8 @@ export const TrendSignalSchema = z.object({
   comments: z.number().default(0),
   author: z.string().optional(),
   community: z.string().optional(),
+  description: z.string().default(""),
+  imageUrl: z.string().nullable().default(null),
   capturedAt: z.string(),
 });
 
@@ -28,3 +30,41 @@ export const TopicRecommendationSchema = z.object({
 });
 
 export type TopicRecommendation = z.infer<typeof TopicRecommendationSchema>;
+
+export const TechDigestItemSchema = z.object({
+  platform: z.enum([
+    "github",
+    "reddit",
+    "x",
+    "hackernews",
+    "devto",
+    "arxiv",
+    "huggingface",
+    "lobsters",
+    "news",
+  ]),
+  title: z.string().min(1),
+  description: z.string().default(""),
+  url: z.string().url(),
+  imageUrl: z.string().nullable().default(null),
+  score: z.number().default(0),
+  comments: z.number().default(0),
+  author: z.string().optional(),
+  community: z.string().optional(),
+  capturedAt: z.string(),
+});
+
+export type TechDigestItem = z.infer<typeof TechDigestItemSchema>;
+
+export const TechDigestSchema = z.object({
+  generatedAt: z.string(),
+  theme: z.string().default("AI/ML technology"),
+  github: z.array(TechDigestItemSchema).default([]),
+  reddit: z.array(TechDigestItemSchema).default([]),
+  x: z.array(TechDigestItemSchema).default([]),
+  /** HN, Dev.to, arXiv, Hugging Face, Lobsters, and tech-press RSS. */
+  more: z.array(TechDigestItemSchema).default([]),
+  notes: z.array(z.string()).default([]),
+});
+
+export type TechDigest = z.infer<typeof TechDigestSchema>;

@@ -113,6 +113,10 @@ export const GeneratedBlogSchema = z.object({
       }),
     )
     .default([]),
+  featuredImage: z
+    .union([z.string(), z.null()])
+    .optional()
+    .transform((v) => (typeof v === "string" && v.trim() ? v.trim() : null)),
 });
 
 export type GeneratedBlog = z.infer<typeof GeneratedBlogSchema>;
@@ -132,6 +136,12 @@ export const QualityResultSchema = z.object({
 export type QualityResult = z.infer<typeof QualityResultSchema>;
 export type QualityIssue = z.infer<typeof QualityIssueSchema>;
 
+export const PUBLISH_TARGET_VALUES = ["spanwrap", "medium", "substack"] as const;
+
+export const PublishTargetSchema = z.enum(PUBLISH_TARGET_VALUES);
+
+export type PublishTarget = z.infer<typeof PublishTargetSchema>;
+
 export const PublishResultSchema = z.object({
   success: z.boolean(),
   externalId: z.string().optional(),
@@ -139,9 +149,31 @@ export const PublishResultSchema = z.object({
   message: z.string(),
   idempotencyKey: z.string(),
   raw: z.unknown().optional(),
+  target: PublishTargetSchema.optional(),
 });
 
 export type PublishResult = z.infer<typeof PublishResultSchema>;
+
+export const TargetPublishResultSchema = PublishResultSchema.extend({
+  target: PublishTargetSchema,
+});
+
+export type TargetPublishResult = z.infer<typeof TargetPublishResultSchema>;
+
+export function parsePublishTargets(input: unknown): PublishTarget[] {
+  const allowed = new Set<string>(PUBLISH_TARGET_VALUES);
+  const unique: PublishTarget[] = [];
+  const arr = Array.isArray(input) ? input : [];
+  for (const item of arr) {
+    if (typeof item !== "string" || !allowed.has(item)) continue;
+    const target = item as PublishTarget;
+    if (!unique.includes(target)) unique.push(target);
+  }
+  if (!unique.length) {
+    throw new Error("Select at least one publishing site (Spanwrap, Medium, or Substack)");
+  }
+  return unique;
+}
 
 export const PipelineStatusSchema = z.enum([
   "CREATED",
@@ -191,7 +223,10 @@ export const PipelineRunSchema = z.object({
   outline: BlogOutlineSchema.nullable().default(null),
   article: GeneratedBlogSchema.nullable().default(null),
   quality: QualityResultSchema.nullable().default(null),
+  /** Sites selected in Quality review for the eventual publish step. */
+  publishTargets: z.array(PublishTargetSchema).default(["spanwrap"]),
   publishResult: PublishResultSchema.nullable().default(null),
+  publishResults: z.array(TargetPublishResultSchema).default([]),
   stages: z.array(StageRecordSchema).default([]),
   reviewNotes: z.string().nullable().default(null),
   error: z.string().nullable().default(null),

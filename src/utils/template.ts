@@ -86,7 +86,9 @@ export function applyMarkdownTemplate(
 export function describeTemplateForPrompt(templateMarkdown: string): string {
   const placeholders = listPlaceholders(templateMarkdown);
   const lines = [
-    "ARTICLE MARKDOWN TEMPLATE (must be followed):",
+    "ARTICLE TEMPLATE — GUIDELINES AND REQUIRED SECTIONS",
+    "This markdown is a first-class input alongside the topic and research sources.",
+    "Treat headings as required sections. Treat other template prose as writing instructions (what to cover, tone, length, do/don't).",
     "```markdown",
     templateMarkdown.slice(0, 12_000),
     "```",
@@ -97,13 +99,13 @@ export function describeTemplateForPrompt(templateMarkdown: string): string {
       `Template placeholders present: ${placeholders.map((p) => `{{${p}}}`).join(", ")}`,
       "- Produce article body that fills the research substance for {{body}} (or whole document if structure-only).",
       "- Keep the template's section order, headings, and formatting conventions.",
-      "- Do not invent extra major sections unless the template allows flexibility.",
+      "- Follow any section-level instructions in the template; do not invent extra major sections unless the template allows flexibility.",
     );
   } else {
     lines.push(
       "",
       "- Mirror this template's structure exactly: heading levels, section order, and any labeled sections.",
-      "- Replace placeholder/example prose with research-backed original writing.",
+      "- Replace placeholder/example prose with research-backed original writing that still obeys the section instructions.",
       "- Keep stylistic conventions (lists, callouts, FAQ blocks, etc.) where they appear in the template.",
       "- The `content` field of the JSON response must be valid Markdown following this structure.",
     );

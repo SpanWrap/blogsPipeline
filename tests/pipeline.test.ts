@@ -17,6 +17,7 @@ import {
   BlogOutlineSchema,
   GeneratedBlogSchema,
   ResearchAnalysisSchema,
+  parsePublishTargets,
   type GeneratedBlog,
 } from "@/models";
 import { createIdempotencyKey } from "@/utils/idempotency";
@@ -75,6 +76,32 @@ describe("utils", () => {
     expect(normalizeUrl("https://example.com/a/?utm_source=x#frag")).toBe(
       "https://example.com/a",
     );
+  });
+
+  it("parses publishing destinations", () => {
+    expect(parsePublishTargets(["medium", "spanwrap", "medium"])).toEqual([
+      "medium",
+      "spanwrap",
+    ]);
+    expect(() => parsePublishTargets([])).toThrow(/at least one/);
+  });
+
+  it("resolves featured images from markdown and GitHub URLs", async () => {
+    const { extractMarkdownImageUrls, githubOpenGraphImage, resolveFeaturedImage } = await import(
+      "@/utils/images"
+    );
+    expect(extractMarkdownImageUrls("See ![hero](https://cdn.example.com/a.png)")).toEqual([
+      "https://cdn.example.com/a.png",
+    ]);
+    expect(githubOpenGraphImage("https://github.com/owner/repo")).toBe(
+      "https://opengraph.githubassets.com/1/owner/repo",
+    );
+    expect(
+      resolveFeaturedImage({
+        content: "no images",
+        sourceUrls: ["https://github.com/owner/repo"],
+      }),
+    ).toBe("https://opengraph.githubassets.com/1/owner/repo");
   });
 
   it("retries transient failures", async () => {
@@ -238,6 +265,22 @@ describe("quality", () => {
 describe("publishing", () => {
   beforeEach(() => resetMockPublisherState());
 
+  it("attaches a featured image from GitHub sources", async () => {
+    const { toPublishableBlog } = await import("@/pipeline/stages/publishing");
+    const blog = toPublishableBlog(
+      sampleArticle({
+        sources: [
+          {
+            title: "Repo",
+            url: "https://github.com/owner/repo",
+            sourceName: "github.com",
+          },
+        ],
+      }),
+    );
+    expect(blog.featuredImage).toBe("https://opengraph.githubassets.com/1/owner/repo");
+  });
+
   it("publishes successfully and is idempotent", async () => {
     const publisher = new MockPublisher("success");
     const blog = {
@@ -368,10 +411,54 @@ describe("end-to-end pipeline", () => {
     const published = await orch.publish(created.id);
     expect(published.status).toBe("PUBLISHED");
     expect(published.publishResult?.success).toBe(true);
+    expect(published.publishTargets).toEqual(["spanwrap"]);
+    expect(published.publishResults.some((r) => r.target === "spanwrap" && r.success)).toBe(true);
 
     // Idempotent re-publish should not explode (publisher layer); run still published
     const again = await orch.get(created.id);
     expect(again.status).toBe("PUBLISHED");
+  });
+
+  it("saves quality-review destinations and keeps planned sites unpublished", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    await orch.runUntilReview(created.id);
+    const saved = await orch.saveReview(created.id, {
+      publishTargets: ["spanwrap", "medium", "substack"],
+    });
+    expect(saved.publishTargets).toEqual(["spanwrap", "medium", "substack"]);
+    expect(saved.status).toBe("REVIEW_REQUIRED");
+
+    await orch.approve(created.id);
+    const published = await orch.publish(created.id);
+    expect(published.status).toBe("PUBLISHED");
+    expect(published.publishResults).toHaveLength(3);
+    expect(published.publishResults.find((r) => r.target === "spanwrap")?.success).toBe(true);
+    expect(published.publishResults.find((r) => r.target === "medium")?.statusCode).toBe(501);
+  });
+
+  it("keeps APPROVED when only planned destinations are selected", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    await orch.runUntilReview(created.id);
+    await orch.saveReview(created.id, { publishTargets: ["medium"] });
+    await orch.approve(created.id);
+    const result = await orch.publish(created.id);
+    expect(result.status).toBe("APPROVED");
+    expect(result.publishResults[0]?.target).toBe("medium");
+    expect(result.publishResults[0]?.statusCode).toBe(501);
   });
 
   it("does not publish without approval", async () => {

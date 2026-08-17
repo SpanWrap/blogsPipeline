@@ -23,6 +23,8 @@ function heatFromSignals(signals: TrendSignal[]): number {
     if (s.platform === "hackernews") raw += 8;
     if (s.platform === "reddit") raw += 4;
     if (s.platform === "devto") raw += 3;
+    if (s.platform === "github") raw += 10;
+    if (s.platform === "x") raw += 5;
   }
   // multi-platform boost
   const platforms = new Set(signals.map((s) => s.platform));
@@ -106,7 +108,7 @@ export type DiscoverTopicsOptions = {
 
 /**
  * Discover and rank blog topic recommendations from public social/dev trend feeds.
- * Uses HTTP JSON APIs only — no CAPTCHA, auth, or anti-bot bypass.
+ * GitHub Search and Reddit OAuth when keys are set; otherwise public JSON.
  */
 export async function discoverTopicRecommendations(
   options: DiscoverTopicsOptions = {},
@@ -115,11 +117,19 @@ export async function discoverTopicRecommendations(
     options.providers ??
     (options.offline ? createTrendProviders(["mock"]) : createTrendProviders());
 
-  const ctx = {
+    const ctx = {
     limit: options.limit ?? appConfig.trends.limit,
     subreddits: options.subreddits ?? appConfig.trends.redditSubreddits,
     userAgent: appConfig.userAgent,
     timeoutMs: appConfig.requestTimeoutMs,
+    githubToken: appConfig.trends.githubToken,
+    xBearerToken: appConfig.trends.xBearerToken,
+    githubTopics: appConfig.trends.githubTopics,
+    githubDays: appConfig.trends.githubDays,
+    githubLanguage: appConfig.trends.githubLanguage,
+    githubSource: appConfig.trends.githubSource,
+    redditClientId: appConfig.trends.redditClientId,
+    redditClientSecret: appConfig.trends.redditClientSecret,
   };
 
   const allSignals: TrendSignal[] = [];
