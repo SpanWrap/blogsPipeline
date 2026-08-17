@@ -1,7 +1,10 @@
 import { config as loadDotenv } from "dotenv";
 import path from "node:path";
 
-loadDotenv();
+// Vercel injects env vars into process.env; skip .env file noise in production logs.
+if (!process.env.VERCEL) {
+  loadDotenv({ quiet: true });
+}
 
 function env(name: string, fallback?: string): string | undefined {
   const value = process.env[name];
