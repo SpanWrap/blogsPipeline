@@ -1,6 +1,6 @@
 /**
- * Vercel Node handler for all /api/* routes.
- * Root public/ serves the review UI as static files.
+ * Single Vercel Function entry. Default export must be a function.
+ * vercel.json rewrites all routes here (UI + API).
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createUiServer } from "../src/server/index";
