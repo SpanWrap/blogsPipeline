@@ -14,7 +14,7 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const publicCandidates = [
   path.join(moduleDir, "public"),
   path.join(process.cwd(), "public"),
-  path.join(process.cwd(), "src/server/public"),
+  path.join(process.cwd(), "src/ui-server/public"),
 ];
 
 /** Explicit URLs so Vercel file tracing includes these assets in the function bundle. */
