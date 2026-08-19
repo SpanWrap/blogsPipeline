@@ -7,15 +7,18 @@ This project has **zero dependency on the Spanwrap website codebase**. It only c
 ## Pipeline flow
 
 ```
-Topic / Content Brief
-  → Research
-  → Source extraction & normalization
-  → Research analysis
-  → Outline
-  → Blog generation
-  → Quality checks
-  → Human review / approve
-  → POST to Spanwrap Blog API
+Trend Discovery (HN, Reddit, GitHub, X, arXiv, HF, tech press)
+  → Topic selection (keyword scoring, monetization potential)
+  → Research (Serper/Tavily + source extraction)
+  → Research analysis (DeepSeek/Groq/OpenAI/Gemini/Claude)
+  → SEO keyword research & outline
+  → Blog generation (with affiliate link injection)
+  → Image generation (Gemini — hero, section, social cards)
+  → Quality checks (plagiarism, SEO score, readability, fact-check)
+  → Human review / edit / approve
+  → Multi-platform publish (Spanwrap, Medium, Dev.to, Hashnode, WordPress, Substack)
+  → Social promotion (X, LinkedIn, Reddit)
+  → Analytics & feedback loop
 ```
 
 ## Setup
@@ -159,18 +162,57 @@ npm run pipeline -- generate <id>
 npm run pipeline -- quality-check <id>
 ```
 
+## LLM Providers
+
+Supported: **Groq** (default), **OpenAI**, **Gemini**, **Claude**, **DeepSeek**, or mock. Set in `.env` or switch in the review UI.
+
+| Provider | Env var | Base URL |
+|----------|---------|----------|
+| Groq | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1` |
+| OpenAI | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
+| Gemini | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Claude | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1` |
+
+## Image Generation
+
+Uses **Gemini** to generate hero images, section illustrations, and social media cards. Set `GEMINI_API_KEY` or `GOOGLE_API_KEY`. Falls back to mock if unset. Images saved to `.data/images/<runId>/`.
+
+## Multi-Platform Publishing
+
+| Platform | Env vars needed | Mode |
+|----------|----------------|------|
+| Spanwrap | `SPANWRAP_API_KEY` | Live HTTP POST |
+| Medium | `MEDIUM_TOKEN` | Draft via API |
+| Dev.to | `DEVTO_API_KEY` | Draft via API |
+| Hashnode | `HASHNODE_TOKEN`, `HASHNODE_PUBLICATION_ID` | GraphQL publish |
+| WordPress | `WORDPRESS_URL`, `WORDPRESS_USER`, `WORDPRESS_APP_PASSWORD` | Draft via REST |
+| Substack | (none) | HTML export to `.data/substack-drafts/` |
+
+## Social Promotion
+
+After publish, optionally auto-share to X/Twitter, LinkedIn, and Reddit. Set `AUTO_PROMOTE_AFTER_PUBLISH=true` and configure API credentials. See `.env.example`.
+
+## SEO & Monetization
+
+- **SEO scoring**: keyword density, title/description length, heading structure, readability
+- **Affiliate links**: auto-injected from `.data/affiliate-links.json` or built-in defaults
+- **Analytics**: per-post tracking in `.data/analytics/`, feedback loop into trend scoring
+
 ## Environment
+
+Full list in `.env.example`. Key variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `LLM_API_KEY` / `OPENAI_API_KEY` | OpenAI-compatible chat API |
-| `LLM_BASE_URL` | Default `https://api.openai.com/v1` |
-| `LLM_MODEL` | Default `openai/gpt-oss-120b` on Groq |
+| `LLM_PROVIDER` | groq, openai, gemini, anthropic, deepseek, mock |
+| `GROQ_API_KEY` / `DEEPSEEK_API_KEY` / etc. | LLM API key |
+| `GEMINI_API_KEY` | Image generation + Gemini LLM |
 | `SERPER_API_KEY` or `TAVILY_API_KEY` | Web research |
-| `SPANWRAP_API_URL` | Spanwrap site base URL |
-| `SPANWRAP_API_KEY` | Bearer token for publish |
-| `SPANWRAP_BLOGS_PATH` | Default `/api/blogs` |
-| `PIPELINE_DATA_DIR` | Default `.data` |
+| `SPANWRAP_API_KEY` | Spanwrap publish |
+| `MEDIUM_TOKEN` / `DEVTO_API_KEY` / etc. | Platform publishing |
+| `BLOG_BASE_URL` | Base URL for social share links |
+| `AUTO_PROMOTE_AFTER_PUBLISH` | Enable auto social sharing |
 
 Full list: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 

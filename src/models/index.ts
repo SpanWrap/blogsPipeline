@@ -136,7 +136,7 @@ export const QualityResultSchema = z.object({
 export type QualityResult = z.infer<typeof QualityResultSchema>;
 export type QualityIssue = z.infer<typeof QualityIssueSchema>;
 
-export const PUBLISH_TARGET_VALUES = ["spanwrap", "medium", "substack"] as const;
+export const PUBLISH_TARGET_VALUES = ["spanwrap", "medium", "devto", "hashnode", "wordpress", "substack"] as const;
 
 export const PublishTargetSchema = z.enum(PUBLISH_TARGET_VALUES);
 
@@ -170,7 +170,7 @@ export function parsePublishTargets(input: unknown): PublishTarget[] {
     if (!unique.includes(target)) unique.push(target);
   }
   if (!unique.length) {
-    throw new Error("Select at least one publishing site (Spanwrap, Medium, or Substack)");
+    throw new Error("Select at least one publishing target");
   }
   return unique;
 }

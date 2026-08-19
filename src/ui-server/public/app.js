@@ -58,6 +58,16 @@ const LLM_PROVIDERS = [
     ],
   },
   {
+    id: "deepseek",
+    label: "DeepSeek",
+    defaultModel: "deepseek-chat",
+    keyLabel: "DeepSeek API key",
+    models: [
+      { id: "deepseek-chat", label: "DeepSeek V3" },
+      { id: "deepseek-reasoner", label: "DeepSeek R1" },
+    ],
+  },
+  {
     id: "mock",
     label: "Mock (no API)",
     defaultModel: "mock-1",
@@ -696,13 +706,17 @@ function setBusy(busy) {
 
 const PUBLISH_SITES = [
   { id: "spanwrap", label: "Spanwrap", note: "Live HTTP publish" },
-  { id: "medium", label: "Medium", note: "Planned" },
-  { id: "substack", label: "Substack", note: "Planned" },
+  { id: "medium", label: "Medium", note: "API publish (draft)" },
+  { id: "devto", label: "Dev.to", note: "API publish (draft)" },
+  { id: "hashnode", label: "Hashnode", note: "GraphQL publish" },
+  { id: "wordpress", label: "WordPress", note: "REST API publish (draft)" },
+  { id: "substack", label: "Substack", note: "HTML export (manual upload)" },
 ];
 
 const TAB_LABELS = {
   quality: "Quality",
   article: "Article",
+  images: "Images",
   publish: "Publish",
   outline: "Outline",
   template: "Template",
@@ -837,7 +851,7 @@ function renderDetail() {
     return;
   }
 
-  const tabs = ["quality", "article", "publish", "outline", "template", "sources", "analysis", "stages", "raw"];
+  const tabs = ["quality", "article", "images", "publish", "outline", "template", "sources", "analysis", "stages", "raw"];
   const content = renderTab(run, state.tab);
   const templateOptions = [
     `<option value="">None (default structure)</option>`,
@@ -949,6 +963,32 @@ function renderDetail() {
   if (confirmPublish) {
     confirmPublish.addEventListener("click", async () => {
       await act("publish");
+    });
+  }
+  const genImages = root.querySelector("[data-act='generate-images']");
+  if (genImages) {
+    genImages.addEventListener("click", async () => {
+      await act("generate-images");
+    });
+  }
+  const setFeaturedManual = root.querySelector("#set-featured-manual");
+  if (setFeaturedManual) {
+    setFeaturedManual.addEventListener("click", async () => {
+      const url = String(root.querySelector("#manual-image-url")?.value || "").trim();
+      if (!url || !/^https?:\/\//i.test(url)) {
+        toast("Enter a valid http(s) URL", true);
+        return;
+      }
+      if (!run.article) return;
+      try {
+        await act("save-review", {
+          article: { ...run.article, featuredImage: url },
+          publishTargets: run.publishTargets,
+        });
+        toast("Featured image updated");
+      } catch (e) {
+        toast(e.message, true);
+      }
     });
   }
   bindQualityEditor(root, run);
@@ -1108,7 +1148,7 @@ function renderPublishPreview(run) {
   return `
     <p class="hint">
       Approved draft for <strong>${escapeHtml(destLabels || "no sites selected")}</strong>.
-      Spanwrap publishes now. Medium and Substack are planned connectors.
+      All platforms with configured credentials will publish. Substack exports an HTML file for manual upload.
     </p>
     ${renderPostArticle(run, a)}
     ${
@@ -1212,6 +1252,39 @@ function renderQualityTab(run) {
     </div>`;
 }
 
+function renderImagesTab(run) {
+  const a = run.article;
+  if (!a) {
+    return `<p class="empty">Generate an article first, then generate images.</p>`;
+  }
+  const heroStage = (run.stages || []).find((s) => s.stage === "images");
+  const hasImages = heroStage?.status === "completed";
+  const hero = a.featuredImage;
+  return `
+    <div class="images-panel">
+      <div class="images-controls">
+        <p class="hint">Generate hero, section, and social media images using Gemini. Images are saved locally and can be used in the blog post.</p>
+        <button type="button" class="btn primary" data-act="generate-images">${hasImages ? "Regenerate Images" : "Generate Images"}</button>
+        ${heroStage ? `<span class="meta">${heroStage.status} ${heroStage.durationMs ? `(${(heroStage.durationMs / 1000).toFixed(1)}s)` : ""}</span>` : ""}
+      </div>
+      ${hero ? `
+        <div class="image-preview">
+          <h4>Featured Image</h4>
+          <img src="${escapeHtml(hero)}" alt="Featured" loading="lazy" referrerpolicy="no-referrer" style="max-width:100%;border-radius:8px" />
+          <input id="featured-url" value="${escapeHtml(hero)}" style="width:100%;margin-top:0.5rem" />
+        </div>
+      ` : `
+        <p class="hint">No featured image yet. Generate images or paste a URL in the Quality tab.</p>
+      `}
+      <div class="image-insert" style="margin-top:1rem">
+        <h4>Manual Image</h4>
+        <label>Image URL <input id="manual-image-url" placeholder="https://" /></label>
+        <label>Alt text <input id="manual-image-alt" placeholder="Description" /></label>
+        <button type="button" class="btn" id="set-featured-manual">Set as featured</button>
+      </div>
+    </div>`;
+}
+
 function renderTab(run, tab) {
   if (tab === "article") {
     const a = run.article;
@@ -1267,6 +1340,9 @@ function renderTab(run, tab) {
   if (tab === "analysis") {
     if (!run.analysis) return `<p class="empty">No analysis yet.</p>`;
     return `<pre class="pre">${escapeHtml(JSON.stringify(run.analysis, null, 2))}</pre>`;
+  }
+  if (tab === "images") {
+    return renderImagesTab(run);
   }
   if (tab === "quality") {
     return renderQualityTab(run);

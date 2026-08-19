@@ -580,6 +580,9 @@ async function handleAuthedApi(
           case "assign-template":
             run = await o.assignTemplate(id, body.templateId ?? null);
             break;
+          case "generate-images":
+            run = await o.generateImages(id);
+            break;
           default:
             return sendJson(res, 404, { error: `Unknown action: ${action}` });
         }

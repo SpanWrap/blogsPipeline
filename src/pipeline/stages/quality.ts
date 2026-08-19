@@ -2,9 +2,19 @@ import type {
   GeneratedBlog,
   QualityIssue,
   QualityResult,
+  ResearchAnalysis,
   ResearchSource,
 } from "../../models";
 import { isValidHttpUrl } from "../../utils/url";
+
+let scoreSEO: ((article: GeneratedBlog) => { score: number; issues: string[] }) | undefined;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const mod = require("../../services/seo-research");
+  if (typeof mod?.scoreSEO === "function") scoreSEO = mod.scoreSEO;
+} catch {
+  // seo-research service not available yet – skip SEO scoring
+}
 
 function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
@@ -23,6 +33,17 @@ function headingCount(content: string): number {
   return (content.match(/^#{1,3}\s+/gm) ?? []).length;
 }
 
+function h2Count(content: string): number {
+  return (content.match(/^##\s+/gm) ?? []).length;
+}
+
+function hasIntroBeforeFirstH2(content: string): boolean {
+  const idx = content.search(/^##\s+/m);
+  if (idx === -1) return true;
+  const before = content.slice(0, idx).replace(/^#\s+.*$/m, "").trim();
+  return before.length > 40;
+}
+
 function paragraphRepetitionScore(content: string): number {
   const paragraphs = content
     .split(/\n{2,}/)
@@ -39,6 +60,115 @@ function paragraphRepetitionScore(content: string): number {
   return dups / paragraphs.length;
 }
 
+function extractSentences(text: string): string[] {
+  return text
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`]+`/g, "")
+    .replace(/^#+\s+.*$/gm, "")
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 30 && s.length < 300);
+}
+
+function checkPlagiarism(
+  article: string,
+  sources: ResearchSource[],
+): { ratio: number; matched: string[] } {
+  const sentences = extractSentences(article);
+  if (sentences.length === 0) return { ratio: 0, matched: [] };
+
+  const sample = sentences
+    .sort(() => Math.random() - 0.5)
+    .slice(0, Math.min(5, Math.max(3, sentences.length)));
+
+  const sourceCorpus = sources
+    .map((s) => s.content.toLowerCase())
+    .join("\n");
+
+  const matched: string[] = [];
+  for (const sent of sample) {
+    const normalized = sent.toLowerCase().replace(/\s+/g, " ");
+    if (sourceCorpus.includes(normalized)) {
+      matched.push(sent.slice(0, 80));
+    }
+  }
+
+  return { ratio: matched.length / sample.length, matched };
+}
+
+function averageSentenceLength(text: string): number {
+  const sentences = extractSentences(text);
+  if (sentences.length === 0) return 0;
+  const totalWords = sentences.reduce((sum, s) => sum + wordCount(s), 0);
+  return totalWords / sentences.length;
+}
+
+function averageParagraphSentenceCount(text: string): number {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 20 && !p.startsWith("#") && !p.startsWith("```"));
+  if (paragraphs.length === 0) return 0;
+  const counts = paragraphs.map(
+    (p) => (p.match(/[.!?]+/g) ?? []).length || 1,
+  );
+  return counts.reduce((a, b) => a + b, 0) / counts.length;
+}
+
+function detectPassiveVoice(text: string): number {
+  const pattern = /\b(?:was|were|been|being)\s+\w+(?:ed|en)\b/gi;
+  return (text.match(pattern) ?? []).length;
+}
+
+function hasCodeBlocks(content: string): boolean {
+  return /```[\s\S]*?```/.test(content);
+}
+
+function isTechnicalTopic(article: GeneratedBlog): boolean {
+  const techKeywords = /\b(?:api|code|programming|software|developer|typescript|javascript|python|react|node|database|sql|docker|kubernetes|git|cli|framework|library|sdk|http|rest|graphql)\b/i;
+  return (
+    techKeywords.test(article.title) ||
+    techKeywords.test(article.content.slice(0, 500)) ||
+    (article.tags ?? []).some((t) => techKeywords.test(t))
+  );
+}
+
+function checkFactualConsistency(
+  article: string,
+  analysis: ResearchAnalysis | null | undefined,
+): string[] {
+  if (!analysis?.claims?.length) return [];
+
+  const unsupported: string[] = [];
+  const claimTexts = analysis.claims.map((c) => c.claim.toLowerCase());
+
+  const articleSentences = extractSentences(article);
+  const claimPatterns = claimTexts.map((c) => {
+    const keywords = c
+      .split(/\s+/)
+      .filter((w) => w.length > 4)
+      .slice(0, 5);
+    return keywords;
+  });
+
+  const statPattern = /\b\d[\d,.]*\s*(?:%|percent|million|billion|thousand)\b/gi;
+  const articleClaims = articleSentences.filter((s) => statPattern.test(s));
+
+  for (const claim of articleClaims) {
+    const claimLower = claim.toLowerCase();
+    const hasSupport = claimPatterns.some((keywords) => {
+      if (keywords.length === 0) return true;
+      const matchCount = keywords.filter((kw) => claimLower.includes(kw)).length;
+      return matchCount >= Math.ceil(keywords.length * 0.5);
+    });
+    if (!hasSupport) {
+      unsupported.push(claim.slice(0, 100));
+    }
+  }
+
+  return unsupported;
+}
+
 const FILLER_PHRASES = [
   "in today's fast-paced world",
   "it goes without saying",
@@ -52,6 +182,7 @@ const FILLER_PHRASES = [
 export function qualityStage(
   article: GeneratedBlog,
   sources: ResearchSource[],
+  analysis?: ResearchAnalysis | null,
 ): QualityResult {
   const issues: QualityIssue[] = [];
   let score = 100;
@@ -61,7 +192,7 @@ export function qualityStage(
     score -= penalty;
   };
 
-  // Content checks
+  // ── Content checks ──
   if (!article.title?.trim()) add("error", "missing_title", "Title is missing.", 25);
   if (!article.content?.trim()) add("error", "empty_content", "Article content is empty.", 40);
   const words = wordCount(article.content);
@@ -89,7 +220,62 @@ export function qualityStage(
     }
   }
 
-  // Source checks
+  // ── Plagiarism detection ──
+  const plagiarism = checkPlagiarism(article.content, sources);
+  if (plagiarism.ratio > 0.4) {
+    add(
+      "warning",
+      "plagiarism_detected",
+      `${Math.round(plagiarism.ratio * 100)}% of sampled sentences appear verbatim in sources: ${plagiarism.matched.join("; ")}`,
+      15,
+    );
+  }
+
+  // ── Content structure ──
+  if (!hasIntroBeforeFirstH2(article.content)) {
+    add("warning", "no_intro_before_h2", "No intro paragraph before first H2 heading.", 5);
+  }
+  const h2s = h2Count(article.content);
+  if (h2s < 3) add("warning", "too_few_h2", `Only ${h2s} H2 headings (3-8 ideal).`, 5);
+  if (h2s > 8) add("info", "many_h2", `${h2s} H2 headings (3-8 ideal).`, 2);
+
+  if (isTechnicalTopic(article) && !hasCodeBlocks(article.content)) {
+    add("info", "missing_code_blocks", "Technical topic but no code blocks found.", 3);
+  }
+
+  const sourcesCitedInContent = article.sources.some((s) =>
+    article.content.includes(s.url) || article.content.toLowerCase().includes(s.title.toLowerCase()),
+  );
+  if (article.sources.length > 0 && !sourcesCitedInContent) {
+    add("info", "sources_not_cited_inline", "Sources are listed but not referenced in body text.", 3);
+  }
+
+  // ── Readability ──
+  const avgSentLen = averageSentenceLength(article.content);
+  if (avgSentLen > 25) {
+    add("warning", "long_sentences", `Average sentence length is ${Math.round(avgSentLen)} words (aim for ≤25).`, 5);
+  }
+
+  const avgParaLen = averageParagraphSentenceCount(article.content);
+  if (avgParaLen > 5) {
+    add("warning", "long_paragraphs", `Average paragraph has ${avgParaLen.toFixed(1)} sentences (aim for ≤5).`, 4);
+  }
+
+  const passiveCount = detectPassiveVoice(article.content);
+  const passiveRatio = words > 0 ? passiveCount / (words / 20) : 0;
+  if (passiveRatio > 0.3) {
+    add("info", "passive_voice", `High passive voice usage (${passiveCount} instances detected).`, 3);
+  }
+
+  // ── Factual consistency ──
+  const unsupported = checkFactualConsistency(article.content, analysis);
+  if (unsupported.length > 0) {
+    for (const claim of unsupported.slice(0, 3)) {
+      add("warning", "unsupported_claim", `Claim not found in research: "${claim}"`, 5);
+    }
+  }
+
+  // ── Source checks ──
   const researchUrls = new Set(sources.map((s) => s.url));
   const citedUrls = new Set<string>();
   for (const s of article.sources) {
@@ -102,7 +288,6 @@ export function qualityStage(
     }
     citedUrls.add(s.url);
     if (!researchUrls.has(s.url) && !s.url.includes("example.com")) {
-      // For mock/demo example.com is acceptable; otherwise flag
       add(
         "warning",
         "unverified_source",
@@ -112,7 +297,6 @@ export function qualityStage(
     }
   }
 
-  // sourceMap IDs must exist
   const knownIds = new Set(sources.map((s) => s.id));
   for (const mapping of article.sourceMap ?? []) {
     for (const id of mapping.sourceIds) {
@@ -122,7 +306,6 @@ export function qualityStage(
     }
   }
 
-  // Heuristic: numbers that look like statistics without nearby cite note
   const statMatches = article.content.match(/\b\d{1,3}(?:\.\d+)?%/g) ?? [];
   if (statMatches.length > 0 && article.sources.length === 0) {
     add(
@@ -133,7 +316,7 @@ export function qualityStage(
     );
   }
 
-  // SEO checks
+  // ── SEO checks (existing) ──
   if (!article.slug?.trim()) add("error", "missing_slug", "Slug is missing.", 10);
   if (article.slug && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(article.slug)) {
     add("warning", "invalid_slug", "Slug should be lowercase kebab-case.", 5);
@@ -152,7 +335,6 @@ export function qualityStage(
     add("info", "missing_keywords", "No keywords set.", 2);
   }
 
-  // Keyword stuffing heuristic
   for (const kw of article.keywords ?? []) {
     if (!kw.trim()) continue;
     const re = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
@@ -162,7 +344,29 @@ export function qualityStage(
     }
   }
 
+  // ── SEO scoring via seo-research service (optional) ──
+  let seoWeight = 0;
+  let seoScore = 100;
+  if (scoreSEO) {
+    try {
+      const result = scoreSEO(article);
+      seoScore = result.score;
+      seoWeight = 0.3;
+      for (const issue of result.issues) {
+        add("warning", "seo_issue", issue, 0);
+      }
+    } catch {
+      // scoreSEO threw – skip SEO weighting
+    }
+  }
+
+  // ── Final scoring ──
   score = Math.max(0, Math.min(100, score));
+  if (seoWeight > 0) {
+    score = Math.round(score * (1 - seoWeight) + seoScore * seoWeight);
+  }
+  score = Math.max(0, Math.min(100, score));
+
   const hasError = issues.some((i) => i.severity === "error");
   return {
     passed: !hasError && score >= 60,

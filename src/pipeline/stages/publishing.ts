@@ -5,6 +5,7 @@ import type {
   PublishTarget,
   TargetPublishResult,
 } from "../../models";
+import { createPublisherForTarget } from "../../providers/publishing";
 import type { Publisher } from "../../providers/publishing";
 import sanitizeHtml from "sanitize-html";
 import { resolveFeaturedImage } from "../../utils/images";
@@ -12,11 +13,13 @@ import { resolveFeaturedImage } from "../../utils/images";
 const SITE_LABEL: Record<PublishTarget, string> = {
   spanwrap: "Spanwrap",
   medium: "Medium",
+  devto: "Dev.to",
+  hashnode: "Hashnode",
+  wordpress: "WordPress",
   substack: "Substack",
 };
 
 function sanitizeContent(content: string): string {
-  // Content is Markdown; strip any embedded HTML tags for safety.
   return sanitizeHtml(content, {
     allowedTags: [],
     allowedAttributes: {},
@@ -48,12 +51,22 @@ export function toPublishableBlog(article: GeneratedBlog): PublishableBlog {
 }
 
 export function isLivePublishTarget(target: PublishTarget): boolean {
-  return target === "spanwrap";
+  const envMap: Record<PublishTarget, string[]> = {
+    spanwrap: ["SPANWRAP_API_KEY"],
+    medium: ["MEDIUM_TOKEN"],
+    devto: ["DEVTO_API_KEY"],
+    hashnode: ["HASHNODE_TOKEN", "HASHNODE_PUBLICATION_ID"],
+    wordpress: ["WORDPRESS_URL", "WORDPRESS_USER", "WORDPRESS_APP_PASSWORD"],
+    substack: [],
+  };
+  const vars = envMap[target];
+  if (!vars || vars.length === 0) return true;
+  return vars.every((v) => process.env[v]);
 }
 
 export async function publishingStage(
   article: GeneratedBlog,
-  publisher: Publisher,
+  spanwrapPublisher: Publisher,
   idempotencyKey: string,
   targets: PublishTarget[] = ["spanwrap"],
 ): Promise<{ primary: PublishResult; results: TargetPublishResult[] }> {
@@ -62,8 +75,14 @@ export async function publishingStage(
   const results: TargetPublishResult[] = [];
 
   for (const target of selected) {
-    if (isLivePublishTarget(target)) {
-      const result = await publisher.publish(blog, {
+    if (target === "spanwrap") {
+      const result = await spanwrapPublisher.publish(blog, {
+        idempotencyKey: `${idempotencyKey}:${target}`,
+      });
+      results.push({ ...result, target });
+    } else if (isLivePublishTarget(target)) {
+      const pub = createPublisherForTarget(target);
+      const result = await pub.publish(blog, {
         idempotencyKey: `${idempotencyKey}:${target}`,
       });
       results.push({ ...result, target });
@@ -72,13 +91,13 @@ export async function publishingStage(
         target,
         success: false,
         statusCode: 501,
-        message: `${SITE_LABEL[target]} publishing is not wired yet (planned).`,
+        message: `${SITE_LABEL[target]} credentials not configured.`,
         idempotencyKey: `${idempotencyKey}:${target}`,
       });
     }
   }
 
-  const live = results.filter((r) => isLivePublishTarget(r.target));
+  const live = results.filter((r) => r.target === "spanwrap" || isLivePublishTarget(r.target));
   const primary = live[0] ?? results[0]!;
   return { primary, results };
 }

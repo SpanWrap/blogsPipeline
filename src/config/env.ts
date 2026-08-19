@@ -151,6 +151,7 @@ export const appConfig = {
       | "openai"
       | "gemini"
       | "anthropic"
+      | "deepseek"
       | "mock",
     apiKey:
       env("GROQ_API_KEY") ??
@@ -159,15 +160,69 @@ export const appConfig = {
       env("GEMINI_API_KEY") ??
       env("GOOGLE_API_KEY") ??
       env("ANTHROPIC_API_KEY") ??
-      env("CLAUDE_API_KEY"),
+      env("CLAUDE_API_KEY") ??
+      env("DEEPSEEK_API_KEY"),
     baseUrl: env("LLM_BASE_URL", "https://api.groq.com/openai/v1")!,
     /** Groq retired llama-3.3-70b-versatile on 2026-08-16; gpt-oss-20b is the free production replacement. */
     model: env("LLM_MODEL", "openai/gpt-oss-20b")!,
+  },
+  images: {
+    provider: env("IMAGE_PROVIDER", "auto") as "auto" | "gemini" | "mock",
+    geminiApiKey: env("GEMINI_API_KEY") ?? env("GOOGLE_API_KEY"),
+    outputDir: env("IMAGE_OUTPUT_DIR", ".data/images")!,
+    maxSectionImages: envInt("IMAGE_MAX_SECTION_IMAGES", 3),
   },
   spanwrap: {
     apiUrl: env("SPANWRAP_API_URL", "http://localhost:4000")!,
     apiKey: env("SPANWRAP_API_KEY"),
     blogsPath: env("SPANWRAP_BLOGS_PATH", "/api/blogs")!,
+  },
+  seo: {
+    targetKeywordDensity: envInt("SEO_KEYWORD_DENSITY_PCT", 2) / 100,
+    minTitleLength: envInt("SEO_MIN_TITLE_LENGTH", 50),
+    maxTitleLength: envInt("SEO_MAX_TITLE_LENGTH", 60),
+    minDescLength: envInt("SEO_MIN_DESC_LENGTH", 150),
+    maxDescLength: envInt("SEO_MAX_DESC_LENGTH", 160),
+  },
+  social: {
+    blogBaseUrl: env("BLOG_BASE_URL", "https://spanwrap.com/blog")!,
+    xApiKey: env("X_API_KEY"),
+    xApiSecret: env("X_API_SECRET"),
+    xAccessToken: env("X_ACCESS_TOKEN"),
+    xAccessSecret: env("X_ACCESS_SECRET"),
+    linkedinAccessToken: env("LINKEDIN_ACCESS_TOKEN"),
+    redditClientId: env("REDDIT_CLIENT_ID"),
+    redditClientSecret: env("REDDIT_CLIENT_SECRET"),
+    redditUsername: env("REDDIT_USERNAME"),
+    redditPassword: env("REDDIT_PASSWORD"),
+    autoPromote: envBool("AUTO_PROMOTE_AFTER_PUBLISH", false),
+  },
+  analytics: {
+    dataDir: env("ANALYTICS_DATA_DIR", ".data/analytics")!,
+    updateIntervalMinutes: envInt("ANALYTICS_UPDATE_INTERVAL_MINUTES", 360),
+  },
+  publishing: {
+    medium: {
+      token: env("MEDIUM_TOKEN"),
+      canonicalBase: env("MEDIUM_CANONICAL_BASE"),
+    },
+    devto: {
+      apiKey: env("DEVTO_API_KEY"),
+      canonicalBase: env("DEVTO_CANONICAL_BASE"),
+    },
+    hashnode: {
+      token: env("HASHNODE_TOKEN"),
+      publicationId: env("HASHNODE_PUBLICATION_ID"),
+      canonicalBase: env("HASHNODE_CANONICAL_BASE"),
+    },
+    wordpress: {
+      url: env("WORDPRESS_URL"),
+      user: env("WORDPRESS_USER"),
+      appPassword: env("WORDPRESS_APP_PASSWORD"),
+    },
+    substack: {
+      draftsDir: env("SUBSTACK_DRAFTS_DIR", ".data/substack-drafts")!,
+    },
   },
   retry: {
     maxAttempts: envInt("RETRY_MAX_ATTEMPTS", 3),

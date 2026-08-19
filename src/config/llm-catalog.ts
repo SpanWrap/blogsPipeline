@@ -1,4 +1,4 @@
-export const LLM_PROVIDER_IDS = ["groq", "openai", "gemini", "anthropic", "mock"] as const;
+export const LLM_PROVIDER_IDS = ["groq", "openai", "gemini", "anthropic", "deepseek", "mock"] as const;
 
 export type LlmProviderId = (typeof LLM_PROVIDER_IDS)[number];
 
@@ -88,6 +88,20 @@ export const LLM_CATALOG: Record<LlmProviderId, LlmProviderInfo> = {
     keyUrl: "https://console.anthropic.com/settings/keys",
     extraHeaders: { "anthropic-version": "2023-06-01" },
     jsonMode: false,
+  },
+  deepseek: {
+    id: "deepseek",
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+    defaultModel: "deepseek-chat",
+    models: [
+      { id: "deepseek-chat", label: "DeepSeek V3" },
+      { id: "deepseek-reasoner", label: "DeepSeek R1" },
+    ],
+    keyLabel: "DeepSeek API key",
+    keyUrl: "https://platform.deepseek.com/api_keys",
+    extraHeaders: {},
+    jsonMode: true,
   },
   mock: {
     id: "mock",
