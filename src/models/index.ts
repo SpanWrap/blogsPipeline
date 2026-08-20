@@ -8,12 +8,23 @@ export const ContentBriefSchema = z.object({
   keywords: z.array(z.string()).default([]),
   referenceUrls: z.array(z.string().url()).default([]),
   /** Named voice preset id (founder, tutorial, opinion, neutral). */
-  stylePresetId: z.string().nullable().default(null),
+  stylePresetId: z.string().nullable().optional().default(null),
   /** Optional competitor URLs to bias the angle brief. */
-  competitorUrls: z.array(z.string().url()).default([]),
+  competitorUrls: z.array(z.string().url()).optional().default([]),
 });
 
 export type ContentBrief = z.infer<typeof ContentBriefSchema>;
+/** Loose create/update input — defaults applied by ContentBriefSchema.parse. */
+export type ContentBriefInput = {
+  topic: string;
+  targetAudience?: string;
+  tone?: string;
+  contentType?: string;
+  keywords?: string[];
+  referenceUrls?: string[];
+  stylePresetId?: string | null;
+  competitorUrls?: string[];
+};
 
 export const ArticleTemplateSchema = z.object({
   id: z.string(),

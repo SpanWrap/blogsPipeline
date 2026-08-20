@@ -1,5 +1,5 @@
 import { appConfig } from "../../config";
-import type { ContentBrief, ResearchSource } from "../../models";
+import { ContentBriefSchema, type ContentBrief, type ContentBriefInput, type ResearchSource } from "../../models";
 import {
   createResearchProvider,
   DirectURLProvider,
@@ -43,9 +43,10 @@ export type ResearchStageOptions = {
 };
 
 export async function researchStage(
-  brief: ContentBrief,
+  briefInput: ContentBriefInput,
   options: ResearchStageOptions = {},
 ): Promise<{ sources: ResearchSource[]; providerName: string }> {
+  const brief = ContentBriefSchema.parse(briefInput);
   const primary = options.researchProvider ?? createResearchProvider();
   const direct = new DirectURLProvider();
 

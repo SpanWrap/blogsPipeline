@@ -10,6 +10,10 @@ const state = {
   busy: false,
   generateImages: false,
   hasGeminiKey: false,
+  autoAcceptEnabled: false,
+  autoAcceptMinScore: 80,
+  stylePresets: [],
+  dashboard: null,
   progress: {
     active: false,
     action: "",
@@ -273,12 +277,18 @@ async function loadHealth() {
   try {
     const h = await api("/api/health");
     state.hasGeminiKey = Boolean(h.hasGeminiKey);
+    state.autoAcceptEnabled = Boolean(h.autoAcceptEnabled);
+    state.autoAcceptMinScore = Number(h.autoAcceptMinScore) || 80;
     const rows = [
       ["storage", h.storage],
       ["llm", h.hasLlmKey ? `${h.llmProvider} · ${h.llmModel || ""}`.trim() : `${h.llmProvider} (no key → mock)`],
       ["research", h.researchProvider],
       ["publish key", h.hasSpanwrapKey ? "set" : "missing"],
       ["gemini images", h.hasGeminiKey ? "key set" : "no key"],
+      [
+        "auto-accept",
+        h.autoAcceptEnabled ? `on (≥${h.autoAcceptMinScore})` : "off",
+      ],
       ["github", h.hasGithubToken ? "token" : "public"],
       ["reddit", h.hasRedditOAuth ? "oauth" : "public"],
       ["x", h.hasXBearer ? "api" : "off"],
@@ -600,6 +610,24 @@ async function loadTemplates() {
       select.value = current;
     }
   }
+  try {
+    const data = await api("/api/style-presets");
+    state.stylePresets = data.presets || [];
+    const presetSel = $("#style-preset-select");
+    if (presetSel) {
+      const remembered = data.memory?.lastStylePresetId || "";
+      presetSel.innerHTML =
+        `<option value="">Default (use tone field)</option>` +
+        state.stylePresets
+          .map(
+            (p) =>
+              `<option value="${escapeHtml(p.id)}" ${p.id === remembered ? "selected" : ""}>${escapeHtml(p.label)}</option>`,
+          )
+          .join("");
+    }
+  } catch {
+    /* optional */
+  }
   const list = $("#template-list");
   if (!list) return;
   if (!state.templates.length) {
@@ -640,6 +668,11 @@ async function loadTemplates() {
 
 async function loadRuns() {
   state.runs = await api("/api/runs");
+  try {
+    state.dashboard = await api("/api/dashboard");
+  } catch {
+    state.dashboard = null;
+  }
   renderList();
   if (state.selectedId) {
     const still = state.runs.find((r) => r.id === state.selectedId);
@@ -653,6 +686,23 @@ async function loadRuns() {
 
 function renderList() {
   const list = $("#run-list");
+  const dash = $("#resume-dashboard");
+  if (dash && state.dashboard?.buckets?.length) {
+    dash.innerHTML = `<div class="dash-title">Smart resume</div>${state.dashboard.buckets
+      .map(
+        (b) =>
+          `<button type="button" class="dash-bucket" data-dash-ids="${escapeHtml(b.runIds.join(","))}"><strong>${escapeHtml(b.label)}</strong> <span>${b.count}</span></button>`,
+      )
+      .join("")}`;
+    dash.querySelectorAll("[data-dash-ids]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = String(btn.dataset.dashIds || "").split(",")[0];
+        if (id) selectRun(id);
+      });
+    });
+  } else if (dash) {
+    dash.innerHTML = "";
+  }
   if (!list) return;
   if (!state.runs.length) {
     list.innerHTML = `<li class="empty">No runs yet.</li>`;
@@ -666,6 +716,7 @@ function renderList() {
           <span class="topic">${escapeHtml(r.topic)}</span>
           <span class="meta">
             <span class="status ${statusClass(r.status)}">${r.status}</span>
+            ${r.autoAccepted ? `<span class="retryable-badge">auto</span>` : ""}
             <span>${r.id}</span>
           </span>
         </button>
@@ -735,6 +786,10 @@ const TAB_LABELS = {
   quality: "Quality",
   article: "Article",
   publish: "Publish",
+  seo: "SEO pack",
+  facts: "Fact cards",
+  diff: "Diff",
+  repurpose: "Repurpose",
   outline: "Outline",
   template: "Template",
   sources: "Sources",
@@ -961,7 +1016,13 @@ async function runToReviewLive(body = {}) {
     }
 
     pushProgress("Draft ready — Accept or Reject the suggestion");
-    const decision = await waitForDraftDecision(streamResult.markdown);
+    let decision = "accept";
+    if (state.autoAcceptEnabled) {
+      pushProgress(`Auto-accept enabled (≥${state.autoAcceptMinScore}) — accepting draft`);
+      decision = "accept";
+    } else {
+      decision = await waitForDraftDecision(streamResult.markdown);
+    }
     if (decision === "reject") {
       state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/reject-stream-draft`, {
         method: "POST",
@@ -1178,6 +1239,7 @@ function formBrief(form) {
     tone: String(fd.get("tone") || "").trim(),
     keywords: String(fd.get("keywords") || ""),
     templateId: String(fd.get("templateId") || "") || null,
+    stylePresetId: String(fd.get("stylePresetId") || "") || null,
   };
 }
 
@@ -1218,7 +1280,21 @@ function renderDetail() {
     return;
   }
 
-  const tabs = ["quality", "article", "publish", "outline", "template", "sources", "analysis", "stages", "raw"];
+  const tabs = [
+    "quality",
+    "article",
+    "seo",
+    "facts",
+    "diff",
+    "repurpose",
+    "publish",
+    "outline",
+    "template",
+    "sources",
+    "analysis",
+    "stages",
+    "raw",
+  ];
   const content = renderTab(run, state.tab);
   const templateOptions = [
     `<option value="">None (default structure)</option>`,
@@ -1271,6 +1347,9 @@ function renderDetail() {
         Gemini images
       </label>
       <button class="btn" data-act="publish-preview">Open publish</button>
+      <button class="btn" data-act="distribute" title="Approve + publish + build social/newsletter pack">One-click distribute</button>
+      <button class="btn" data-act="readability-pass">Readability pass</button>
+      ${run.status === "PUBLISHED" || run.status === "APPROVED" ? `<button class="btn" data-act="refresh">Refresh post</button>` : ""}
     </div>
     <details class="stage-actions">
       <summary>Run one stage (advanced)</summary>
@@ -1381,6 +1460,55 @@ function renderDetail() {
   if (confirmPublish) {
     confirmPublish.addEventListener("click", async () => {
       await act("publish");
+    });
+  }
+  root.querySelectorAll("[data-regen-section]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await act("regenerate-section", { heading: btn.dataset.regenSection });
+      state.tab = "article";
+    });
+  });
+  root.querySelectorAll("[data-seo-title]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await act("apply-seo", { title: btn.dataset.seoTitle });
+      toast("SEO title applied");
+    });
+  });
+  root.querySelectorAll("[data-seo-desc]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await act("apply-seo", { description: btn.dataset.seoDesc });
+      toast("Meta description applied");
+    });
+  });
+  root.querySelectorAll("[data-seo-slug]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await act("apply-seo", { slug: btn.dataset.seoSlug });
+      toast("Slug applied");
+    });
+  });
+  root.querySelectorAll('input[name="thumb"]').forEach((input) => {
+    input.addEventListener("change", async () => {
+      if (!input.checked) return;
+      await act("select-thumbnail", { variantId: input.value });
+    });
+  });
+  const loadDiff = root.querySelector("#load-diff");
+  if (loadDiff) {
+    loadDiff.addEventListener("click", async () => {
+      try {
+        const diff = await api(`/api/runs/${encodeURIComponent(run.id)}/diff`, { method: "POST", body: "{}" });
+        const mount = root.querySelector("#diff-mount");
+        if (!mount) return;
+        mount.innerHTML = (diff.hunks || [])
+          .slice(0, 400)
+          .map((h) => {
+            const cls = h.type === "add" ? "diff-add" : h.type === "del" ? "diff-del" : "diff-same";
+            return `<div class="${cls}"><code>${escapeHtml(h.text || " ")}</code></div>`;
+          })
+          .join("");
+      } catch (e) {
+        toast(e.message, true);
+      }
     });
   }
   bindQualityEditor(root, run);
@@ -1918,9 +2046,30 @@ function renderTab(run, tab) {
   if (tab === "article") {
     const a = run.article;
     if (!a) return `<p class="empty">No article yet. Run generate or Write blog from Runs.</p>`;
+    const sections = (a.content.match(/^##\s+(.+)$/gm) || []).map((h) => h.replace(/^##\s+/, ""));
     return `
       <h3>${escapeHtml(a.title)}</h3>
       <p style="color:var(--muted)">${escapeHtml(a.excerpt || "")}</p>
+      ${
+        run.thumbnailVariants?.length
+          ? `<div class="thumb-ab"><p class="hint">Thumbnail A/B</p>${run.thumbnailVariants
+              .map(
+                (v) =>
+                  `<label class="thumb-choice ${v.selected ? "selected" : ""}"><input type="radio" name="thumb" value="${escapeHtml(v.id)}" ${v.selected ? "checked" : ""}/> ${escapeHtml(v.label)}<br/><img src="${escapeHtml(v.url)}" alt=""/></label>`,
+              )
+              .join("")}</div>`
+          : ""
+      }
+      ${
+        sections.length
+          ? `<div class="section-regen"><p class="hint">Section regenerate</p>${sections
+              .map(
+                (h) =>
+                  `<button type="button" class="btn" data-regen-section="${escapeHtml(h)}">↻ ${escapeHtml(h)}</button>`,
+              )
+              .join(" ")}</div>`
+          : ""
+      }
       <pre class="pre">${escapeHtml(a.content)}</pre>
       <details style="margin-top:1rem">
         <summary>Edit article JSON</summary>
@@ -1929,6 +2078,60 @@ function renderTab(run, tab) {
           <button type="button" class="btn" id="save-article">Save article</button>
         </div>
       </details>`;
+  }
+  if (tab === "seo") {
+    const pack = run.seoPack;
+    if (!pack) return `<p class="empty">No SEO pack yet — accept a draft or run quality.</p>`;
+    return `<div class="seo-pack">
+      <p class="hint">Primary keyword: <strong>${escapeHtml(pack.primaryKeyword || "")}</strong></p>
+      <h4>Title variants</h4>
+      ${(pack.titles || []).map((t) => `<button type="button" class="btn" data-seo-title="${escapeHtml(t)}">${escapeHtml(t)}</button>`).join(" ")}
+      <h4>Meta descriptions</h4>
+      ${(pack.descriptions || []).map((t) => `<button type="button" class="btn" data-seo-desc="${escapeHtml(t)}">${escapeHtml(t)}</button>`).join(" ")}
+      <h4>Slug suggestions</h4>
+      ${(pack.slugSuggestions || []).map((t) => `<button type="button" class="btn" data-seo-slug="${escapeHtml(t)}">${escapeHtml(t)}</button>`).join(" ")}
+      <h4>Long-tail</h4>
+      <p>${(pack.longTailKeywords || []).map((k) => escapeHtml(k)).join(" · ")}</p>
+    </div>`;
+  }
+  if (tab === "facts") {
+    const cards = run.factCards || [];
+    const brief = run.competitorBrief;
+    if (!cards.length && !brief) return `<p class="empty">No fact cards yet — run research first.</p>`;
+    return `
+      ${brief ? `<div class="competitor-brief"><h3>Competitor angle brief</h3><p>${escapeHtml(brief.summary)}</p>
+        <h4>Angles to own</h4><ul>${(brief.anglesToOwn || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
+        <h4>Angles to avoid</h4><ul>${(brief.anglesToAvoid || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
+        <h4>Competing viewpoints</h4><ul>${(brief.competingViewpoints || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
+      </div>` : ""}
+      <h3>Fact cards</h3>
+      ${cards
+        .map(
+          (c) => `<article class="fact-card ${c.grounded ? "ok" : "warn"}">
+          <strong>${escapeHtml(c.claim)}</strong>
+          <div class="meta">${escapeHtml(c.category)} · confidence ${Math.round((c.confidence || 0) * 100)}% · ${c.grounded ? "grounded" : "needs source"}</div>
+          <ul>${(c.sources || []).map((s) => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title)}</a></li>`).join("")}</ul>
+        </article>`,
+        )
+        .join("")}`;
+  }
+  if (tab === "diff") {
+    if (!run.previousArticle) return `<p class="empty">No previous version to diff yet. Edit, readability-pass, or regenerate a section first.</p>`;
+    return `<p class="hint">Showing saved previous vs current content. Open Diff after an edit to load line hunks from the API…</p>
+      <button type="button" class="btn" id="load-diff">Load diff</button>
+      <div id="diff-mount"></div>`;
+  }
+  if (tab === "repurpose") {
+    const p = run.repurposePack;
+    if (!p) return `<p class="empty">No repurpose pack yet — run quality or distribute.</p>`;
+    return `<div class="repurpose-pack">
+      <h4>X / Twitter</h4><pre class="pre">${escapeHtml(p.tweet)}</pre>
+      <h4>LinkedIn</h4><pre class="pre">${escapeHtml(p.linkedInPost)}</pre>
+      <h4>Newsletter</h4><pre class="pre">${escapeHtml(p.newsletterBlurb)}</pre>
+      <h4>Thread</h4><pre class="pre">${escapeHtml((p.thread || []).join("\n\n"))}</pre>
+      <h4>YouTube short outline</h4><ul>${(p.youtubeShortOutline || []).map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>
+      <h4>Reddit</h4><pre class="pre">${escapeHtml(p.redditTitle + "\n\n" + p.redditBody)}</pre>
+    </div>`;
   }
   if (tab === "publish") {
     return renderPublishPreview(run);
@@ -1984,6 +2187,38 @@ $("#create-form")?.addEventListener("submit", (e) => {
   createRun(false);
 });
 $("#create-and-run")?.addEventListener("click", () => createRun(true));
+$("#batch-run")?.addEventListener("click", async () => {
+  if (state.busy) return;
+  const raw = String($("#batch-topics")?.value || "");
+  const topics = raw
+    .split("\n")
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3)
+    .slice(0, 8);
+  if (!topics.length) {
+    toast("Add at least one topic (one per line)", true);
+    return;
+  }
+  setBusy(true);
+  try {
+    const data = await api("/api/runs/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        topics,
+        templateId: $("#template-select")?.value || null,
+        stylePresetId: $("#style-preset-select")?.value || null,
+        generateImages: wantsImages(),
+      }),
+    });
+    toast(`Batch created ${data.runs?.length || 0} runs through outline`);
+    await loadRuns();
+    if (data.runs?.[0]?.id) await selectRun(data.runs[0].id);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
 async function writeBlogFromRun() {
   if (!state.selectedId) {
     toast("Select a run in the list first", true);

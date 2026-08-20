@@ -1,5 +1,5 @@
 import { appConfig } from "../../config";
-import type { ContentBrief } from "../../models";
+import type { ContentBriefInput } from "../../models";
 import { isValidHttpUrl } from "../../utils/url";
 import type { ResearchDiscovery, ResearchProvider } from "./types";
 
@@ -10,8 +10,8 @@ export class SerperResearchProvider implements ResearchProvider {
     if (!this.apiKey) throw new Error("SERPER_API_KEY is required for Serper provider");
   }
 
-  async discover(brief: ContentBrief): Promise<ResearchDiscovery[]> {
-    const query = [brief.topic, ...brief.keywords].filter(Boolean).join(" ");
+  async discover(brief: ContentBriefInput): Promise<ResearchDiscovery[]> {
+    const query = [brief.topic, ...(brief.keywords ?? [])].filter(Boolean).join(" ");
     const response = await fetch("https://google.serper.dev/search", {
       method: "POST",
       headers: {
@@ -46,8 +46,8 @@ export class TavilyResearchProvider implements ResearchProvider {
     if (!this.apiKey) throw new Error("TAVILY_API_KEY is required for Tavily provider");
   }
 
-  async discover(brief: ContentBrief): Promise<ResearchDiscovery[]> {
-    const query = [brief.topic, ...brief.keywords].filter(Boolean).join(" ");
+  async discover(brief: ContentBriefInput): Promise<ResearchDiscovery[]> {
+    const query = [brief.topic, ...(brief.keywords ?? [])].filter(Boolean).join(" ");
     const response = await fetch("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

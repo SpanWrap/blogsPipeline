@@ -308,6 +308,8 @@ async function handleAuthedApi(
         hasRedditOAuth: Boolean(appConfig.trends.redditClientId && appConfig.trends.redditClientSecret),
         hasXBearer: Boolean(appConfig.trends.xBearerToken),
         hasGeminiKey: Boolean(appConfig.images.geminiApiKey),
+        autoAcceptEnabled: appConfig.quality.autoAcceptEnabled,
+        autoAcceptMinScore: appConfig.quality.autoAcceptMinScore,
       });
     }
 
@@ -453,8 +455,45 @@ async function handleAuthedApi(
           createdAt: r.createdAt,
           qualityScore: r.quality?.score ?? null,
           error: r.error,
+          failedStage: r.failedStage,
+          retryable: r.retryable,
+          autoAccepted: r.autoAccepted,
         })),
       );
+    }
+
+    if (method === "GET" && pathname === "/api/dashboard") {
+      const runs = await orch().list();
+      return sendJson(res, 200, orch().getResumeDashboard(runs));
+    }
+
+    if (method === "GET" && pathname === "/api/style-presets") {
+      const { STYLE_PRESETS } = await import("../services/style-presets");
+      const { loadTemplateMemory } = await import("../services/template-memory");
+      return sendJson(res, 200, { presets: STYLE_PRESETS, memory: loadTemplateMemory() });
+    }
+
+    if (method === "POST" && pathname === "/api/runs/batch") {
+      const raw = JSON.parse((await readBody(req)) || "{}");
+      const topics = Array.isArray(raw.topics) ? raw.topics : [];
+      if (!topics.length) return sendJson(res, 400, { error: "topics array required" });
+      const briefs = topics.slice(0, 8).map((t: unknown) =>
+        ContentBriefSchema.parse({
+          topic: String(t).slice(0, 140),
+          targetAudience: raw.targetAudience ?? "startup founders",
+          tone: raw.tone ?? "technical but easy to understand",
+          contentType: "educational",
+          keywords: Array.isArray(raw.keywords) ? raw.keywords : [],
+          stylePresetId: raw.stylePresetId ?? null,
+          referenceUrls: [],
+        }),
+      );
+      const runs = await orch().batchCreateAndRun(briefs, {
+        generateImages: raw.generateImages === true,
+        templateId: raw.templateId || null,
+      });
+      await log("runs_batch", { count: runs.length });
+      return sendJson(res, 201, { runs });
     }
 
     if (method === "POST" && pathname === "/api/runs") {
@@ -473,6 +512,8 @@ async function handleAuthedApi(
                 .filter(Boolean)
             : [],
         referenceUrls: Array.isArray(raw.referenceUrls) ? raw.referenceUrls : [],
+        stylePresetId: raw.stylePresetId ?? null,
+        competitorUrls: Array.isArray(raw.competitorUrls) ? raw.competitorUrls : [],
       });
       const run = await orch().create(brief, {
         templateId: raw.templateId || null,
@@ -567,7 +608,8 @@ async function handleAuthedApi(
 
       if (method === "GET" && !action) {
         const run = await orch().get(id);
-        return sendJson(res, 200, run);
+        const { enrichRunView } = await import("../services/enrichment");
+        return sendJson(res, 200, { ...run, ...enrichRunView(run) });
       }
 
       if (method === "DELETE" && !action) {
@@ -676,6 +718,32 @@ async function handleAuthedApi(
           case "generate-images":
             run = await o.generateImages(id);
             break;
+          case "readability-pass":
+            run = await o.readabilityPass(id);
+            break;
+          case "regenerate-section":
+            run = await o.regenerateSection(id, String(body.heading ?? ""));
+            break;
+          case "apply-seo":
+            run = await o.applySeoPack(id, {
+              title: body.title,
+              description: body.description,
+              slug: body.slug,
+            });
+            break;
+          case "select-thumbnail":
+            run = await o.selectThumbnail(id, String(body.variantId ?? ""));
+            break;
+          case "refresh":
+            run = await o.refreshPublished(id);
+            break;
+          case "distribute":
+            run = await o.distribute(id);
+            break;
+          case "diff":
+            return sendJson(res, 200, await o.getDiff(id));
+          case "sections":
+            return sendJson(res, 200, { sections: await o.listSections(id) });
           default:
             return sendJson(res, 404, { error: `Unknown action: ${action}` });
         }
@@ -687,6 +755,12 @@ async function handleAuthedApi(
           run: "run_started",
           "accept-stream-draft": "run_accept_stream_draft",
           "reject-stream-draft": "run_reject_stream_draft",
+          "readability-pass": "run_readability",
+          "regenerate-section": "run_regen_section",
+          "apply-seo": "run_apply_seo",
+          "select-thumbnail": "run_select_thumbnail",
+          refresh: "run_refresh",
+          distribute: "run_distribute",
           approve: "run_approved",
           reject: "run_rejected",
           publish: "run_published",

@@ -1,4 +1,4 @@
-import type { ContentBrief } from "../../models";
+import type { ContentBriefInput } from "../../models";
 import type { ResearchDiscovery, ResearchProvider } from "./types";
 
 /**
@@ -7,8 +7,8 @@ import type { ResearchDiscovery, ResearchProvider } from "./types";
 export class MockResearchProvider implements ResearchProvider {
   readonly name = "mock-research";
 
-  async discover(brief: ContentBrief): Promise<ResearchDiscovery[]> {
-    const keyword = brief.keywords[0] ?? brief.topic;
+  async discover(brief: ContentBriefInput): Promise<ResearchDiscovery[]> {
+    const keyword = brief.keywords?.[0] ?? brief.topic;
     const refs = (brief.referenceUrls ?? []).map((url, i) => ({
       url,
       title: `Reference ${i + 1}`,
@@ -21,7 +21,7 @@ export class MockResearchProvider implements ResearchProvider {
       {
         url: "https://example.com/ai-agents-support-foundations",
         title: `${keyword}: foundations`,
-        snippet: `Overview of ${brief.topic} for ${brief.targetAudience}.`,
+        snippet: `Overview of ${brief.topic} for ${brief.targetAudience ?? "general readers"}.`,
         relevanceScore: 0.9,
       },
       {

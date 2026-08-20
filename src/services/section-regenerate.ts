@@ -1,4 +1,4 @@
-import type { BlogOutline, ContentBrief, GeneratedBlog, ResearchAnalysis, ResearchSource } from "../models";
+import type { BlogOutline, ContentBriefInput, GeneratedBlog, ResearchAnalysis, ResearchSource } from "../models";
 import type { LLMProvider } from "../providers/llm";
 import { compactBrief, compactJson, compactOutline, compactSourcesForGeneration, pickSourcesForPrompt } from "../utils/prompt-budget";
 
@@ -40,7 +40,7 @@ export function listArticleSections(content: string): string[] {
 export async function regenerateSection(input: {
   article: GeneratedBlog;
   heading: string;
-  brief: ContentBrief;
+  brief: ContentBriefInput;
   outline: BlogOutline | null;
   analysis: ResearchAnalysis | null;
   sources: ResearchSource[];

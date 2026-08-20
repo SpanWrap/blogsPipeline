@@ -1,4 +1,4 @@
-import type { ContentBrief, ResearchAnalysis, ResearchSource } from "../../models";
+import type { ContentBriefInput, ResearchAnalysis, ResearchSource } from "../../models";
 import { ResearchAnalysisSchema } from "../../models";
 import type { LLMProvider } from "../../providers/llm";
 import { buildAnalysisPrompt } from "../../prompts/analysis/v1";
@@ -10,7 +10,7 @@ import {
 import { logger } from "../../services/logger";
 
 export async function analysisStage(
-  brief: ContentBrief,
+  brief: ContentBriefInput,
   sources: ResearchSource[],
   llm: LLMProvider,
 ): Promise<ResearchAnalysis> {

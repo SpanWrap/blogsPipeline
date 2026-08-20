@@ -4,7 +4,7 @@ export { outlineStage } from "./outline";
 export { generationStage } from "./generation";
 export { qualityStage } from "./quality";
 export { publishingStage, toPublishableBlog } from "./publishing";
-export { imageStage, applyGeneratedImages } from "./images";
+export { imageStage, applyGeneratedImages, publicImageUrl } from "./images";
 export {
   streamDraftStage,
   markdownDraftToArticle,

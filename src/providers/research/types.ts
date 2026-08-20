@@ -1,4 +1,4 @@
-import type { ContentBrief, ResearchSource } from "../../models";
+import type { ContentBriefInput, ResearchSource } from "../../models";
 
 export type ResearchDiscovery = {
   url: string;
@@ -9,7 +9,7 @@ export type ResearchDiscovery = {
 
 export interface ResearchProvider {
   readonly name: string;
-  discover(brief: ContentBrief): Promise<ResearchDiscovery[]>;
+  discover(brief: ContentBriefInput): Promise<ResearchDiscovery[]>;
 }
 
 export type { ResearchSource };

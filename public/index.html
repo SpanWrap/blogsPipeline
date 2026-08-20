@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=15" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
   </head>
   <body>
     <div id="auth-gate" class="auth-gate">
@@ -88,6 +88,12 @@
               Keywords (comma-separated)
               <input name="keywords" placeholder="AI agents, customer support" />
             </label>
+            <label>
+              Style lock
+              <select name="stylePresetId" id="style-preset-select">
+                <option value="">Default (use tone field)</option>
+              </select>
+            </label>
             <label class="full">
               Article template (sections + instructions)
               <select name="templateId" id="template-select">
@@ -99,6 +105,14 @@
               <button type="button" id="create-and-run" class="btn">Create & run to review</button>
             </div>
           </form>
+          <div class="batch-box">
+            <h3>Batch Run to review</h3>
+            <p class="hint">One topic per line (max 8). Creates runs through outline for live draft later.</p>
+            <textarea id="batch-topics" rows="4" placeholder="AI agents in support&#10;LLM eval harnesses&#10;RAG failure modes"></textarea>
+            <div class="form-actions">
+              <button type="button" class="btn" id="batch-run">Batch create → outline</button>
+            </div>
+          </div>
         </section>
 
         <div class="layout">
@@ -107,6 +121,7 @@
               <h2>Runs</h2>
               <button type="button" id="refresh" class="btn ghost">Refresh</button>
             </div>
+            <div id="resume-dashboard" class="resume-dashboard"></div>
             <div class="runs-write">
               <label>
                 Template
@@ -242,6 +257,6 @@
       </div>
     </div>
     <p id="toast" class="toast" hidden></p>
-    <script src="/app.js?v=15" type="module"></script>
+    <script src="/app.js?v=16" type="module"></script>
   </body>
 </html>

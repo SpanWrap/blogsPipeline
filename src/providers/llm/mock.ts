@@ -267,6 +267,8 @@ export function buildMockBrief(overrides: Partial<ContentBrief> = {}): ContentBr
     contentType: "educational",
     keywords: ["AI agents", "customer support", "automation"],
     referenceUrls: [],
+    stylePresetId: null,
+    competitorUrls: [],
     ...overrides,
   };
 }

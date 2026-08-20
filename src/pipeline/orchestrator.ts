@@ -5,6 +5,7 @@ import {
   parsePublishTargets,
   type BlogOutline,
   type ContentBrief,
+  type ContentBriefInput,
   type GeneratedBlog,
   type PipelineRun,
   type PipelineStatus,
@@ -22,6 +23,7 @@ import {
   generationStage,
   imageStage,
   applyGeneratedImages,
+  publicImageUrl,
   outlineStage,
   publishingStage,
   qualityStage,
@@ -108,24 +110,28 @@ export class BlogPipelineOrchestrator {
   }
 
   async create(
-    briefInput: ContentBrief,
+    briefInput: ContentBriefInput,
     options: CreateRunOptions = {},
   ): Promise<PipelineRun> {
     let brief = ContentBriefSchema.parse(briefInput);
     const id = createId("run");
     const now = new Date().toISOString();
-    let templateId: string | null = options.templateId ?? null;
+    let templateId: string | null =
+      options.templateId !== undefined ? options.templateId : loadTemplateMemory().lastTemplateId;
     let templateName: string | null = null;
     let templateMarkdown: string | null = null;
 
-    if (!templateId) {
-      templateId = loadTemplateMemory().lastTemplateId;
-    }
     if (templateId) {
-      const tpl = await this.templateStore.require(templateId);
-      templateName = tpl.name;
-      templateMarkdown = tpl.markdown;
-      saveTemplateMemory({ lastTemplateId: templateId });
+      try {
+        const tpl = await this.templateStore.require(templateId);
+        templateName = tpl.name;
+        templateMarkdown = tpl.markdown;
+        saveTemplateMemory({ lastTemplateId: templateId });
+      } catch {
+        templateId = null;
+        templateName = null;
+        templateMarkdown = null;
+      }
     }
 
     const stylePresetId = brief.stylePresetId ?? loadTemplateMemory().lastStylePresetId;
@@ -664,13 +670,44 @@ export class BlogPipelineOrchestrator {
     try {
       const result = await imageStage(next.article!, next.id);
       const article = applyGeneratedImages(next.article!, result, next.id);
-      next = { ...next, article };
+      const filenames = result.savedPaths.map((p) => p.split(/[/\\]/).pop()!);
+      const heroFile = filenames.find((n) => n.startsWith("hero-"));
+      const socialFile = filenames.find((n) => n.startsWith("social-"));
+      const sectionFile = filenames.find((n) => n.startsWith("section-"));
+      const variants = [
+        heroFile
+          ? {
+              id: "a",
+              url: publicImageUrl(next.id, heroFile),
+              label: "Hero A",
+              selected: true,
+            }
+          : null,
+        socialFile || sectionFile
+          ? {
+              id: "b",
+              url: publicImageUrl(next.id, (socialFile || sectionFile)!),
+              label: socialFile ? "Social B" : "Section B",
+              selected: !heroFile,
+            }
+          : null,
+      ].filter(Boolean) as PipelineRun["thumbnailVariants"];
+
+      next = {
+        ...next,
+        article: {
+          ...article,
+          featuredImage: variants.find((v) => v.selected)?.url ?? article.featuredImage,
+        },
+        thumbnailVariants: variants,
+      };
       next = completeStage(next, "images", {
         total:
           (result.sectionImages?.length ?? 0) +
           (result.heroImage ? 1 : 0) +
           (result.socialImage ? 1 : 0),
         saved: result.savedPaths.length,
+        thumbnails: variants.length,
       });
       return next;
     } catch (error) {
@@ -903,6 +940,177 @@ export class BlogPipelineOrchestrator {
         }),
       );
     });
+  }
+
+  async readabilityPass(id: string): Promise<PipelineRun> {
+    return withRunLock(id, async () => {
+      const run = await this.store.require(id);
+      if (!run.article) throw new Error("Article required for readability pass");
+      const article = readabilityPass(run.article);
+      return this.store.save({
+        ...run,
+        previousArticle: run.article,
+        article,
+        quality: null,
+        status: "DRAFT_READY",
+        articleHistory: [
+          ...(run.articleHistory ?? []),
+          { at: new Date().toISOString(), note: "Readability pass" },
+        ].slice(-20),
+      });
+    });
+  }
+
+  async regenerateSection(id: string, heading: string): Promise<PipelineRun> {
+    return withRunLock(id, async () => {
+      const run = await this.store.require(id);
+      if (!run.article) throw new Error("Article required");
+      const article = await regenerateSection({
+        article: run.article,
+        heading,
+        brief: run.brief,
+        outline: run.outline,
+        analysis: run.analysis,
+        sources: run.sources,
+        llm: this.llm,
+      });
+      return this.store.save({
+        ...run,
+        previousArticle: run.article,
+        article,
+        quality: null,
+        status: "DRAFT_READY",
+        articleHistory: [
+          ...(run.articleHistory ?? []),
+          { at: new Date().toISOString(), note: `Regenerated section: ${heading}` },
+        ].slice(-20),
+      });
+    });
+  }
+
+  async applySeoPack(
+    id: string,
+    choice: { title?: string; description?: string; slug?: string },
+  ): Promise<PipelineRun> {
+    const run = await this.store.require(id);
+    if (!run.article) throw new Error("Article required");
+    const article = applySeoChoice(run.article, choice);
+    return this.store.save({
+      ...run,
+      previousArticle: run.article,
+      article,
+      seoPack: run.seoPack ?? buildSeoPack(article, run.brief.topic),
+    });
+  }
+
+  async selectThumbnail(id: string, variantId: string): Promise<PipelineRun> {
+    const run = await this.store.require(id);
+    if (!run.article) throw new Error("Article required");
+    const variants = (run.thumbnailVariants ?? []).map((v) => ({
+      ...v,
+      selected: v.id === variantId,
+    }));
+    const chosen = variants.find((v) => v.id === variantId);
+    if (!chosen) throw new Error(`Unknown thumbnail variant: ${variantId}`);
+    return this.store.save({
+      ...run,
+      thumbnailVariants: variants,
+      article: { ...run.article, featuredImage: chosen.url },
+    });
+  }
+
+  async refreshPublished(id: string): Promise<PipelineRun> {
+    const source = await this.store.require(id);
+    if (source.status !== "PUBLISHED" && source.status !== "APPROVED") {
+      throw new Error("Refresh is for published or approved runs");
+    }
+    const created = await this.create(
+      {
+        ...source.brief,
+        topic: source.brief.topic,
+        referenceUrls: [
+          ...source.brief.referenceUrls,
+          ...((source.publishResult as { url?: string } | null)?.url &&
+          /^https?:/i.test(String((source.publishResult as { url?: string }).url))
+            ? [String((source.publishResult as { url?: string }).url)]
+            : []),
+        ],
+      },
+      { templateId: source.templateId },
+    );
+    return this.store.save({
+      ...created,
+      reviewNotes: `Refresh of ${source.id}`,
+      stylePresetId: source.stylePresetId,
+      generateImages: source.generateImages,
+      publishTargets: source.publishTargets,
+    });
+  }
+
+  async distribute(id: string): Promise<PipelineRun> {
+    let run = await this.store.require(id);
+    if (!run.article) throw new Error("Article required to distribute");
+    const plan = planCrossPost(run.publishTargets, run.article.slug);
+    if (run.status !== "APPROVED" && run.status !== "PUBLISH_FAILED") {
+      run = await this.approve(id, run.reviewNotes ?? "One-click distribute");
+    }
+    run = await this.publish(id);
+    const repurposePack = buildRepurposePack({
+      title: run.article!.title,
+      slug: run.article!.slug,
+      excerpt: run.article!.excerpt,
+      tags: run.article!.tags,
+      content: run.article!.content,
+    });
+    return this.store.save({
+      ...run,
+      repurposePack,
+      reviewNotes: [run.reviewNotes, ...plan.notes].filter(Boolean).join(" · "),
+    });
+  }
+
+  async batchCreateAndRun(
+    briefs: ContentBriefInput[],
+    options: { generateImages?: boolean; templateId?: string | null } = {},
+  ): Promise<PipelineRun[]> {
+    const results: PipelineRun[] = [];
+    for (const brief of briefs.slice(0, 8)) {
+      const created = await this.create(brief, { templateId: options.templateId });
+      const run = await this.runUntilReview(created.id, {
+        generateImages: options.generateImages,
+        stopAfter: "outline",
+      });
+      results.push(run);
+    }
+    return results;
+  }
+
+  getResumeDashboard(runs?: PipelineRun[]) {
+    return buildResumeDashboard(runs ?? []);
+  }
+
+  async getDiff(id: string) {
+    const run = await this.store.require(id);
+    return diffSummary(run.previousArticle, run.article);
+  }
+
+  listSections(id: string): Promise<string[]> {
+    return this.store.require(id).then((run) => listArticleSections(run.article?.content ?? ""));
+  }
+
+  /** Heuristic check used by UI auto-accept of streamed drafts before quality. */
+  shouldAutoAcceptMarkdown(markdown: string, topic: string): boolean {
+    if (!appConfig.quality.autoAcceptEnabled) return false;
+    const fake = {
+      title: topic,
+      content: markdown,
+      seoTitle: topic,
+      seoDescription: markdown.slice(0, 150),
+      keywords: [],
+      slug: "draft",
+    };
+    const seo = scoreSEO(fake);
+    return seo.score >= appConfig.quality.autoAcceptMinScore && seo.issues.every((i) => i.severity !== "error");
   }
 }
 

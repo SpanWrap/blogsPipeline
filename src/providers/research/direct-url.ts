@@ -1,4 +1,4 @@
-import type { ContentBrief } from "../../models";
+import type { ContentBriefInput } from "../../models";
 import type { ResearchDiscovery, ResearchProvider } from "./types";
 
 /**
@@ -7,7 +7,7 @@ import type { ResearchDiscovery, ResearchProvider } from "./types";
 export class DirectURLProvider implements ResearchProvider {
   readonly name = "direct-url";
 
-  async discover(brief: ContentBrief): Promise<ResearchDiscovery[]> {
+  async discover(brief: ContentBriefInput): Promise<ResearchDiscovery[]> {
     return (brief.referenceUrls ?? []).map((url, index) => ({
       url,
       title: `Reference ${index + 1}`,

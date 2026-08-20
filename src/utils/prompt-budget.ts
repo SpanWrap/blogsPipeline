@@ -1,6 +1,6 @@
 import type {
   BlogOutline,
-  ContentBrief,
+  ContentBriefInput,
   ResearchAnalysis,
   ResearchSource,
 } from "../models";
@@ -60,13 +60,13 @@ export function pickSourcesForPrompt(
     .slice(0, Math.max(1, limit));
 }
 
-export function compactBrief(brief: ContentBrief): Record<string, unknown> {
+export function compactBrief(brief: ContentBriefInput): Record<string, unknown> {
   return {
     topic: truncateForPrompt(brief.topic, 200),
-    audience: truncateForPrompt(brief.targetAudience, 80),
-    tone: truncateForPrompt(brief.tone, 60),
-    type: truncateForPrompt(brief.contentType, 40),
-    keywords: brief.keywords.slice(0, 8).map((k) => truncateForPrompt(k, 40)),
+    audience: truncateForPrompt(brief.targetAudience ?? "general readers", 80),
+    tone: truncateForPrompt(brief.tone ?? "clear and professional", 60),
+    type: truncateForPrompt(brief.contentType ?? "educational", 40),
+    keywords: (brief.keywords ?? []).slice(0, 8).map((k) => truncateForPrompt(k, 40)),
   };
 }
 

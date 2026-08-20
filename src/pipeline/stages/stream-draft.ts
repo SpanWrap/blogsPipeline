@@ -1,6 +1,6 @@
 import type {
   BlogOutline,
-  ContentBrief,
+  ContentBriefInput,
   GeneratedBlog,
   ResearchAnalysis,
   ResearchSource,
@@ -52,7 +52,7 @@ Return Markdown only.`;
 /** Turn a streamed Markdown draft into a GeneratedBlog for the rest of the pipeline. */
 export function markdownDraftToArticle(
   markdown: string,
-  brief: ContentBrief,
+  brief: ContentBriefInput,
   sources: ResearchSource[],
 ): GeneratedBlog {
   const text = markdown.replace(/\r\n/g, "\n").trim();
@@ -97,7 +97,7 @@ export function markdownDraftToArticle(
 }
 
 export async function streamDraftStage(
-  brief: ContentBrief,
+  brief: ContentBriefInput,
   sources: ResearchSource[],
   analysis: ResearchAnalysis,
   outline: BlogOutline,

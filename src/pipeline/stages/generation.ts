@@ -1,6 +1,6 @@
 import type {
   BlogOutline,
-  ContentBrief,
+  ContentBriefInput,
   GeneratedBlog,
   ResearchAnalysis,
   ResearchSource,
@@ -27,7 +27,7 @@ import {
 import { logger } from "../../services/logger";
 
 export async function generationStage(
-  brief: ContentBrief,
+  brief: ContentBriefInput,
   sources: ResearchSource[],
   analysis: ResearchAnalysis,
   outline: BlogOutline,
