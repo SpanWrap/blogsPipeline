@@ -136,6 +136,100 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     return this.chat([{ role: "user", content: prompt }]);
   }
 
+  async streamText(
+    prompt: string,
+    onDelta: (chunk: string) => void | Promise<void>,
+    options?: { system?: string; signal?: AbortSignal },
+  ): Promise<string> {
+    const reasoningModel = /reasoner|r1/i.test(this.model);
+    const timeoutMs = reasoningModel
+      ? Math.max(appConfig.llm.requestTimeoutMs, 240_000)
+      : appConfig.llm.requestTimeoutMs;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = () => controller.abort();
+    options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      const messages = [
+        ...(options?.system ? [{ role: "system", content: options.system }] : []),
+        { role: "user", content: prompt },
+      ];
+      const body: Record<string, unknown> = {
+        model: this.model,
+        stream: true,
+        max_tokens: reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192,
+        messages,
+      };
+      if (!reasoningModel) body.temperature = 0.4;
+
+      const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sanitizeHeaderValue(this.apiKey)}`,
+          ...this.extraHeaders,
+        },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const errBody = await response.text();
+        const error = new Error(formatLlmHttpError(response.status, errBody, this.model)) as Error & {
+          status: number;
+        };
+        error.status = response.status;
+        throw error;
+      }
+      if (!response.body) throw new Error("LLM stream returned no body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let full = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(data) as {
+              choices?: Array<{ delta?: { content?: string } }>;
+            };
+            const delta = parsed.choices?.[0]?.delta?.content;
+            if (delta) {
+              full += delta;
+              await onDelta(delta);
+            }
+          } catch {
+            /* ignore partial JSON frames */
+          }
+        }
+      }
+
+      if (!full.trim()) throw new Error("Empty LLM stream");
+      return full;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        if (options?.signal?.aborted) throw new Error("Stream aborted");
+        throw new Error(
+          `LLM request timed out after ${Math.round(timeoutMs / 1000)}s (${this.name}/${this.model}). Use deepseek-chat for drafting, or raise LLM_REQUEST_TIMEOUT_MS.`,
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      options?.signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
   async generateStructured<T>(
     prompt: string,
     schema: z.ZodType<T>,

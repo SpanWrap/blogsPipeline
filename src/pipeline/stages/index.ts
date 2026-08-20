@@ -5,3 +5,8 @@ export { generationStage } from "./generation";
 export { qualityStage } from "./quality";
 export { publishingStage, toPublishableBlog } from "./publishing";
 export { imageStage, applyGeneratedImages } from "./images";
+export {
+  streamDraftStage,
+  markdownDraftToArticle,
+  buildStreamDraftPrompt,
+} from "./stream-draft";

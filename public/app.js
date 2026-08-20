@@ -8,6 +8,13 @@ const state = {
   run: null,
   tab: "quality",
   busy: false,
+  generateImages: false,
+  hasGeminiKey: false,
+  progress: {
+    active: false,
+    action: "",
+    lines: [],
+  },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -265,11 +272,13 @@ async function loadLlm() {
 async function loadHealth() {
   try {
     const h = await api("/api/health");
+    state.hasGeminiKey = Boolean(h.hasGeminiKey);
     const rows = [
       ["storage", h.storage],
       ["llm", h.hasLlmKey ? `${h.llmProvider} · ${h.llmModel || ""}`.trim() : `${h.llmProvider} (no key → mock)`],
       ["research", h.researchProvider],
       ["publish key", h.hasSpanwrapKey ? "set" : "missing"],
+      ["gemini images", h.hasGeminiKey ? "key set" : "no key"],
       ["github", h.hasGithubToken ? "token" : "public"],
       ["reddit", h.hasRedditOAuth ? "oauth" : "public"],
       ["x", h.hasXBearer ? "api" : "off"],
@@ -778,14 +787,100 @@ function insertAtCursor(textarea, text) {
   textarea.focus();
 }
 
+function wantsImages() {
+  const box = $("#generate-images-flag");
+  if (box) state.generateImages = box.checked && !box.disabled;
+  return Boolean(state.generateImages && state.hasGeminiKey);
+}
+
+function stageLabel(stage) {
+  return (
+    {
+      research: "Gathering resources...",
+      analysis: "Analyzing sources...",
+      outline: "Drafting the outline...",
+      generation: "Writing the article...",
+      images: "Generating images with Gemini...",
+      quality: "Scoring quality...",
+      publish: "Publishing...",
+    }[stage] || `${stage}...`
+  );
+}
+
+function pushProgress(text) {
+  const last = state.progress.lines[state.progress.lines.length - 1];
+  if (last?.text === text) return;
+  state.progress.lines = [
+    ...state.progress.lines,
+    { at: new Date().toLocaleTimeString(), text },
+  ].slice(-12);
+  const root = $("#action-progress-list");
+  if (!root) return;
+  root.innerHTML = state.progress.lines
+    .map((line) => `<li><span>${escapeHtml(line.at)}</span> ${escapeHtml(line.text)}</li>`)
+    .join("");
+}
+
+function startProgress(action) {
+  state.progress.active = true;
+  state.progress.action = action;
+  state.progress.lines = [];
+  pushProgress(
+    {
+      run: "Starting full pipeline (research → outline → draft → quality)...",
+      research: "Starting research...",
+      outline: "Starting outline...",
+      generate: "Starting article draft...",
+      "quality-check": "Starting quality checks...",
+      publish: "Starting publish...",
+      "generate-images": "Starting image generation...",
+    }[action] || "Processing request...",
+  );
+}
+
+function stopProgress(success, message) {
+  pushProgress(message || (success ? "Completed." : "Failed."));
+  state.progress.active = false;
+}
+
+function startStagePoll() {
+  let lastKey = "";
+  return setInterval(async () => {
+    if (!state.selectedId) return;
+    try {
+      const latest = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+      const running = (latest.stages || []).find((s) => s.status === "running");
+      const key = running ? `run:${running.stage}` : `status:${latest.status}:${latest.error || ""}`;
+      if (key === lastKey) return;
+      lastKey = key;
+      if (running) pushProgress(stageLabel(running.stage));
+      else if (latest.error) pushProgress(latest.error);
+    } catch {
+      /* ignore poll errors */
+    }
+  }, 1200);
+}
+
 async function act(action, body) {
-  if (!state.selectedId) return null;
+  if (!state.selectedId || state.busy) return null;
+  const payload = {
+    ...(body || {}),
+    generateImages: wantsImages(),
+  };
   setBusy(true);
+  startProgress(action);
+  const poller = startStagePoll();
   try {
     state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/${action}`, {
       method: "POST",
-      body: body ? JSON.stringify(body) : "{}",
+      body: JSON.stringify(payload),
     });
+    stopProgress(
+      !["FAILED", "PUBLISH_FAILED"].includes(state.run.status),
+      state.run.error
+        ? `${action} failed: ${state.run.error}`
+        : `${action} completed → ${state.run.status}`,
+    );
     toastRunResult(state.run, `${action} complete`);
     if (state.run?.article && ["run", "generate", "quality-check"].includes(action)) {
       state.tab = "quality";
@@ -797,9 +892,19 @@ async function act(action, body) {
     renderDetail();
     return state.run;
   } catch (e) {
+    stopProgress(false, e.message || "Action failed.");
     toast(e.message, true);
+    try {
+      if (state.selectedId) {
+        state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+        renderDetail();
+      }
+    } catch {
+      /* keep current */
+    }
     return null;
   } finally {
+    clearInterval(poller);
     setBusy(false);
   }
 }
@@ -816,6 +921,7 @@ function formBrief(form) {
 }
 
 async function createRun(andRun) {
+  if (state.busy) return;
   const form = $("#create-form");
   const brief = formBrief(form);
   if (!brief.topic || brief.topic.length < 3) {
@@ -831,24 +937,16 @@ async function createRun(andRun) {
     form.elements.tone.value = "technical but easy to understand";
     await loadRuns();
     state.selectedId = run.id;
-    if (andRun) {
-      state.run = await api(`/api/runs/${encodeURIComponent(run.id)}/run`, {
-        method: "POST",
-        body: "{}",
-      });
-      toastRunResult(state.run, "Run finished");
-      if (state.run?.article) state.tab = "quality";
-      await loadRuns();
-    } else {
-      state.run = run;
-    }
+    state.run = run;
     renderList();
     renderDetail();
   } catch (e) {
     toast(e.message, true);
+    return;
   } finally {
     setBusy(false);
   }
+  if (andRun) await act("run");
 }
 
 function renderDetail() {
@@ -901,17 +999,46 @@ function renderDetail() {
       <button type="button" class="btn primary" id="assign-template">Assign template</button>
     </div>
     <p class="hint">
-      The template's sections and instructions go to the LLM with this topic and the research sources.
-      Assign before <strong>Run to review</strong> or <strong>Generate</strong>.
-      Keep templates short — a large template can exceed the model's input/TPM limit.
+      <strong>Run to review</strong> runs the full pipeline: gather sources → outline → draft the post → quality score
+      ${state.hasGeminiKey ? " (optional Gemini images if checked)." : "."}
+      Tabs below are for inspecting and editing results — they do not run stages.
     </p>
     <div class="actions">
       <button class="btn primary" data-act="run">Run to review</button>
-      <button class="btn" data-act="research">Research</button>
-      <button class="btn" data-act="outline">Outline</button>
-      <button class="btn" data-act="generate">Generate</button>
-      <button class="btn" data-act="quality-check">Quality score</button>
+      <label class="check-inline" title="${state.hasGeminiKey ? "Generate hero/section images with Gemini after the draft" : "Add GEMINI_API_KEY in .env to enable"}">
+        <input type="checkbox" id="generate-images-flag" ${state.hasGeminiKey ? "" : "disabled"} ${state.generateImages && state.hasGeminiKey ? "checked" : ""} />
+        Gemini images
+      </label>
       <button class="btn" data-act="publish-preview">Open publish</button>
+    </div>
+    <details class="stage-actions">
+      <summary>Run one stage (advanced)</summary>
+      <p class="hint">Use only to retry a single step after a failure. Prefer <strong>Run to review</strong> for a full draft.</p>
+      <div class="actions">
+        <button class="btn" data-act="research">Research</button>
+        <button class="btn" data-act="outline">Outline</button>
+        <button class="btn" data-act="generate">Generate</button>
+        <button class="btn" data-act="quality-check">Quality score</button>
+      </div>
+    </details>
+    <div class="progress-panel">
+      <div class="progress-head">
+        <strong>Pipeline activity</strong>
+        ${
+          state.progress.active
+            ? `<span class="status warn">Running ${escapeHtml(state.progress.action)}</span>`
+            : `<span class="status">Idle</span>`
+        }
+      </div>
+      <ul id="action-progress-list" class="action-progress-list">
+        ${
+          state.progress.lines.length
+            ? state.progress.lines
+                .map((line) => `<li><span>${escapeHtml(line.at)}</span> ${escapeHtml(line.text)}</li>`)
+                .join("")
+            : `<li class="empty">No activity yet.</li>`
+        }
+      </ul>
     </div>
     <div class="tabs">
       ${tabs
@@ -924,6 +1051,17 @@ function renderDetail() {
     <div class="section">${content}</div>
   `;
 
+  const genImagesFlag = root.querySelector("#generate-images-flag");
+  if (genImagesFlag) {
+    genImagesFlag.addEventListener("change", () => {
+      state.generateImages = genImagesFlag.checked && !genImagesFlag.disabled;
+      try {
+        localStorage.setItem("pipeline.generateImages", state.generateImages ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+    });
+  }
   root.querySelectorAll("[data-act]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const action = btn.dataset.act;
@@ -1918,7 +2056,12 @@ $("#template-form")?.querySelector('input[type="file"]')?.addEventListener("chan
 async function bootApp() {
   const ok = await ensureAuth();
   if (!ok) return;
-  loadHealth();
+  try {
+    state.generateImages = localStorage.getItem("pipeline.generateImages") === "1";
+  } catch {
+    /* ignore */
+  }
+  await loadHealth();
   const boot = [loadLlm(), loadTemplates()];
   if (isSettingsPage()) boot.push(loadLogs(), loadUsers());
   else boot.push(loadRuns(), loadDigest());

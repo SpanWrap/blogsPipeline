@@ -20,6 +20,41 @@ export class MockLLMProvider implements LLMProvider {
     return `Mock response for: ${prompt.slice(0, 80)}`;
   }
 
+  async streamText(
+    prompt: string,
+    onDelta: (chunk: string) => void | Promise<void>,
+    _options?: { system?: string; signal?: AbortSignal },
+  ): Promise<string> {
+    const topic = extractField(prompt, "topic") ?? "AI agents";
+    const full = [
+      `# ${topic}: a practical guide`,
+      "",
+      "Customer support teams need faster answers without losing trust.",
+      "",
+      "## Why this matters now",
+      "",
+      "Support load grows with product complexity. Automation helps when scope is clear.",
+      "",
+      "## What the research shows",
+      "",
+      "Grounded pilots with escalation paths outperform unbounded agent rollouts.",
+      "",
+      "## How to apply it",
+      "",
+      "Start with high-volume intents, measure deflection, and keep humans for edge cases.",
+      "",
+    ].join("\n");
+    const parts = full.match(/.{1,24}/gs) ?? [full];
+    let out = "";
+    for (const part of parts) {
+      if (_options?.signal?.aborted) throw new Error("Stream aborted");
+      out += part;
+      await onDelta(part);
+      await new Promise((r) => setTimeout(r, 8));
+    }
+    return out;
+  }
+
   async generateStructured<T>(
     prompt: string,
     schema: z.ZodType<T>,

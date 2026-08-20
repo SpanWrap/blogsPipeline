@@ -26,12 +26,15 @@ import {
   publishingStage,
   qualityStage,
   researchStage,
+  streamDraftStage,
+  markdownDraftToArticle,
 } from "./stages";
 import { completeStage, failStage, setStatus, startStage } from "./state";
 import { injectAffiliateLinks } from "../services/affiliate-links";
 import { recordPublish } from "../services/analytics";
 import { promoteAll } from "../services/social-promotion";
 import { appConfig } from "../config";
+import { describeTemplateForPrompt } from "../utils/template";
 
 /** Process-wide lock so two "Run to review" clicks cannot wipe each other's outline/article. */
 const runLocks = new Map<string, Promise<void>>();
@@ -372,11 +375,21 @@ export class BlogPipelineOrchestrator {
     return withRunLock(id, () => this.qualityCheckUnlocked(id));
   }
 
-  private async qualityCheckUnlocked(id: string): Promise<PipelineRun> {
+  private async qualityCheckUnlocked(
+    id: string,
+    options: { article?: GeneratedBlog | null } = {},
+  ): Promise<PipelineRun> {
     let run = await this.store.require(id);
+    if (options.article && !run.article) {
+      run = await this.store.save({ ...run, article: options.article });
+    }
     if (!run.article) {
       return this.store.save(
-        failStage(startStage(run, "quality"), "quality", "Article required for quality check"),
+        failStage(
+          startStage(run, "quality"),
+          "quality",
+          "No draft yet. Click Run to review (or Generate) first, then Quality score.",
+        ),
       );
     }
     const article = run.article;
@@ -607,12 +620,18 @@ export class BlogPipelineOrchestrator {
   }
 
   /**
-   * Convenience: research → outline → generate → quality (stops before approve/publish).
-   * Stops at the first failed stage so quality does not run without a draft.
+   * Primary UI/CLI action.
+   * - Fresh or completed runs: full pipeline (research → outline → draft → quality)
+   * - FAILED runs: resume from failedStage, keeping earlier artifacts
+   * - stopAfter: "outline" lets the UI stream the draft live before quality
    */
   async runUntilReview(
     id: string,
-    options: { generateImages?: boolean } = {},
+    options: {
+      generateImages?: boolean;
+      stopAfter?: "outline" | null;
+      forceFull?: boolean;
+    } = {},
   ): Promise<PipelineRun> {
     return withRunLock(id, async () => {
       if (typeof options.generateImages === "boolean") {
@@ -621,12 +640,21 @@ export class BlogPipelineOrchestrator {
       }
 
       let run = await this.store.require(id);
+      const resumeFrom =
+        !options.forceFull && run.status === "FAILED" ? run.failedStage : null;
 
-      // Resume from saved artifacts. Re-running research here used to wipe a
-      // finished outline, then generate would fail with "outline required".
-      if (!run.analysis || run.sources.length === 0) {
+      const skipResearch =
+        resumeFrom === "outline" ||
+        resumeFrom === "generation" ||
+        resumeFrom === "images" ||
+        resumeFrom === "quality";
+      const skipOutline =
+        resumeFrom === "generation" || resumeFrom === "images" || resumeFrom === "quality";
+      const skipGenerate = resumeFrom === "quality" && Boolean(run.article);
+
+      if (!skipResearch) {
         run = await this.researchUnlocked(id);
-        if (run.status === "FAILED" || !run.analysis) {
+        if (run.status === "FAILED" || !run.analysis || run.sources.length === 0) {
           return run.status === "FAILED"
             ? run
             : this.store.save(
@@ -637,9 +665,12 @@ export class BlogPipelineOrchestrator {
                 ),
               );
         }
+      } else if (!run.analysis || run.sources.length === 0) {
+        run = await this.researchUnlocked(id);
+        if (run.status === "FAILED" || !run.analysis) return run;
       }
 
-      if (!run.outline) {
+      if (!skipOutline) {
         run = await this.outlineUnlocked(id);
         if (run.status === "FAILED" || !run.outline || !run.analysis) {
           return run.status === "FAILED"
@@ -652,14 +683,136 @@ export class BlogPipelineOrchestrator {
                 ),
               );
         }
+      } else if (!run.outline) {
+        run = await this.outlineUnlocked(id);
+        if (run.status === "FAILED" || !run.outline) return run;
       }
 
-      if (!run.article) {
+      if (options.stopAfter === "outline") {
+        return this.store.save(setStatus({ ...run, error: null }, "OUTLINE_READY"));
+      }
+
+      if (!skipGenerate) {
+        run = await this.generateUnlocked(id, {
+          snapshot: run,
+          generateImages: options.generateImages,
+        });
+        if (run.status === "FAILED" || !run.article) return run;
+      } else if (!run.article) {
         run = await this.generateUnlocked(id, { snapshot: run });
         if (run.status === "FAILED" || !run.article) return run;
       }
 
-      return this.qualityCheckUnlocked(id);
+      return this.qualityCheckUnlocked(id, { article: run.article });
+    });
+  }
+
+  /** Mark generation as running and stream a Markdown draft to the caller (SSE). */
+  async streamDraft(
+    id: string,
+    onDelta: (chunk: string) => void | Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<{ markdown: string; run: PipelineRun }> {
+    return withRunLock(id, async () => {
+      let run = await this.store.require(id);
+      if (!run.outline || !run.analysis) {
+        throw new Error("Outline and analysis are required before streaming a draft");
+      }
+      const analysis = run.analysis;
+      const outline = run.outline;
+      run = setStatus(
+        startStage(run, "generation", { provider: this.llm.name, model: this.llm.model }),
+        "GENERATING",
+      );
+      run = await this.store.save(run);
+
+      try {
+        const templateGuidance = run.templateMarkdown?.trim()
+          ? describeTemplateForPrompt(run.templateMarkdown)
+          : null;
+        const markdown = await streamDraftStage(
+          run.brief,
+          run.sources,
+          analysis,
+          outline,
+          this.llm,
+          onDelta,
+          templateGuidance,
+          signal,
+        );
+        run = await this.store.save({
+          ...run,
+          // Keep GENERATING until accept/reject; stash draft in reviewNotes marker is awkward —
+          // UI holds markdown client-side until accept.
+          error: null,
+        });
+        return { markdown, run };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const failed = await this.store.save(failStage(run, "generation", message));
+        throw Object.assign(new Error(message), { run: failed });
+      }
+    });
+  }
+
+  /** Persist an accepted streamed Markdown draft as the run article. */
+  async acceptStreamDraft(
+    id: string,
+    markdown: string,
+    options: { generateImages?: boolean } = {},
+  ): Promise<PipelineRun> {
+    return withRunLock(id, async () => {
+      let run = await this.store.require(id);
+      if (!run.outline || !run.analysis) {
+        throw new Error("Outline and analysis are required before accepting a draft");
+      }
+      let article = markdownDraftToArticle(markdown, run.brief, run.sources);
+      try {
+        const { content, linksInjected } = injectAffiliateLinks(article.content);
+        if (linksInjected.length > 0) article = { ...article, content };
+      } catch {
+        /* optional */
+      }
+
+      let next: PipelineRun = {
+        ...run,
+        article,
+        quality: null,
+        error: null,
+        failedStage: null,
+        errorCode: null,
+        retryable: false,
+      };
+      if (typeof options.generateImages === "boolean") {
+        next = { ...next, generateImages: options.generateImages };
+      }
+      next = completeStage(next, "generation", {
+        title: article.title,
+        provider: this.llm.name,
+        model: this.llm.model,
+        streamed: true,
+      });
+      next = setStatus(next, "DRAFT_READY");
+      next = await this.store.save(next);
+
+      if (next.generateImages) {
+        next = await this.attachGeneratedImages(next);
+        next = await this.store.save(setStatus(next, "DRAFT_READY"));
+      }
+      return next;
+    });
+  }
+
+  /** Discard a streamed suggestion and mark generation failed/cancelled for retry. */
+  async rejectStreamDraft(id: string, reason = "Draft rejected by reviewer"): Promise<PipelineRun> {
+    return withRunLock(id, async () => {
+      const run = await this.store.require(id);
+      return this.store.save(
+        failStage(startStage(run, "generation"), "generation", reason, {
+          errorCode: "DRAFT_REJECTED",
+          retryable: true,
+        }),
+      );
     });
   }
 }

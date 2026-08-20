@@ -461,7 +461,7 @@ describe("end-to-end pipeline", () => {
     expect(result.publishResults[0]?.statusCode).toBe(501);
   });
 
-  it("resumes Run to review from a saved outline instead of wiping it", async () => {
+  it("Run to review always regenerates research through quality", async () => {
     const created = await orch.create({
       topic: "AI agents in customer support",
       targetAudience: "startup founders",
@@ -471,16 +471,12 @@ describe("end-to-end pipeline", () => {
       referenceUrls: [],
     });
     await orch.research(created.id);
-    const outlined = await orch.outline(created.id);
-    await store.save({
-      ...outlined,
-      analysis: { ...outlined.analysis!, summary: "KEEP_ME" },
-    });
+    await orch.outline(created.id);
 
     const reviewed = await orch.runUntilReview(created.id);
-    expect(reviewed.analysis?.summary).toBe("KEEP_ME");
     expect(reviewed.article?.content.length).toBeGreaterThan(50);
     expect(reviewed.status).toBe("REVIEW_REQUIRED");
+    expect(reviewed.quality).toBeTruthy();
   });
 
   it("serializes concurrent Run to review so generate still receives the outline", async () => {

@@ -36,22 +36,41 @@ export const SourceSchema = z.object({
 
 export type ResearchSource = z.infer<typeof SourceSchema>;
 
+const CLAIM_CATEGORIES = [
+  "fact",
+  "statistic",
+  "argument",
+  "example",
+  "viewpoint",
+  "terminology",
+  "quote",
+  "verification_needed",
+] as const;
+
+/** LLMs often invent close-but-invalid categories; coerce instead of failing the whole run. */
+function coerceClaimCategory(value: unknown): (typeof CLAIM_CATEGORIES)[number] {
+  if (typeof value !== "string") return "fact";
+  const v = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if ((CLAIM_CATEGORIES as readonly string[]).includes(v)) {
+    return v as (typeof CLAIM_CATEGORIES)[number];
+  }
+  if (v.includes("stat")) return "statistic";
+  if (v.includes("argu")) return "argument";
+  if (v.includes("example") || v.includes("case_study") || v.includes("anecdote")) return "example";
+  if (v.includes("view") || v.includes("opinion") || v.includes("perspective")) return "viewpoint";
+  if (v.includes("term") || v.includes("defin") || v.includes("glossary")) return "terminology";
+  if (v.includes("quote") || v.includes("citation")) return "quote";
+  if (v.includes("verif") || v.includes("uncertain") || v.includes("unconfirmed") || v.includes("need")) {
+    return "verification_needed";
+  }
+  return "fact";
+}
+
 export const ClaimSchema = z.object({
   claim: z.string().min(1),
   sourceIds: z.array(z.string()).min(1),
   confidence: z.number().min(0).max(1).default(0.5),
-  category: z
-    .enum([
-      "fact",
-      "statistic",
-      "argument",
-      "example",
-      "viewpoint",
-      "terminology",
-      "quote",
-      "verification_needed",
-    ])
-    .default("fact"),
+  category: z.preprocess(coerceClaimCategory, z.enum(CLAIM_CATEGORIES)).default("fact"),
 });
 
 export type Claim = z.infer<typeof ClaimSchema>;
