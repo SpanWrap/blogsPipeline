@@ -39,7 +39,11 @@ import { appConfig } from "../config";
 import { describeTemplateForPrompt } from "../utils/template";
 import { applyStyleLockToBrief, stripBannedPhrases } from "../services/style-presets";
 import { readabilityPass } from "../services/readability-pass";
-import { regenerateSection, listArticleSections } from "../services/section-regenerate";
+import {
+  regenerateSection,
+  regenerateSelection,
+  listArticleSections,
+} from "../services/section-regenerate";
 import { buildRepurposePack } from "../services/repurpose";
 import { buildSeoPack, applySeoChoice } from "../services/enrichment";
 import { saveTemplateMemory, loadTemplateMemory } from "../services/template-memory";
@@ -726,7 +730,7 @@ export class BlogPipelineOrchestrator {
    * Primary UI/CLI action.
    * - Fresh or completed runs: full pipeline (research → outline → draft → quality)
    * - FAILED runs: resume from failedStage, keeping earlier artifacts
-   * - stopAfter: "outline" lets the UI stream the draft live before quality
+   * - stopAfter: "outline" stops after outline (batch / advanced flows)
    */
   async runUntilReview(
     id: string,
@@ -985,6 +989,42 @@ export class BlogPipelineOrchestrator {
           { at: new Date().toISOString(), note: `Regenerated section: ${heading}` },
         ].slice(-20),
       });
+    });
+  }
+
+  /** Quick Edit: rewrite a selected passage with an instruction. */
+  async regenerateSelection(
+    id: string,
+    input: { selectedText: string; instruction: string; content?: string },
+  ): Promise<PipelineRun & { replacement: string }> {
+    return withRunLock(id, async () => {
+      const run = await this.store.require(id);
+      if (!run.article) throw new Error("Article required");
+      const baseArticle =
+        input.content && input.content.trim()
+          ? { ...run.article, content: input.content }
+          : run.article;
+      const { article, replacement } = await regenerateSelection({
+        article: baseArticle,
+        selectedText: input.selectedText,
+        instruction: input.instruction,
+        content: baseArticle.content,
+        brief: run.brief,
+        sources: run.sources,
+        llm: this.llm,
+      });
+      const saved = await this.store.save({
+        ...run,
+        previousArticle: run.article,
+        article,
+        quality: null,
+        status: run.status === "APPROVED" || run.status === "PUBLISHED" ? run.status : "DRAFT_READY",
+        articleHistory: [
+          ...(run.articleHistory ?? []),
+          { at: new Date().toISOString(), note: "Quick Edit selection regenerate" },
+        ].slice(-20),
+      });
+      return Object.assign(saved, { replacement });
     });
   }
 

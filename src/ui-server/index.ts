@@ -26,8 +26,14 @@ import {
   type SessionUser,
 } from "../services/auth";
 import { getActivityLogStore, recordActivity } from "../services/activity-log";
+import { enrichRunView } from "../services/enrichment";
+import type { PipelineRun } from "../models";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+function runView(run: PipelineRun) {
+  return { ...run, ...enrichRunView(run) };
+}
 const publicCandidates = [
   path.join(moduleDir, "public"),
   path.join(process.cwd(), "public"),
@@ -519,7 +525,7 @@ async function handleAuthedApi(
         templateId: raw.templateId || null,
       });
       await log("run_created", { runId: run.id, topic: run.brief.topic });
-      return sendJson(res, 201, run);
+      return sendJson(res, 201, runView(run));
     }
 
     // Templates API
@@ -608,8 +614,7 @@ async function handleAuthedApi(
 
       if (method === "GET" && !action) {
         const run = await orch().get(id);
-        const { enrichRunView } = await import("../services/enrichment");
-        return sendJson(res, 200, { ...run, ...enrichRunView(run) });
+        return sendJson(res, 200, runView(run));
       }
 
       if (method === "DELETE" && !action) {
@@ -724,6 +729,13 @@ async function handleAuthedApi(
           case "regenerate-section":
             run = await o.regenerateSection(id, String(body.heading ?? ""));
             break;
+          case "regenerate-selection":
+            run = await o.regenerateSelection(id, {
+              selectedText: String(body.selectedText ?? ""),
+              instruction: String(body.instruction ?? ""),
+              content: body.content != null ? String(body.content) : undefined,
+            });
+            break;
           case "apply-seo":
             run = await o.applySeoPack(id, {
               title: body.title,
@@ -757,6 +769,7 @@ async function handleAuthedApi(
           "reject-stream-draft": "run_reject_stream_draft",
           "readability-pass": "run_readability",
           "regenerate-section": "run_regen_section",
+          "regenerate-selection": "run_regen_selection",
           "apply-seo": "run_apply_seo",
           "select-thumbnail": "run_select_thumbnail",
           refresh: "run_refresh",
@@ -774,7 +787,7 @@ async function handleAuthedApi(
           runId: id,
           status: run.status,
         });
-        return sendJson(res, 200, run);
+        return sendJson(res, 200, runView(run));
       }
     }
 

@@ -27,12 +27,11 @@ export async function analysisStage(
   const analysis = await llm.generateStructured(prompt, ResearchAnalysisSchema);
   const known = new Set(payload.map((s) => String(s.id)));
 
-  const claims = analysis.claims
-    .map((c) => ({
-      ...c,
-      sourceIds: c.sourceIds.filter((id) => known.has(id)),
-    }))
-    .filter((c) => c.sourceIds.length > 0);
+  const claims = analysis.claims.map((c) => ({
+    ...c,
+    // Keep claims even when unsourced so Fact cards can surface verification gaps.
+    sourceIds: c.sourceIds.filter((id) => known.has(id)),
+  }));
 
   return ResearchAnalysisSchema.parse({
     ...analysis,

@@ -919,7 +919,7 @@ function startStagePoll() {
 async function act(action, body) {
   if (!state.selectedId || state.busy) return null;
   if (action === "run") {
-    return runToReviewLive(body);
+    return runToReview(body);
   }
   const payload = {
     ...(body || {}),
@@ -967,19 +967,18 @@ async function act(action, body) {
   }
 }
 
-/** Full pipeline with live streamed draft + accept/reject. Resumes if previous run FAILED. */
-async function runToReviewLive(body = {}) {
+/** Full pipeline through quality. Resumes if previous run FAILED. */
+async function runToReview(body = {}) {
   if (!state.selectedId || state.busy) return null;
   const generateImages = wantsImages();
   setBusy(true);
   startProgress("run");
   const poller = startStagePoll();
-  let streamAbort = null;
   try {
     pushProgress(
       state.run?.status === "FAILED"
         ? `Resuming from failed stage (${state.run.failedStage || "unknown"})...`
-        : "Starting full pipeline...",
+        : "Starting full pipeline (research → draft → quality)...",
     );
 
     state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/run`, {
@@ -987,83 +986,18 @@ async function runToReviewLive(body = {}) {
       body: JSON.stringify({
         ...body,
         generateImages,
-        stopAfter: "outline",
       }),
-    });
-    if (state.run.status === "FAILED" || !state.run.outline) {
-      stopProgress(false, state.run.error || "Stopped before draft");
-      toastRunResult(state.run, "Run stopped");
-      await loadRuns();
-      renderDetail();
-      return state.run;
-    }
-
-    pushProgress("Streaming live draft...");
-    state.tab = "article";
-    renderDetail();
-    ensureStreamPanel();
-
-    const streamResult = await streamGenerateDraft((controller) => {
-      streamAbort = controller;
-    });
-    if (!streamResult.ok) {
-      stopProgress(false, streamResult.error || "Stream failed");
-      toast(streamResult.error || "Stream failed", true);
-      state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
-      await loadRuns();
-      renderDetail();
-      return state.run;
-    }
-
-    pushProgress("Draft ready — Accept or Reject the suggestion");
-    let decision = "accept";
-    if (state.autoAcceptEnabled) {
-      pushProgress(`Auto-accept enabled (≥${state.autoAcceptMinScore}) — accepting draft`);
-      decision = "accept";
-    } else {
-      decision = await waitForDraftDecision(streamResult.markdown);
-    }
-    if (decision === "reject") {
-      state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/reject-stream-draft`, {
-        method: "POST",
-        body: JSON.stringify({ reason: "Draft rejected by reviewer" }),
-      });
-      stopProgress(false, "Draft rejected — click Run to review to resume generation");
-      toast("Draft rejected", true);
-      await loadRuns();
-      renderDetail();
-      return state.run;
-    }
-
-    pushProgress("Accepting draft...");
-    state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/accept-stream-draft`, {
-      method: "POST",
-      body: JSON.stringify({ markdown: streamResult.markdown, generateImages }),
-    });
-    if (state.run.status === "FAILED" || !state.run.article) {
-      stopProgress(false, state.run.error || "Accept failed");
-      toastRunResult(state.run, "Accept failed");
-      await loadRuns();
-      renderDetail();
-      return state.run;
-    }
-
-    pushProgress("Running quality checks...");
-    state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/quality-check`, {
-      method: "POST",
-      body: "{}",
     });
     stopProgress(
       state.run.status !== "FAILED",
       state.run.error || `Run finished → ${state.run.status}`,
     );
     toastRunResult(state.run, "Run complete");
-    state.tab = "quality";
+    if (state.run?.article) state.tab = "quality";
     await loadRuns();
     renderDetail();
     return state.run;
   } catch (e) {
-    streamAbort?.abort();
     stopProgress(false, e.message || "Run failed.");
     toast(e.message, true);
     try {
@@ -1079,156 +1013,6 @@ async function runToReviewLive(body = {}) {
     clearInterval(poller);
     setBusy(false);
   }
-}
-
-function ensureStreamPanel() {
-  let panel = $("#live-draft-panel");
-  if (panel) return panel;
-  const host = $("#detail .section") || $("#detail");
-  if (!host) return null;
-  panel = document.createElement("div");
-  panel.id = "live-draft-panel";
-  panel.className = "live-draft-panel";
-  panel.innerHTML = `
-    <div class="live-draft-head">
-      <strong>Live draft</strong>
-      <span id="live-draft-status" class="status warn">Streaming…</span>
-    </div>
-    <pre id="live-draft-body" class="live-draft-body"></pre>
-    <div class="live-draft-actions" id="live-draft-actions" hidden>
-      <button type="button" class="btn primary" data-draft-act="accept">Accept suggestion</button>
-      <button type="button" class="btn" data-draft-act="reject">Reject</button>
-      <button type="button" class="btn" data-draft-act="regenerate">Regenerate</button>
-    </div>
-  `;
-  host.prepend(panel);
-  return panel;
-}
-
-function streamGenerateDraft(onController) {
-  return new Promise(async (resolve) => {
-    const panel = ensureStreamPanel();
-    const bodyEl = $("#live-draft-body");
-    const statusEl = $("#live-draft-status");
-    const actions = $("#live-draft-actions");
-    if (bodyEl) bodyEl.textContent = "";
-    if (actions) actions.hidden = true;
-    if (statusEl) {
-      statusEl.textContent = "Streaming…";
-      statusEl.className = "status warn";
-    }
-
-    const controller = new AbortController();
-    onController?.(controller);
-    let markdown = "";
-
-    try {
-      const res = await fetch(`/api/runs/${encodeURIComponent(state.selectedId)}/generate-stream`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: "{}",
-        signal: controller.signal,
-      });
-      if (!res.ok || !res.body) {
-        const data = await res.json().catch(() => ({}));
-        resolve({ ok: false, error: data.error || res.statusText || "Stream failed" });
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let streamError = null;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-        for (const part of parts) {
-          const lines = part.split("\n");
-          let event = "message";
-          let dataLine = "";
-          for (const line of lines) {
-            if (line.startsWith("event:")) event = line.slice(6).trim();
-            if (line.startsWith("data:")) dataLine += line.slice(5).trim();
-          }
-          if (!dataLine) continue;
-          let payload = {};
-          try {
-            payload = JSON.parse(dataLine);
-          } catch {
-            continue;
-          }
-          if (event === "delta" && payload.text) {
-            markdown += payload.text;
-            if (bodyEl) {
-              bodyEl.textContent = markdown;
-              bodyEl.scrollTop = bodyEl.scrollHeight;
-            }
-          } else if (event === "error") {
-            streamError = payload.error || "Stream error";
-          } else if (event === "done" && payload.markdown) {
-            markdown = payload.markdown;
-            if (bodyEl) bodyEl.textContent = markdown;
-          }
-        }
-      }
-
-      if (streamError) {
-        if (statusEl) {
-          statusEl.textContent = "Failed";
-          statusEl.className = "status bad";
-        }
-        resolve({ ok: false, error: streamError });
-        return;
-      }
-      if (!markdown.trim()) {
-        resolve({ ok: false, error: "Empty streamed draft" });
-        return;
-      }
-      if (statusEl) {
-        statusEl.textContent = "Awaiting review";
-        statusEl.className = "status warn";
-      }
-      resolve({ ok: true, markdown });
-    } catch (e) {
-      resolve({ ok: false, error: e.message || "Stream aborted" });
-    }
-  });
-}
-
-function waitForDraftDecision(markdown) {
-  return new Promise((resolve) => {
-    const panel = ensureStreamPanel();
-    const actions = $("#live-draft-actions");
-    const bodyEl = $("#live-draft-body");
-    if (bodyEl) bodyEl.textContent = markdown;
-    if (actions) actions.hidden = false;
-
-    const onClick = async (e) => {
-      const btn = e.target.closest("[data-draft-act]");
-      if (!btn) return;
-      const act = btn.dataset.draftAct;
-      actions?.removeEventListener("click", onClick);
-      if (act === "regenerate") {
-        pushProgress("Regenerating draft...");
-        const again = await streamGenerateDraft();
-        if (!again.ok) {
-          toast(again.error || "Regenerate failed", true);
-          resolve("reject");
-          return;
-        }
-        resolve(await waitForDraftDecision(again.markdown));
-        return;
-      }
-      resolve(act === "accept" ? "accept" : "reject");
-    };
-    actions?.addEventListener("click", onClick);
-    panel?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  });
 }
 
 function formBrief(form) {
@@ -1336,9 +1120,9 @@ function renderDetail() {
       <button type="button" class="btn primary" id="assign-template">Assign template</button>
     </div>
     <p class="hint">
-      <strong>Run to review</strong> runs research → outline → <em>live streamed draft</em> (Accept/Reject) → quality.
-      If a run failed, it resumes from the failed stage. Tabs below only inspect/edit results.
-      ${state.hasGeminiKey ? " Enable Gemini images to generate art after you accept the draft." : ""}
+      <strong>Run to review</strong> runs research → outline → draft → quality.
+      If a run failed, it resumes from the failed stage. Tabs below inspect/edit results — select text in Quality to Quick Edit.
+      ${state.hasGeminiKey ? " Enable Gemini images to generate art with the draft." : ""}
     </p>
     <div class="actions">
       <button class="btn primary" data-act="run">Run to review</button>
@@ -1493,22 +1277,36 @@ function renderDetail() {
     });
   });
   const loadDiff = root.querySelector("#load-diff");
-  if (loadDiff) {
-    loadDiff.addEventListener("click", async () => {
-      try {
-        const diff = await api(`/api/runs/${encodeURIComponent(run.id)}/diff`, { method: "POST", body: "{}" });
-        const mount = root.querySelector("#diff-mount");
-        if (!mount) return;
-        mount.innerHTML = (diff.hunks || [])
-          .slice(0, 400)
-          .map((h) => {
-            const cls = h.type === "add" ? "diff-add" : h.type === "del" ? "diff-del" : "diff-same";
-            return `<div class="${cls}"><code>${escapeHtml(h.text || " ")}</code></div>`;
-          })
-          .join("");
-      } catch (e) {
-        toast(e.message, true);
+  const diffMount = root.querySelector("#diff-mount");
+  async function renderDiffMount() {
+    if (!diffMount || !run.id) return;
+    try {
+      const diff = await api(`/api/runs/${encodeURIComponent(run.id)}/diff`, {
+        method: "POST",
+        body: "{}",
+      });
+      const hunks = diff.hunks || [];
+      if (!hunks.length) {
+        diffMount.innerHTML = `<p class="empty">No line differences recorded.</p>`;
+        return;
       }
+      diffMount.innerHTML = hunks
+        .slice(0, 500)
+        .map((h) => {
+          const cls = h.type === "add" ? "diff-add" : h.type === "del" ? "diff-del" : "diff-same";
+          return `<div class="${cls}"><code>${escapeHtml(h.text || " ")}</code></div>`;
+        })
+        .join("");
+    } catch (e) {
+      diffMount.innerHTML = `<p class="empty">${escapeHtml(e.message || "Diff failed")}</p>`;
+    }
+  }
+  if (diffMount) {
+    void renderDiffMount();
+  }
+  if (loadDiff) {
+    loadDiff.addEventListener("click", () => {
+      void renderDiffMount();
     });
   }
   bindQualityEditor(root, run);
@@ -1912,6 +1710,192 @@ function initRichEditor(root, run) {
   editor.addEventListener("keyup", updateActiveStates);
   editor.addEventListener("mouseup", updateActiveStates);
   editor.addEventListener("click", updateActiveStates);
+
+  bindQuickEdit(editor, root, run);
+}
+
+/** Selection → Regenerate (Quick Edit) floating UI, Cursor/VS Code style. */
+function bindQuickEdit(editor, root, run) {
+  let host = document.getElementById("quick-edit-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "quick-edit-host";
+    host.hidden = true;
+    document.body.appendChild(host);
+  }
+
+  let savedRange = null;
+  let selectedText = "";
+  let open = false;
+  let busy = false;
+
+  function clearHost() {
+    host.innerHTML = "";
+    host.hidden = true;
+    open = false;
+  }
+
+  function selectionInEditor() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    const node = sel.anchorNode;
+    if (!node || !editor.contains(node)) return null;
+    const text = sel.toString().replace(/\u00a0/g, " ").trim();
+    if (text.length < 2) return null;
+    return { sel, text, range: sel.getRangeAt(0).cloneRange() };
+  }
+
+  function positionNearSelection(el, range) {
+    const rect = range.getBoundingClientRect();
+    const pad = 8;
+    // Measure after paint so offsetHeight is accurate.
+    el.style.visibility = "hidden";
+    el.style.top = "0px";
+    el.style.left = "0px";
+    const h = el.offsetHeight || 40;
+    const w = el.offsetWidth || 120;
+    let top = rect.top - h - pad;
+    if (top < pad) top = Math.min(window.innerHeight - h - pad, rect.bottom + pad);
+    let left = rect.left + rect.width / 2 - w / 2;
+    left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+    el.style.visibility = "visible";
+  }
+
+  function showRegenChip() {
+    if (busy || open) return;
+    const hit = selectionInEditor();
+    if (!hit) {
+      clearHost();
+      return;
+    }
+    savedRange = hit.range;
+    selectedText = hit.text;
+    host.hidden = false;
+    host.innerHTML = `
+      <div class="quick-edit-chip" role="toolbar">
+        <button type="button" class="quick-edit-chip-btn" data-qe="open">Regenerate</button>
+      </div>`;
+    const chip = host.querySelector(".quick-edit-chip");
+    positionNearSelection(chip, hit.range);
+    chip.querySelector("[data-qe=open]")?.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openQuickEdit();
+    });
+  }
+
+  function openQuickEdit() {
+    if (!selectedText || !savedRange) return;
+    open = true;
+    host.hidden = false;
+    const preview =
+      selectedText.length > 220 ? `${selectedText.slice(0, 220)}…` : selectedText;
+    host.innerHTML = `
+      <div class="quick-edit-panel" role="dialog" aria-label="Regenerate selection">
+        <div class="quick-edit-panel-head">
+          <strong>Regenerate selection</strong>
+          <button type="button" class="quick-edit-close" data-qe="close" aria-label="Close">×</button>
+        </div>
+        <pre class="quick-edit-preview">${escapeHtml(preview)}</pre>
+        <label class="quick-edit-label">
+          <span class="sr-only">Instruction</span>
+          <input type="text" class="quick-edit-input" placeholder="Edit selected text…" autocomplete="off" />
+        </label>
+        <div class="quick-edit-actions">
+          <button type="button" class="btn" data-qe="close">Cancel</button>
+          <button type="button" class="btn primary" data-qe="submit">Regenerate</button>
+        </div>
+        <p class="quick-edit-status" hidden></p>
+      </div>`;
+    const panel = host.querySelector(".quick-edit-panel");
+    positionNearSelection(panel, savedRange);
+    const input = host.querySelector(".quick-edit-input");
+    input?.focus();
+
+    host.querySelectorAll("[data-qe=close]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        clearHost();
+      });
+    });
+    host.querySelector("[data-qe=submit]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      submitQuickEdit();
+    });
+    input?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitQuickEdit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        clearHost();
+      }
+    });
+  }
+
+  async function submitQuickEdit() {
+    if (busy) return;
+    const input = host.querySelector(".quick-edit-input");
+    const status = host.querySelector(".quick-edit-status");
+    const instruction = String(input?.value || "").trim();
+    if (instruction.length < 2) {
+      toast("Add a short instruction for the rewrite", true);
+      input?.focus();
+      return;
+    }
+    if (!state.selectedId || !selectedText) return;
+
+    busy = true;
+    const submitBtn = host.querySelector("[data-qe=submit]");
+    if (submitBtn) submitBtn.disabled = true;
+    if (status) {
+      status.hidden = false;
+      status.textContent = "Rewriting selection…";
+    }
+
+    try {
+      const content = getEditorContent(root) || run.article?.content || "";
+      const result = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/regenerate-selection`, {
+        method: "POST",
+        body: JSON.stringify({
+          selectedText,
+          instruction,
+          content,
+        }),
+      });
+      state.run = result;
+      clearHost();
+      toast("Selection regenerated");
+      await loadRuns();
+      state.tab = "quality";
+      renderDetail();
+    } catch (e) {
+      if (status) status.textContent = e.message || "Regenerate failed";
+      toast(e.message || "Regenerate failed", true);
+      if (submitBtn) submitBtn.disabled = false;
+    } finally {
+      busy = false;
+    }
+  }
+
+  editor.addEventListener("mouseup", () => {
+    requestAnimationFrame(showRegenChip);
+  });
+  editor.addEventListener("keyup", (e) => {
+    if (e.key === "Escape") clearHost();
+    else if (e.shiftKey || e.key.startsWith("Arrow")) requestAnimationFrame(showRegenChip);
+  });
+
+  document.addEventListener("mousedown", (e) => {
+    if (!host.contains(e.target) && e.target !== editor && !editor.contains(e.target)) {
+      if (!open) clearHost();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !host.hidden) clearHost();
+  });
 }
 
 function renderPublishPreview(run) {
@@ -1996,8 +1980,9 @@ function renderQualityTab(run) {
                 .join("")}
             </ul>
           </div>`
-        : `<p class="hint">Optional: click <strong>Quality score</strong> after generating to flag issues. You can still edit and approve here.</p>`
+        : ""
     }
+    <p class="hint">Tip: select any passage in the editor to open <strong>Regenerate</strong> (Quick Edit).</p>
     <div class="quality-single-layout">
       <div class="quality-editor doc-style-editor">
         <input id="draft-title" class="doc-title-input" placeholder="Document Title" value="${escapeHtml(a.title || "")}" />
@@ -2097,29 +2082,47 @@ function renderTab(run, tab) {
   if (tab === "facts") {
     const cards = run.factCards || [];
     const brief = run.competitorBrief;
-    if (!cards.length && !brief) return `<p class="empty">No fact cards yet — run research first.</p>`;
+    const hasAnalysis = Boolean(run.analysis);
+    const hasSources = Boolean(run.sources?.length);
+    if (!hasSources && !hasAnalysis) {
+      return `<p class="empty">No research yet. Click <strong>Run to review</strong> or <strong>Research</strong> first.</p>`;
+    }
+    if (!cards.length && !brief) {
+      return `<p class="empty">Research finished, but no claims/arguments were extracted yet. Re-run <strong>Research</strong> or continue to outline.</p>
+        <p class="hint">Sources on this run: ${run.sources?.length || 0}. Analysis: ${hasAnalysis ? "yes" : "no"}.</p>`;
+    }
     return `
       ${brief ? `<div class="competitor-brief"><h3>Competitor angle brief</h3><p>${escapeHtml(brief.summary)}</p>
         <h4>Angles to own</h4><ul>${(brief.anglesToOwn || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
         <h4>Angles to avoid</h4><ul>${(brief.anglesToAvoid || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
         <h4>Competing viewpoints</h4><ul>${(brief.competingViewpoints || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
       </div>` : ""}
-      <h3>Fact cards</h3>
-      ${cards
-        .map(
-          (c) => `<article class="fact-card ${c.grounded ? "ok" : "warn"}">
+      <h3>Fact cards ${cards.length ? `(${cards.length})` : ""}</h3>
+      ${
+        cards.length
+          ? cards
+              .map(
+                (c) => `<article class="fact-card ${c.grounded ? "ok" : "warn"}">
           <strong>${escapeHtml(c.claim)}</strong>
           <div class="meta">${escapeHtml(c.category)} · confidence ${Math.round((c.confidence || 0) * 100)}% · ${c.grounded ? "grounded" : "needs source"}</div>
           <ul>${(c.sources || []).map((s) => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title)}</a></li>`).join("")}</ul>
         </article>`,
-        )
-        .join("")}`;
+              )
+              .join("")
+          : `<p class="hint">No structured claims yet — competitor brief above still applies.</p>`
+      }`;
   }
   if (tab === "diff") {
-    if (!run.previousArticle) return `<p class="empty">No previous version to diff yet. Edit, readability-pass, or regenerate a section first.</p>`;
-    return `<p class="hint">Showing saved previous vs current content. Open Diff after an edit to load line hunks from the API…</p>
-      <button type="button" class="btn" id="load-diff">Load diff</button>
-      <div id="diff-mount"></div>`;
+    if (!run.article) {
+      return `<p class="empty">No draft yet — Diff compares article versions after generate / edit / readability / Quick Edit.</p>`;
+    }
+    if (!run.previousArticle) {
+      return `<p class="empty">No previous version yet. Diff appears after you change the draft (Save, Readability pass, section regenerate, or Quick Edit).</p>`;
+    }
+    return `<div class="diff-panel">
+      <p class="hint">Comparing <strong>${escapeHtml(run.previousArticle.title || "previous")}</strong> → <strong>${escapeHtml(run.article.title || "current")}</strong></p>
+      <div id="diff-mount" class="diff-mount"><p class="hint">Loading diff…</p></div>
+    </div>`;
   }
   if (tab === "repurpose") {
     const p = run.repurposePack;

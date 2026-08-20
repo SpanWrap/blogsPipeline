@@ -12,9 +12,10 @@ export function buildFactCards(
   analysis: ResearchAnalysis | null | undefined,
   sources: ResearchSource[],
 ): FactCard[] {
-  if (!analysis?.claims?.length) return [];
+  if (!analysis) return [];
   const byId = new Map(sources.map((s) => [s.id, s]));
-  return analysis.claims.map((c: Claim) => {
+
+  const fromClaims = (analysis.claims ?? []).map((c: Claim) => {
     const linked = c.sourceIds
       .map((id) => byId.get(id))
       .filter(Boolean)
@@ -32,6 +33,16 @@ export function buildFactCards(
       grounded: linked.length > 0,
     };
   });
+  if (fromClaims.length) return fromClaims;
+
+  // Fallback when the model returned arguments but no structured claims.
+  return (analysis.keyArguments ?? []).slice(0, 8).map((arg) => ({
+    claim: arg,
+    category: "argument",
+    confidence: 0.5,
+    sources: [],
+    grounded: false,
+  }));
 }
 
 export function unsourcedClaimCount(cards: FactCard[]): number {

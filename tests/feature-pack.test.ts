@@ -101,4 +101,43 @@ describe("quality & productivity feature pack", () => {
     expect(dash.buckets.some((b) => b.id === "failed_retryable")).toBe(true);
     expect(listArticleSections(article.content)).toEqual(["Why now", "Apply it"]);
   });
+
+  it("locates and rewrites a selected passage via regenerateSelection helpers", async () => {
+    const { regenerateSelection } = await import("@/services/section-regenerate");
+    const article = {
+      title: "T",
+      subtitle: "",
+      slug: "t",
+      excerpt: "e",
+      content: "# T\n\nHello world from founders.\n\nNext paragraph stays.",
+      tags: [],
+      keywords: [],
+      seoTitle: "T",
+      seoDescription: "e",
+      sources: [],
+      sourceMap: [],
+      featuredImage: null,
+    };
+    const llm = {
+      name: "mock",
+      model: "mock",
+      async generateText() {
+        return "Hello rewritten founders.";
+      },
+      async generateStructured() {
+        throw new Error("unused");
+      },
+    };
+    const { article: next, replacement } = await regenerateSelection({
+      article,
+      selectedText: "Hello world from founders.",
+      instruction: "tighten",
+      brief: { topic: "founders" },
+      sources: [],
+      llm: llm as never,
+    });
+    expect(replacement).toContain("rewritten");
+    expect(next.content).toContain("Hello rewritten founders.");
+    expect(next.content).toContain("Next paragraph stays.");
+  });
 });

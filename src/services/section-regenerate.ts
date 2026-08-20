@@ -86,3 +86,93 @@ Rules: grounded in sources only; scannable; no filler.`;
 
   return { ...input.article, content: updated };
 }
+
+function findSelectionSpan(content: string, selectedText: string): { start: number; end: number } | null {
+  const needle = selectedText.trim();
+  if (!needle) return null;
+  const exact = content.indexOf(needle);
+  if (exact >= 0) return { start: exact, end: exact + needle.length };
+
+  // Fallback: ignore runs of whitespace so rich-editor plain selection can match Markdown.
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+  const target = norm(needle);
+  if (!target) return null;
+  const hay = norm(content);
+  const at = hay.indexOf(target);
+  if (at < 0) return null;
+
+  let hi = 0;
+  let start = -1;
+  let end = -1;
+  for (let ci = 0; ci < content.length; ci++) {
+    const ch = content[ci]!;
+    if (/\s/.test(ch)) {
+      if (hi < hay.length && hay[hi] === " ") hi++;
+      continue;
+    }
+    if (hi === at && start < 0) start = ci;
+    hi++;
+    if (start >= 0 && hi === at + target.length) {
+      end = ci + 1;
+      break;
+    }
+  }
+  return start >= 0 && end > start ? { start, end } : null;
+}
+
+/** Rewrite a selected passage using an instruction (Quick Edit). */
+export async function regenerateSelection(input: {
+  article: GeneratedBlog;
+  selectedText: string;
+  instruction: string;
+  /** Optional live editor markdown; defaults to article.content. */
+  content?: string;
+  brief: ContentBriefInput;
+  sources: ResearchSource[];
+  llm: LLMProvider;
+}): Promise<{ article: GeneratedBlog; replacement: string }> {
+  const selected = input.selectedText.trim();
+  const instruction = input.instruction.trim();
+  if (selected.length < 2) throw new Error("Select at least a few characters to regenerate");
+  if (instruction.length < 2) throw new Error("Add a regeneration instruction");
+
+  const content = (input.content ?? input.article.content).replace(/\r\n/g, "\n");
+  const span = findSelectionSpan(content, selected);
+  if (!span) {
+    throw new Error("Could not locate the selected text in the article. Select again and retry.");
+  }
+
+  const selectedSources = pickSourcesForPrompt(input.sources);
+  const prompt = `Rewrite the SELECTED PASSAGE only, following the instruction.
+Return ONLY the replacement text (Markdown allowed). No preamble, no quotes, no code fences.
+
+Topic: ${compactJson(compactBrief(input.brief))}
+Sources (ground claims here): ${compactJson(compactSourcesForGeneration(selectedSources))}
+
+Instruction: ${instruction}
+
+Selected passage:
+"""
+${content.slice(span.start, span.end)}
+"""
+
+Surrounding context (do not rewrite this; use only for continuity):
+"""
+${content.slice(Math.max(0, span.start - 280), span.start)}
+⟦SELECTION⟧
+${content.slice(span.end, Math.min(content.length, span.end + 280))}
+"""`;
+
+  const rewritten = (await input.llm.generateText(prompt)).trim();
+  const replacement = rewritten
+    .replace(/^```(?:markdown|md)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  if (!replacement) throw new Error("Model returned an empty rewrite");
+
+  const updatedContent = `${content.slice(0, span.start)}${replacement}${content.slice(span.end)}`;
+  return {
+    article: { ...input.article, content: updatedContent },
+    replacement,
+  };
+}

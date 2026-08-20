@@ -1,10 +1,15 @@
 # Feature checklist — quality & human-time reductions
 
-Verified implementation map (2026-08-20). Restart UI and hard-refresh `?v=16`.
+Verified implementation map (2026-08-20). Restart UI and hard-refresh `?v=17`.
+Live draft streaming panel removed — **Run to review** writes a full draft, then opens Quality for Quick Edit.
 
 | # | Feature | Status | Where |
 |---|---|---|---|
 | 1 | Section-level regenerate | DONE | `services/section-regenerate.ts`, API `regenerate-section`, Article tab buttons |
+| 1b | Selection Quick Edit | DONE | Quality editor selection → Regenerate chip + instruction; API `regenerate-selection` |
+| 1b | Selection Quick Edit regenerate | DONE | Select text in Quality editor → Regenerate chip → instruction; API `regenerate-selection` |
+...
+Live draft streaming panel removed (black-screen / detach bug). **Run to review** generates the full draft, then opens the Quality editor for Quick Edit.
 | 2 | Source-grounded fact cards | DONE | `services/fact-cards.ts`, GET run enrichment, **Facts** tab |
 | 3 | Style lock / voice presets | DONE | `services/style-presets.ts`, create form Style lock, `/api/style-presets` |
 | 4 | SEO pack | DONE | `services/seo-research.ts` + `enrichment.ts`, **SEO pack** tab, `apply-seo` |
