@@ -466,6 +466,10 @@ export class BlogPipelineOrchestrator {
     return this.store.save({ ...run, status: "CANCELLED" });
   }
 
+  async delete(id: string): Promise<boolean> {
+    return this.store.delete(id);
+  }
+
   async publish(id: string): Promise<PipelineRun> {
     let run = await this.store.require(id);
     if (run.status !== "APPROVED" && run.status !== "PUBLISH_FAILED") {

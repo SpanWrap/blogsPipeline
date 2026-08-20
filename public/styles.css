@@ -296,21 +296,54 @@ textarea {
   overflow: auto;
 }
 
-#run-list button {
+#run-list li {
+  position: relative;
+}
+
+#run-list .run-select-btn {
   width: 100%;
   text-align: left;
   border: 1px solid transparent;
   background: #f7f2e8;
   border-radius: 12px;
-  padding: 0.7rem 0.8rem;
+  padding: 0.7rem 2.2rem 0.7rem 0.8rem;
   cursor: pointer;
   font: inherit;
 }
 
-#run-list button.active,
-#run-list button:hover {
+#run-list .run-select-btn.active,
+#run-list .run-select-btn:hover {
   border-color: var(--line);
   background: #fff;
+}
+
+#run-list .run-delete-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  padding: 0;
+  width: 1.8rem;
+  height: 1.8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  border-radius: 6px;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+#run-list li:hover .run-delete-btn {
+  opacity: 0.45;
+  pointer-events: auto;
+}
+
+#run-list li .run-delete-btn:hover {
+  opacity: 1;
+  background: rgba(220, 53, 69, 0.15);
 }
 
 #run-list .topic {

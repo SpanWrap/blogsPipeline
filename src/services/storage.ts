@@ -41,5 +41,6 @@ export const runStore = {
   save: (run: Parameters<RunStore["save"]>[0]) => getRunStore().save(run),
   get: (id: string) => getRunStore().get(id),
   require: (id: string) => getRunStore().require(id),
+  delete: (id: string) => getRunStore().delete(id),
   list: () => getRunStore().list(),
 };

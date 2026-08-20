@@ -75,6 +75,12 @@ export class MongoRunStore implements RunStore {
     return run;
   }
 
+  async delete(id: string): Promise<boolean> {
+    const col = await this.ensureConnected();
+    const result = await col.deleteOne(this.filterById(id));
+    return result.deletedCount > 0;
+  }
+
   async list(): Promise<PipelineRun[]> {
     const col = await this.ensureConnected();
     const docs = await col.find({}).sort({ updatedAt: -1 }).toArray();

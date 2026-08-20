@@ -46,6 +46,18 @@ export class FileRunStore implements RunStore {
     return run;
   }
 
+  async delete(id: string): Promise<boolean> {
+    try {
+      const { rm } = await import("node:fs/promises");
+      await rm(this.runPath(id));
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
   async list(): Promise<PipelineRun[]> {
     await this.ensureReady();
     const files = await readdir(this.runsDir());

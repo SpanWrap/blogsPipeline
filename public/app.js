@@ -653,18 +653,40 @@ function renderList() {
     .map(
       (r) => `
       <li>
-        <button type="button" data-id="${r.id}" class="${r.id === state.selectedId ? "active" : ""}">
+        <button type="button" data-id="${r.id}" class="run-select-btn ${r.id === state.selectedId ? "active" : ""}">
           <span class="topic">${escapeHtml(r.topic)}</span>
           <span class="meta">
             <span class="status ${statusClass(r.status)}">${r.status}</span>
             <span>${r.id}</span>
           </span>
         </button>
+        <button type="button" data-delete-id="${r.id}" class="run-delete-btn" title="Delete run">🗑️</button>
       </li>`,
     )
     .join("");
+    
   list.querySelectorAll("button[data-id]").forEach((btn) => {
     btn.addEventListener("click", () => selectRun(btn.dataset.id));
+  });
+  
+  list.querySelectorAll("button[data-delete-id]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm("Are you sure you want to delete this run?")) return;
+      try {
+        const id = btn.dataset.deleteId;
+        await api(`/api/runs/${encodeURIComponent(id)}`, { method: "DELETE" });
+        toast("Run deleted successfully");
+        if (state.selectedId === id) {
+          state.selectedId = null;
+          state.run = null;
+          renderDetail();
+        }
+        await loadRuns();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
   });
 }
 

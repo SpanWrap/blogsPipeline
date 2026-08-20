@@ -11,8 +11,8 @@
   "scripts": {
     "pipeline": "tsx src/cli/index.ts",
     "dev": "tsx server.ts",
-    "start": "tsx server.ts",
-    "ui": "tsx server.ts",
+    "build": "esbuild server.ts --bundle --platform=node --target=node20 --format=esm --packages=external --outfile=dist/server.js && cp -R public dist/public",
+    "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -34,6 +34,7 @@
   "devDependencies": {
     "@types/node": "^20",
     "@types/sanitize-html": "^2.16.1",
+    "esbuild": "^0.28.2",
     "typescript": "^5",
     "vitest": "^4.1.10"
   }

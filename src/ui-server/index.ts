@@ -34,14 +34,21 @@ const publicCandidates = [
   path.join(process.cwd(), "src/ui-server/public"),
 ];
 
+const isBundled = !import.meta.url.includes("ui-server");
+const getStaticUrl = (relPath: string) => {
+  return isBundled
+    ? new URL(`./public/${relPath}`, import.meta.url)
+    : new URL(`../../public/${relPath}`, import.meta.url);
+};
+
 /** Explicit URLs so Vercel file tracing includes these assets in the function bundle. */
 const tracedStatic = {
-  "/": new URL("../../public/index.html", import.meta.url),
-  "/index.html": new URL("../../public/index.html", import.meta.url),
-  "/settings": new URL("../../public/index.html", import.meta.url),
-  "/settings/": new URL("../../public/index.html", import.meta.url),
-  "/styles.css": new URL("../../public/styles.css", import.meta.url),
-  "/app.js": new URL("../../public/app.js", import.meta.url),
+  "/": getStaticUrl("index.html"),
+  "/index.html": getStaticUrl("index.html"),
+  "/settings": getStaticUrl("index.html"),
+  "/settings/": getStaticUrl("index.html"),
+  "/styles.css": getStaticUrl("styles.css"),
+  "/app.js": getStaticUrl("app.js"),
 } as const;
 
 const MIME: Record<string, string> = {
@@ -561,6 +568,12 @@ async function handleAuthedApi(
       if (method === "GET" && !action) {
         const run = await orch().get(id);
         return sendJson(res, 200, run);
+      }
+
+      if (method === "DELETE" && !action) {
+        const ok = await orch().delete(id);
+        if (ok) await log("run_deleted", { runId: id });
+        return sendJson(res, ok ? 200 : 404, { deleted: ok });
       }
 
       if (method === "POST" && action) {
