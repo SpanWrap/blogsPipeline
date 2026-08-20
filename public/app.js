@@ -863,6 +863,9 @@ function startStagePoll() {
 
 async function act(action, body) {
   if (!state.selectedId || state.busy) return null;
+  if (action === "run") {
+    return runToReviewLive(body);
+  }
   const payload = {
     ...(body || {}),
     generateImages: wantsImages(),
@@ -882,7 +885,7 @@ async function act(action, body) {
         : `${action} completed → ${state.run.status}`,
     );
     toastRunResult(state.run, `${action} complete`);
-    if (state.run?.article && ["run", "generate", "quality-check"].includes(action)) {
+    if (state.run?.article && ["generate", "quality-check", "accept-stream-draft"].includes(action)) {
       state.tab = "quality";
     }
     if (action === "approve") {
@@ -907,6 +910,264 @@ async function act(action, body) {
     clearInterval(poller);
     setBusy(false);
   }
+}
+
+/** Full pipeline with live streamed draft + accept/reject. Resumes if previous run FAILED. */
+async function runToReviewLive(body = {}) {
+  if (!state.selectedId || state.busy) return null;
+  const generateImages = wantsImages();
+  setBusy(true);
+  startProgress("run");
+  const poller = startStagePoll();
+  let streamAbort = null;
+  try {
+    pushProgress(
+      state.run?.status === "FAILED"
+        ? `Resuming from failed stage (${state.run.failedStage || "unknown"})...`
+        : "Starting full pipeline...",
+    );
+
+    state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/run`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...body,
+        generateImages,
+        stopAfter: "outline",
+      }),
+    });
+    if (state.run.status === "FAILED" || !state.run.outline) {
+      stopProgress(false, state.run.error || "Stopped before draft");
+      toastRunResult(state.run, "Run stopped");
+      await loadRuns();
+      renderDetail();
+      return state.run;
+    }
+
+    pushProgress("Streaming live draft...");
+    state.tab = "article";
+    renderDetail();
+    ensureStreamPanel();
+
+    const streamResult = await streamGenerateDraft((controller) => {
+      streamAbort = controller;
+    });
+    if (!streamResult.ok) {
+      stopProgress(false, streamResult.error || "Stream failed");
+      toast(streamResult.error || "Stream failed", true);
+      state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+      await loadRuns();
+      renderDetail();
+      return state.run;
+    }
+
+    pushProgress("Draft ready — Accept or Reject the suggestion");
+    const decision = await waitForDraftDecision(streamResult.markdown);
+    if (decision === "reject") {
+      state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/reject-stream-draft`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "Draft rejected by reviewer" }),
+      });
+      stopProgress(false, "Draft rejected — click Run to review to resume generation");
+      toast("Draft rejected", true);
+      await loadRuns();
+      renderDetail();
+      return state.run;
+    }
+
+    pushProgress("Accepting draft...");
+    state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/accept-stream-draft`, {
+      method: "POST",
+      body: JSON.stringify({ markdown: streamResult.markdown, generateImages }),
+    });
+    if (state.run.status === "FAILED" || !state.run.article) {
+      stopProgress(false, state.run.error || "Accept failed");
+      toastRunResult(state.run, "Accept failed");
+      await loadRuns();
+      renderDetail();
+      return state.run;
+    }
+
+    pushProgress("Running quality checks...");
+    state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/quality-check`, {
+      method: "POST",
+      body: "{}",
+    });
+    stopProgress(
+      state.run.status !== "FAILED",
+      state.run.error || `Run finished → ${state.run.status}`,
+    );
+    toastRunResult(state.run, "Run complete");
+    state.tab = "quality";
+    await loadRuns();
+    renderDetail();
+    return state.run;
+  } catch (e) {
+    streamAbort?.abort();
+    stopProgress(false, e.message || "Run failed.");
+    toast(e.message, true);
+    try {
+      if (state.selectedId) {
+        state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+        renderDetail();
+      }
+    } catch {
+      /* keep */
+    }
+    return null;
+  } finally {
+    clearInterval(poller);
+    setBusy(false);
+  }
+}
+
+function ensureStreamPanel() {
+  let panel = $("#live-draft-panel");
+  if (panel) return panel;
+  const host = $("#detail .section") || $("#detail");
+  if (!host) return null;
+  panel = document.createElement("div");
+  panel.id = "live-draft-panel";
+  panel.className = "live-draft-panel";
+  panel.innerHTML = `
+    <div class="live-draft-head">
+      <strong>Live draft</strong>
+      <span id="live-draft-status" class="status warn">Streaming…</span>
+    </div>
+    <pre id="live-draft-body" class="live-draft-body"></pre>
+    <div class="live-draft-actions" id="live-draft-actions" hidden>
+      <button type="button" class="btn primary" data-draft-act="accept">Accept suggestion</button>
+      <button type="button" class="btn" data-draft-act="reject">Reject</button>
+      <button type="button" class="btn" data-draft-act="regenerate">Regenerate</button>
+    </div>
+  `;
+  host.prepend(panel);
+  return panel;
+}
+
+function streamGenerateDraft(onController) {
+  return new Promise(async (resolve) => {
+    const panel = ensureStreamPanel();
+    const bodyEl = $("#live-draft-body");
+    const statusEl = $("#live-draft-status");
+    const actions = $("#live-draft-actions");
+    if (bodyEl) bodyEl.textContent = "";
+    if (actions) actions.hidden = true;
+    if (statusEl) {
+      statusEl.textContent = "Streaming…";
+      statusEl.className = "status warn";
+    }
+
+    const controller = new AbortController();
+    onController?.(controller);
+    let markdown = "";
+
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(state.selectedId)}/generate-stream`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: "{}",
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        resolve({ ok: false, error: data.error || res.statusText || "Stream failed" });
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamError = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+        for (const part of parts) {
+          const lines = part.split("\n");
+          let event = "message";
+          let dataLine = "";
+          for (const line of lines) {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            if (line.startsWith("data:")) dataLine += line.slice(5).trim();
+          }
+          if (!dataLine) continue;
+          let payload = {};
+          try {
+            payload = JSON.parse(dataLine);
+          } catch {
+            continue;
+          }
+          if (event === "delta" && payload.text) {
+            markdown += payload.text;
+            if (bodyEl) {
+              bodyEl.textContent = markdown;
+              bodyEl.scrollTop = bodyEl.scrollHeight;
+            }
+          } else if (event === "error") {
+            streamError = payload.error || "Stream error";
+          } else if (event === "done" && payload.markdown) {
+            markdown = payload.markdown;
+            if (bodyEl) bodyEl.textContent = markdown;
+          }
+        }
+      }
+
+      if (streamError) {
+        if (statusEl) {
+          statusEl.textContent = "Failed";
+          statusEl.className = "status bad";
+        }
+        resolve({ ok: false, error: streamError });
+        return;
+      }
+      if (!markdown.trim()) {
+        resolve({ ok: false, error: "Empty streamed draft" });
+        return;
+      }
+      if (statusEl) {
+        statusEl.textContent = "Awaiting review";
+        statusEl.className = "status warn";
+      }
+      resolve({ ok: true, markdown });
+    } catch (e) {
+      resolve({ ok: false, error: e.message || "Stream aborted" });
+    }
+  });
+}
+
+function waitForDraftDecision(markdown) {
+  return new Promise((resolve) => {
+    const panel = ensureStreamPanel();
+    const actions = $("#live-draft-actions");
+    const bodyEl = $("#live-draft-body");
+    if (bodyEl) bodyEl.textContent = markdown;
+    if (actions) actions.hidden = false;
+
+    const onClick = async (e) => {
+      const btn = e.target.closest("[data-draft-act]");
+      if (!btn) return;
+      const act = btn.dataset.draftAct;
+      actions?.removeEventListener("click", onClick);
+      if (act === "regenerate") {
+        pushProgress("Regenerating draft...");
+        const again = await streamGenerateDraft();
+        if (!again.ok) {
+          toast(again.error || "Regenerate failed", true);
+          resolve("reject");
+          return;
+        }
+        resolve(await waitForDraftDecision(again.markdown));
+        return;
+      }
+      resolve(act === "accept" ? "accept" : "reject");
+    };
+    actions?.addEventListener("click", onClick);
+    panel?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
 }
 
 function formBrief(form) {
@@ -999,9 +1260,9 @@ function renderDetail() {
       <button type="button" class="btn primary" id="assign-template">Assign template</button>
     </div>
     <p class="hint">
-      <strong>Run to review</strong> runs the full pipeline: gather sources → outline → draft the post → quality score
-      ${state.hasGeminiKey ? " (optional Gemini images if checked)." : "."}
-      Tabs below are for inspecting and editing results — they do not run stages.
+      <strong>Run to review</strong> runs research → outline → <em>live streamed draft</em> (Accept/Reject) → quality.
+      If a run failed, it resumes from the failed stage. Tabs below only inspect/edit results.
+      ${state.hasGeminiKey ? " Enable Gemini images to generate art after you accept the draft." : ""}
     </p>
     <div class="actions">
       <button class="btn primary" data-act="run">Run to review</button>

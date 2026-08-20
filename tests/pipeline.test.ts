@@ -479,6 +479,67 @@ describe("end-to-end pipeline", () => {
     expect(reviewed.quality).toBeTruthy();
   });
 
+  it("resumes Run to review from a failed generation stage", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    await orch.research(created.id);
+    const outlined = await orch.outline(created.id);
+    await store.save({
+      ...outlined,
+      status: "FAILED",
+      error: "boom",
+      failedStage: "generation",
+      retryable: true,
+      analysis: { ...outlined.analysis!, summary: "KEEP_ME" },
+    });
+
+    const reviewed = await orch.runUntilReview(created.id);
+    expect(reviewed.analysis?.summary).toBe("KEEP_ME");
+    expect(reviewed.article?.content.length).toBeGreaterThan(50);
+    expect(reviewed.status).toBe("REVIEW_REQUIRED");
+  });
+
+  it("stopAfter outline leaves a run ready for live streaming", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    const outlined = await orch.runUntilReview(created.id, { stopAfter: "outline" });
+    expect(outlined.status).toBe("OUTLINE_READY");
+    expect(outlined.outline?.sections.length).toBeGreaterThan(0);
+    expect(outlined.article).toBeNull();
+  });
+
+  it("accepts a streamed markdown draft", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    await orch.runUntilReview(created.id, { stopAfter: "outline" });
+    const chunks: string[] = [];
+    const streamed = await orch.streamDraft(created.id, async (c) => {
+      chunks.push(c);
+    });
+    expect(chunks.join("").length).toBeGreaterThan(20);
+    const accepted = await orch.acceptStreamDraft(created.id, streamed.markdown);
+    expect(accepted.status).toBe("DRAFT_READY");
+    expect(accepted.article?.title).toBeTruthy();
+  });
+
   it("serializes concurrent Run to review so generate still receives the outline", async () => {
     const created = await orch.create({
       topic: "AI agents in customer support",

@@ -580,6 +580,43 @@ async function handleAuthedApi(
         const bodyText = await readBody(req);
         const body = bodyText ? JSON.parse(bodyText) : {};
         const o = orch();
+
+        if (action === "generate-stream") {
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+            "X-Accel-Buffering": "no",
+          });
+          const send = (event: string, data: unknown) => {
+            res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          };
+          const ac = new AbortController();
+          req.on("close", () => ac.abort());
+          try {
+            send("status", { stage: "generation", message: "Streaming draft..." });
+            const { markdown, run } = await o.streamDraft(
+              id,
+              async (chunk) => {
+                send("delta", { text: chunk });
+              },
+              ac.signal,
+            );
+            send("done", {
+              markdown,
+              runId: run.id,
+              status: run.status,
+            });
+            await log("run_generate_stream", { runId: id, chars: markdown.length });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            send("error", { error: message });
+            await log("run_generate_stream_failed", { runId: id, error: message });
+          }
+          res.end();
+          return;
+        }
+
         let run;
         switch (action) {
           case "research":
@@ -595,7 +632,19 @@ async function handleAuthedApi(
             run = await o.qualityCheck(id);
             break;
           case "run":
-            run = await o.runUntilReview(id, { generateImages: body.generateImages });
+            run = await o.runUntilReview(id, {
+              generateImages: body.generateImages,
+              stopAfter: body.stopAfter === "outline" ? "outline" : null,
+              forceFull: body.forceFull === true,
+            });
+            break;
+          case "accept-stream-draft":
+            run = await o.acceptStreamDraft(id, String(body.markdown ?? ""), {
+              generateImages: body.generateImages,
+            });
+            break;
+          case "reject-stream-draft":
+            run = await o.rejectStreamDraft(id, body.reason ? String(body.reason) : undefined);
             break;
           case "approve":
             run = await o.approve(id, body.notes);
@@ -636,6 +685,8 @@ async function handleAuthedApi(
           generate: "run_generate",
           "quality-check": "run_quality",
           run: "run_started",
+          "accept-stream-draft": "run_accept_stream_draft",
+          "reject-stream-draft": "run_reject_stream_draft",
           approve: "run_approved",
           reject: "run_rejected",
           publish: "run_published",
