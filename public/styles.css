@@ -664,10 +664,6 @@ textarea {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.78rem;
 }
-  white-space: pre-wrap;
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.78rem;
-}
 .resume-dashboard {
   display: flex;
   flex-direction: column;
