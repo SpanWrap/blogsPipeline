@@ -461,6 +461,48 @@ describe("end-to-end pipeline", () => {
     expect(result.publishResults[0]?.statusCode).toBe(501);
   });
 
+  it("resumes Run to review from a saved outline instead of wiping it", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    await orch.research(created.id);
+    const outlined = await orch.outline(created.id);
+    await store.save({
+      ...outlined,
+      analysis: { ...outlined.analysis!, summary: "KEEP_ME" },
+    });
+
+    const reviewed = await orch.runUntilReview(created.id);
+    expect(reviewed.analysis?.summary).toBe("KEEP_ME");
+    expect(reviewed.article?.content.length).toBeGreaterThan(50);
+    expect(reviewed.status).toBe("REVIEW_REQUIRED");
+  });
+
+  it("serializes concurrent Run to review so generate still receives the outline", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    const [first, second] = await Promise.all([
+      orch.runUntilReview(created.id),
+      orch.runUntilReview(created.id),
+    ]);
+    const final = await orch.get(created.id);
+    expect(first.article || second.article).toBeTruthy();
+    expect(final.article?.content.length).toBeGreaterThan(50);
+    expect(final.status).toBe("REVIEW_REQUIRED");
+    expect(final.error).toBeNull();
+  });
+
   it("does not publish without approval", async () => {
     const created = await orch.create({
       topic: "Something",

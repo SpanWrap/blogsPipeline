@@ -223,6 +223,8 @@ export const PipelineRunSchema = z.object({
   outline: BlogOutlineSchema.nullable().default(null),
   article: GeneratedBlogSchema.nullable().default(null),
   quality: QualityResultSchema.nullable().default(null),
+  /** When true, Gemini generates hero/section images after the article draft. */
+  generateImages: z.boolean().default(false),
   /** Sites selected in Quality review for the eventual publish step. */
   publishTargets: z.array(PublishTargetSchema).default(["spanwrap"]),
   publishResult: PublishResultSchema.nullable().default(null),
@@ -230,6 +232,12 @@ export const PipelineRunSchema = z.object({
   stages: z.array(StageRecordSchema).default([]),
   reviewNotes: z.string().nullable().default(null),
   error: z.string().nullable().default(null),
+  /** Which stage caused the failure — lets the UI offer "Retry from X". */
+  failedStage: z.string().nullable().default(null),
+  /** Machine-readable error code (e.g. "LLM_TIMEOUT", "RATE_LIMIT", "RESEARCH_EMPTY"). */
+  errorCode: z.string().nullable().default(null),
+  /** True when the error is transient and a retry has a reasonable chance of succeeding. */
+  retryable: z.boolean().default(false),
   idempotencyKey: z.string(),
 });
 

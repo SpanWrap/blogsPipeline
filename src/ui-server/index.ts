@@ -36,12 +36,12 @@ const publicCandidates = [
 
 /** Explicit URLs so Vercel file tracing includes these assets in the function bundle. */
 const tracedStatic = {
-  "/": new URL("./public/index.html", import.meta.url),
-  "/index.html": new URL("./public/index.html", import.meta.url),
-  "/settings": new URL("./public/index.html", import.meta.url),
-  "/settings/": new URL("./public/index.html", import.meta.url),
-  "/styles.css": new URL("./public/styles.css", import.meta.url),
-  "/app.js": new URL("./public/app.js", import.meta.url),
+  "/": new URL("../../public/index.html", import.meta.url),
+  "/index.html": new URL("../../public/index.html", import.meta.url),
+  "/settings": new URL("../../public/index.html", import.meta.url),
+  "/settings/": new URL("../../public/index.html", import.meta.url),
+  "/styles.css": new URL("../../public/styles.css", import.meta.url),
+  "/app.js": new URL("../../public/app.js", import.meta.url),
 } as const;
 
 const MIME: Record<string, string> = {
@@ -300,6 +300,7 @@ async function handleAuthedApi(
         hasGithubToken: Boolean(appConfig.trends.githubToken),
         hasRedditOAuth: Boolean(appConfig.trends.redditClientId && appConfig.trends.redditClientSecret),
         hasXBearer: Boolean(appConfig.trends.xBearerToken),
+        hasGeminiKey: Boolean(appConfig.images.geminiApiKey),
       });
     }
 
@@ -522,6 +523,36 @@ async function handleAuthedApi(
       }
     }
 
+    const imageMatch = pathname.match(/^\/api\/runs\/([^/]+)\/images\/([^/]+)$/);
+    if (imageMatch && method === "GET") {
+      const runId = decodeURIComponent(imageMatch[1]!);
+      const filename = decodeURIComponent(imageMatch[2]!);
+      if (!/^[\w.-]+$/.test(filename)) {
+        return sendJson(res, 400, { error: "Invalid image filename" });
+      }
+      const filePath = path.join(appConfig.images.outputDir, runId, filename);
+      try {
+        const buf = await readFile(filePath);
+        const ext = path.extname(filename).toLowerCase();
+        const mime =
+          ext === ".png"
+            ? "image/png"
+            : ext === ".webp"
+              ? "image/webp"
+              : ext === ".gif"
+                ? "image/gif"
+                : "image/jpeg";
+        res.writeHead(200, {
+          "Content-Type": mime,
+          "Cache-Control": "public, max-age=86400",
+        });
+        res.end(buf);
+        return;
+      } catch {
+        return sendJson(res, 404, { error: "Image not found" });
+      }
+    }
+
     const runMatch = pathname.match(/^\/api\/runs\/([^/]+)(?:\/([^/]+))?$/);
     if (runMatch) {
       const id = decodeURIComponent(runMatch[1]!);
@@ -545,13 +576,13 @@ async function handleAuthedApi(
             run = await o.outline(id);
             break;
           case "generate":
-            run = await o.generate(id);
+            run = await o.generate(id, { generateImages: body.generateImages });
             break;
           case "quality-check":
             run = await o.qualityCheck(id);
             break;
           case "run":
-            run = await o.runUntilReview(id);
+            run = await o.runUntilReview(id, { generateImages: body.generateImages });
             break;
           case "approve":
             run = await o.approve(id, body.notes);

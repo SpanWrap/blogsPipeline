@@ -2,7 +2,7 @@ import type { z } from "zod";
 import { appConfig } from "../../config";
 import { getResolvedLlmConfig } from "../../services/llm-settings";
 import { logger } from "../../services/logger";
-import { withRetry } from "../../utils/retry";
+import { isTransientError, withRetry } from "../../utils/retry";
 import { formatLlmHttpError } from "./errors";
 import type { LLMProvider } from "./types";
 
@@ -10,6 +10,11 @@ export type OpenAICompatibleOptions = {
   extraHeaders?: Record<string, string>;
   jsonMode?: boolean;
 };
+
+function sanitizeHeaderValue(value: string | undefined): string {
+  // Remove invisible copy/paste artifacts that break fetch ByteString conversion.
+  return (value ?? "").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").trim();
+}
 
 function extractJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -53,16 +58,21 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     return withRetry(
       async () => {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), appConfig.requestTimeoutMs);
+        const reasoningModel = /reasoner|r1/i.test(this.model);
+        const timeoutMs = reasoningModel
+          ? Math.max(appConfig.llm.requestTimeoutMs, 240_000)
+          : appConfig.llm.requestTimeoutMs;
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
           const body: Record<string, unknown> = {
             model: this.model,
-            temperature: 0.4,
-            // Groq free-tier TPM is often 8k; reserving 8192 output tokens fails every request.
-            max_tokens: this.name === "groq" ? 4096 : 8192,
+            max_tokens: reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192,
             messages,
           };
-          if (options?.json && this.jsonMode) {
+          if (!reasoningModel) {
+            body.temperature = 0.4;
+          }
+          if (options?.json && this.jsonMode && !reasoningModel) {
             body.response_format = { type: "json_object" };
           }
 
@@ -71,7 +81,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
             signal: controller.signal,
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Bearer ${this.apiKey}`,
+              Authorization: `Bearer ${sanitizeHeaderValue(this.apiKey)}`,
               ...this.extraHeaders,
             },
             body: JSON.stringify(body),
@@ -90,6 +100,13 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
           const content = data.choices?.[0]?.message?.content;
           if (!content) throw new Error("Empty LLM response");
           return content;
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") {
+            throw new Error(
+              `LLM request timed out after ${Math.round(timeoutMs / 1000)}s (${this.name}/${this.model}). Use deepseek-chat for drafting, or raise LLM_REQUEST_TIMEOUT_MS.`,
+            );
+          }
+          throw error;
         } finally {
           clearTimeout(timer);
         }
@@ -97,6 +114,11 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
       {
         maxAttempts: appConfig.retry.maxAttempts,
         baseDelayMs: appConfig.retry.baseDelayMs,
+        shouldRetry: (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("LLM request timed out")) return false;
+          return isTransientError(error);
+        },
         onRetry: (error, attempt, delayMs) => {
           logger.warn("Retrying LLM request", {
             attempt,

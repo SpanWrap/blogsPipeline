@@ -21,6 +21,7 @@ import {
   analysisStage,
   generationStage,
   imageStage,
+  applyGeneratedImages,
   outlineStage,
   publishingStage,
   qualityStage,
@@ -31,6 +32,26 @@ import { injectAffiliateLinks } from "../services/affiliate-links";
 import { recordPublish } from "../services/analytics";
 import { promoteAll } from "../services/social-promotion";
 import { appConfig } from "../config";
+
+/** Process-wide lock so two "Run to review" clicks cannot wipe each other's outline/article. */
+const runLocks = new Map<string, Promise<void>>();
+
+async function withRunLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const previous = runLocks.get(id) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = previous.then(() => gate);
+  runLocks.set(id, chained);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (runLocks.get(id) === chained) runLocks.delete(id);
+  }
+}
 
 export type OrchestratorDeps = {
   store?: RunStore;
@@ -103,12 +124,16 @@ export class BlogPipelineOrchestrator {
       outline: null,
       article: null,
       quality: null,
+      generateImages: false,
       publishTargets: ["spanwrap"],
       publishResult: null,
       publishResults: [],
       stages: [],
       reviewNotes: null,
       error: null,
+      failedStage: null,
+      errorCode: null,
+      retryable: false,
       idempotencyKey: createIdempotencyKey([id, brief.topic, "publish"]),
     };
     return this.store.save(run);
@@ -151,8 +176,13 @@ export class BlogPipelineOrchestrator {
   }
 
   async research(id: string): Promise<PipelineRun> {
+    return withRunLock(id, () => this.researchUnlocked(id));
+  }
+
+  private async researchUnlocked(id: string): Promise<PipelineRun> {
     let run = await this.store.require(id);
     run = await this.store.save(setStatus(startStage(run, "research"), "RESEARCHING"));
+    let latest = run;
     try {
       const { sources, providerName } = await researchStage(run.brief, {
         researchProvider: this.researchProvider,
@@ -161,7 +191,6 @@ export class BlogPipelineOrchestrator {
       let next: PipelineRun = {
         ...run,
         sources,
-        // Clear dependent artifacts when research is re-run
         analysis: null,
         outline: null,
         article: null,
@@ -173,12 +202,12 @@ export class BlogPipelineOrchestrator {
       });
       next = setStatus(next, "RESEARCH_COMPLETE");
 
-      // Auto-run analysis after research
       next = startStage(next, "analysis", {
         provider: this.llm.name,
         model: this.llm.model,
       });
       next = await this.store.save(next);
+      latest = next;
       const analysis = await analysisStage(next.brief, next.sources, this.llm);
       next = {
         ...next,
@@ -193,14 +222,28 @@ export class BlogPipelineOrchestrator {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error("Research stage failed", { id, error: message });
-      return this.store.save(failStage(run, "research", message));
+      const stageName =
+        latest.stages.some((s) => s.stage === "analysis" && s.status === "running")
+          ? "analysis"
+          : "research";
+      return this.store.save(failStage(latest, stageName, message));
     }
   }
 
   async outline(id: string): Promise<PipelineRun> {
+    return withRunLock(id, () => this.outlineUnlocked(id));
+  }
+
+  private async outlineUnlocked(id: string): Promise<PipelineRun> {
     let run = await this.store.require(id);
     if (run.sources.length === 0 || !run.analysis) {
-      throw new Error("Research + analysis must complete before outline");
+      return this.store.save(
+        failStage(
+          startStage(run, "outline"),
+          "outline",
+          "Research + analysis must complete before outline",
+        ),
+      );
     }
     const analysis = run.analysis;
     run = startStage(run, "outline", { provider: this.llm.name, model: this.llm.model });
@@ -247,13 +290,37 @@ export class BlogPipelineOrchestrator {
     });
   }
 
-  async generate(id: string): Promise<PipelineRun> {
+  async generate(id: string, options: { generateImages?: boolean } = {}): Promise<PipelineRun> {
+    return withRunLock(id, () => this.generateUnlocked(id, options));
+  }
+
+  private async generateUnlocked(
+    id: string,
+    options: { generateImages?: boolean; snapshot?: PipelineRun } = {},
+  ): Promise<PipelineRun> {
     let run = await this.store.require(id);
+    if (options.snapshot) {
+      run = {
+        ...run,
+        analysis: run.analysis ?? options.snapshot.analysis,
+        outline: run.outline ?? options.snapshot.outline,
+        sources: run.sources.length ? run.sources : options.snapshot.sources,
+      };
+    }
     if (!run.outline || !run.analysis) {
-      throw new Error("Outline and analysis are required before generation");
+      return this.store.save(
+        failStage(
+          startStage(run, "generation"),
+          "generation",
+          "Outline and analysis are required before generation",
+        ),
+      );
     }
     const analysis = run.analysis;
     const outline = run.outline;
+    if (typeof options.generateImages === "boolean") {
+      run = await this.store.save({ ...run, generateImages: options.generateImages });
+    }
     run = setStatus(
       startStage(run, "generation", { provider: this.llm.name, model: this.llm.model }),
       "GENERATING",
@@ -269,7 +336,6 @@ export class BlogPipelineOrchestrator {
         run.templateMarkdown,
       );
 
-      // Inject affiliate links into generated content
       try {
         const { content, linksInjected } = injectAffiliateLinks(article.content);
         if (linksInjected.length > 0) {
@@ -277,7 +343,9 @@ export class BlogPipelineOrchestrator {
           logger.info("Affiliate links injected", { count: linksInjected.length, runId: id });
         }
       } catch (e) {
-        logger.warn("Affiliate link injection skipped", { error: e instanceof Error ? e.message : String(e) });
+        logger.warn("Affiliate link injection skipped", {
+          error: e instanceof Error ? e.message : String(e),
+        });
       }
 
       let next: PipelineRun = { ...run, article, quality: null };
@@ -286,32 +354,47 @@ export class BlogPipelineOrchestrator {
         provider: this.llm.name,
         model: this.llm.model,
       });
+      next = setStatus(next, "DRAFT_READY");
+      next = await this.store.save(next);
 
-      // Auto-generate images after article generation
-      try {
-        next = startStage(next, "images", { provider: "gemini" });
-        next = await this.store.save(setStatus(next, "DRAFT_READY"));
-        const imageResult = await imageStage(article, id);
-        if (imageResult.heroImage?.base64 || imageResult.heroImage?.url) {
-          const heroUrl = imageResult.heroImage.url ?? imageResult.savedPaths[0] ?? null;
-          if (heroUrl && !article.featuredImage) {
-            next = { ...next, article: { ...next.article!, featuredImage: heroUrl } };
-          }
-        }
-        next = completeStage(next, "images", {
-          total: (imageResult.sectionImages?.length ?? 0) + (imageResult.heroImage ? 1 : 0) + (imageResult.socialImage ? 1 : 0),
-          saved: imageResult.savedPaths.length,
-        });
-      } catch (e) {
-        logger.warn("Image generation skipped", { error: e instanceof Error ? e.message : String(e) });
-        next = setStatus(next, "DRAFT_READY");
+      if (next.generateImages) {
+        next = await this.attachGeneratedImages(next);
       }
 
-      next = setStatus(next, "DRAFT_READY");
-      return this.store.save(next);
+      return this.store.save(setStatus(next, "DRAFT_READY"));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return this.store.save(failStage(run, "generation", message));
+    }
+  }
+
+  async qualityCheck(id: string): Promise<PipelineRun> {
+    return withRunLock(id, () => this.qualityCheckUnlocked(id));
+  }
+
+  private async qualityCheckUnlocked(id: string): Promise<PipelineRun> {
+    let run = await this.store.require(id);
+    if (!run.article) {
+      return this.store.save(
+        failStage(startStage(run, "quality"), "quality", "Article required for quality check"),
+      );
+    }
+    const article = run.article;
+    run = setStatus(startStage(run, "quality"), "QUALITY_CHECK");
+    run = await this.store.save(run);
+    try {
+      const quality = qualityStage(article, run.sources, run.analysis);
+      let next: PipelineRun = { ...run, quality };
+      next = completeStage(next, "quality", {
+        score: quality.score,
+        passed: quality.passed,
+        issueCount: quality.issues.length,
+      });
+      next = setStatus(next, "REVIEW_REQUIRED");
+      return this.store.save(next);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return this.store.save(failStage(run, "quality", message));
     }
   }
 
@@ -353,28 +436,6 @@ export class BlogPipelineOrchestrator {
       article,
       publishTargets,
     });
-  }
-
-  async qualityCheck(id: string): Promise<PipelineRun> {
-    let run = await this.store.require(id);
-    if (!run.article) throw new Error("Article required for quality check");
-    const article = run.article;
-    run = setStatus(startStage(run, "quality"), "QUALITY_CHECK");
-    run = await this.store.save(run);
-    try {
-      const quality = qualityStage(article, run.sources, run.analysis);
-      let next: PipelineRun = { ...run, quality };
-      next = completeStage(next, "quality", {
-        score: quality.score,
-        passed: quality.passed,
-        issueCount: quality.issues.length,
-      });
-      next = setStatus(next, "REVIEW_REQUIRED");
-      return this.store.save(next);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return this.store.save(failStage(run, "quality", message));
-    }
   }
 
   async approve(id: string, notes?: string): Promise<PipelineRun> {
@@ -508,35 +569,94 @@ export class BlogPipelineOrchestrator {
   }
 
   async generateImages(id: string): Promise<PipelineRun> {
-    let run = await this.store.require(id);
+    const run = await this.store.require(id);
     if (!run.article) throw new Error("Article required for image generation");
-    const article = run.article;
-    run = startStage(run, "images", { provider: "gemini" });
-    run = await this.store.save(run);
+    return this.store.save(await this.attachGeneratedImages({ ...run, generateImages: true }));
+  }
+
+  private async attachGeneratedImages(run: PipelineRun): Promise<PipelineRun> {
+    if (!run.article) return run;
+    let next = startStage(run, "images", { provider: "gemini" });
+    next = await this.store.save(next);
     try {
-      const result = await imageStage(article, id);
-      if (result.heroImage?.url && !article.featuredImage) {
-        run = { ...run, article: { ...article, featuredImage: result.heroImage.url } };
-      }
-      run = completeStage(run, "images", {
-        total: (result.sectionImages?.length ?? 0) + (result.heroImage ? 1 : 0) + (result.socialImage ? 1 : 0),
+      const result = await imageStage(next.article!, next.id);
+      const article = applyGeneratedImages(next.article!, result, next.id);
+      next = { ...next, article };
+      next = completeStage(next, "images", {
+        total:
+          (result.sectionImages?.length ?? 0) +
+          (result.heroImage ? 1 : 0) +
+          (result.socialImage ? 1 : 0),
         saved: result.savedPaths.length,
       });
-      return this.store.save(run);
+      return next;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return this.store.save(failStage(run, "images", message));
+      logger.warn("Image generation skipped", { error: message });
+      const stages = next.stages.map((s) =>
+        s.stage === "images"
+          ? { ...s, status: "skipped" as const, error: message, endedAt: new Date().toISOString() }
+          : s,
+      );
+      return { ...next, stages, error: null };
     }
   }
 
   /**
    * Convenience: research → outline → generate → quality (stops before approve/publish).
+   * Stops at the first failed stage so quality does not run without a draft.
    */
-  async runUntilReview(id: string): Promise<PipelineRun> {
-    await this.research(id);
-    await this.outline(id);
-    await this.generate(id);
-    return this.qualityCheck(id);
+  async runUntilReview(
+    id: string,
+    options: { generateImages?: boolean } = {},
+  ): Promise<PipelineRun> {
+    return withRunLock(id, async () => {
+      if (typeof options.generateImages === "boolean") {
+        const current = await this.store.require(id);
+        await this.store.save({ ...current, generateImages: options.generateImages });
+      }
+
+      let run = await this.store.require(id);
+
+      // Resume from saved artifacts. Re-running research here used to wipe a
+      // finished outline, then generate would fail with "outline required".
+      if (!run.analysis || run.sources.length === 0) {
+        run = await this.researchUnlocked(id);
+        if (run.status === "FAILED" || !run.analysis) {
+          return run.status === "FAILED"
+            ? run
+            : this.store.save(
+                failStage(
+                  startStage(run, "analysis"),
+                  "analysis",
+                  "Research finished without analysis",
+                ),
+              );
+        }
+      }
+
+      if (!run.outline) {
+        run = await this.outlineUnlocked(id);
+        if (run.status === "FAILED" || !run.outline || !run.analysis) {
+          return run.status === "FAILED"
+            ? run
+            : this.store.save(
+                failStage(
+                  startStage(run, "outline"),
+                  "outline",
+                  run.error || "Outline did not save correctly",
+                ),
+              );
+        }
+      }
+
+      if (!run.article) {
+        run = await this.generateUnlocked(id, { snapshot: run });
+        if (run.status === "FAILED" || !run.article) return run;
+      }
+
+      return this.qualityCheckUnlocked(id);
+    });
   }
 }
 

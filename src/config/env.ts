@@ -165,6 +165,16 @@ export const appConfig = {
     baseUrl: env("LLM_BASE_URL", "https://api.groq.com/openai/v1")!,
     /** Groq retired llama-3.3-70b-versatile on 2026-08-16; gpt-oss-20b is the free production replacement. */
     model: env("LLM_MODEL", "openai/gpt-oss-20b")!,
+    /** Prompt compaction — keep LLM input small without dropping research usefulness. */
+    promptMaxSources: envInt("LLM_PROMPT_MAX_SOURCES", 5),
+    promptAnalysisSourceChars: envInt("LLM_PROMPT_ANALYSIS_SOURCE_CHARS", 1800),
+    promptGenerationSourceChars: envInt("LLM_PROMPT_GENERATION_SOURCE_CHARS", 1200),
+    promptMaxClaims: envInt("LLM_PROMPT_MAX_CLAIMS", 18),
+    promptMaxClaimChars: envInt("LLM_PROMPT_MAX_CLAIM_CHARS", 180),
+    promptMaxTemplateChars: envInt("LLM_PROMPT_MAX_TEMPLATE_CHARS", 2500),
+    promptMaxKeyPoints: envInt("LLM_PROMPT_MAX_KEY_POINTS", 4),
+    /** Chat completions abort after this. Reasoning models need more than REQUEST_TIMEOUT_MS. */
+    requestTimeoutMs: envInt("LLM_REQUEST_TIMEOUT_MS", 180_000),
   },
   images: {
     provider: env("IMAGE_PROVIDER", "auto") as "auto" | "gemini" | "mock",

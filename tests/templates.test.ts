@@ -40,7 +40,7 @@ describe("template helpers", () => {
 
   it("describes templates as section guidelines for the LLM", () => {
     const guidance = describeTemplateForPrompt("## Hook\nWrite a sharp opening.\n\n## Body\n{{body}}");
-    expect(guidance).toMatch(/GUIDELINES AND REQUIRED SECTIONS/);
+    expect(guidance).toMatch(/TEMPLATE/);
     expect(guidance).toContain("## Hook");
     expect(guidance).toContain("{{body}}");
   });

@@ -2,6 +2,15 @@ import type { BlogOutline, ContentBrief, ResearchAnalysis, ResearchSource } from
 import { BlogOutlineSchema } from "../../models";
 import type { LLMProvider } from "../../providers/llm";
 import { buildOutlinePrompt } from "../../prompts/outline/v1";
+import {
+  compactAnalysis,
+  compactBrief,
+  compactJson,
+  compactTemplateForPrompt,
+  estimateTokens,
+  pickSourcesForPrompt,
+} from "../../utils/prompt-budget";
+import { logger } from "../../services/logger";
 
 export async function outlineStage(
   brief: ContentBrief,
@@ -10,13 +19,20 @@ export async function outlineStage(
   llm: LLMProvider,
   templateMarkdown?: string | null,
 ): Promise<BlogOutline> {
-  const sourceIds = sources.map((s) => s.id);
+  const selected = pickSourcesForPrompt(sources);
+  const sourceIds = selected.map((s) => s.id);
   const known = new Set(sourceIds);
   const prompt = buildOutlinePrompt({
-    briefJson: JSON.stringify(brief, null, 2),
-    analysisJson: JSON.stringify(analysis, null, 2),
+    briefJson: compactJson(compactBrief(brief)),
+    analysisJson: compactJson(compactAnalysis(analysis)),
     sourceIds,
-    templateMarkdown,
+    templateMarkdown: templateMarkdown?.trim()
+      ? compactTemplateForPrompt(templateMarkdown)
+      : null,
+  });
+  logger.info("Outline prompt budget", {
+    sources: sourceIds.length,
+    approxTokens: estimateTokens(prompt),
   });
 
   const outline = await llm.generateStructured(prompt, BlogOutlineSchema);

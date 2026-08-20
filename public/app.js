@@ -723,7 +723,7 @@ function collectReviewPayload(root, run) {
   if (!a) throw new Error("No article to save");
   const title = String(root.querySelector("#draft-title")?.value || "").trim();
   const excerpt = String(root.querySelector("#draft-excerpt")?.value || "").trim();
-  const content = String(root.querySelector("#draft-content")?.value || "").trim();
+  const content = getEditorContent(root).trim();
   const featured = String(root.querySelector("#draft-featured")?.value || "").trim();
   const publishTargets = [...root.querySelectorAll("input[name=publish-target]:checked")].map(
     (el) => el.value,
@@ -796,8 +796,8 @@ function formBrief(form) {
 async function createRun(andRun) {
   const form = $("#create-form");
   const brief = formBrief(form);
-  if (!brief.topic) {
-    toast("Topic is required", true);
+  if (!brief.topic || brief.topic.length < 3) {
+    toast("Topic is required (at least 3 characters)", true);
     return;
   }
   setBusy(true);
@@ -847,6 +847,13 @@ function renderDetail() {
     ),
   ].join("");
 
+  const retryStageLabel = run.failedStage
+    ? run.failedStage.charAt(0).toUpperCase() + run.failedStage.slice(1)
+    : null;
+  const retryBtn = run.retryable && run.failedStage
+    ? `<button class="btn" data-act="${escapeHtml(run.failedStage === 'research' ? 'research' : run.failedStage === 'outline' ? 'outline' : run.failedStage === 'generation' ? 'generate' : run.failedStage === 'quality' ? 'quality-check' : 'run')}" title="Retry from the failed stage">⟳ Retry ${escapeHtml(retryStageLabel)}</button>`
+    : "";
+
   root.innerHTML = `
     <div class="detail-head">
       <div>
@@ -857,7 +864,11 @@ function renderDetail() {
           ${run.templateName ? ` · template: ${escapeHtml(run.templateName)}` : " · no template"}
           ${run.quality ? ` · quality ${run.quality.score} (${run.quality.passed ? "pass" : "flag"})` : ""}
         </p>
-        ${run.error ? `<p class="run-error">${escapeHtml(run.error)}</p>` : ""}
+        ${run.error ? `<div class="run-error-block">
+          <p class="run-error">${escapeHtml(run.error)}</p>
+          ${run.failedStage ? `<p class="run-error-meta">Stage: <strong>${escapeHtml(retryStageLabel)}</strong>${run.errorCode ? ` · Code: <code>${escapeHtml(run.errorCode)}</code>` : ""}${run.retryable ? " · <span class=\"retryable-badge\">Retryable</span>" : ""}</p>` : ""}
+          ${retryBtn}
+        </div>` : ""}
       </div>
     </div>
     <div class="template-bar">
@@ -1002,11 +1013,12 @@ function renderPostArticle(run, article) {
 function liveDraftFromEditor(root, run) {
   const a = run.article;
   if (!a) return null;
+  const editorContent = getEditorContent(root);
   return {
     ...a,
     title: String(root.querySelector("#draft-title")?.value || a.title),
     excerpt: String(root.querySelector("#draft-excerpt")?.value || a.excerpt),
-    content: String(root.querySelector("#draft-content")?.value || a.content),
+    content: editorContent || a.content,
     featuredImage: String(root.querySelector("#draft-featured")?.value || "").trim() || a.featuredImage,
   };
 }
@@ -1019,22 +1031,27 @@ function refreshQualityPreview(root, run) {
 }
 
 function bindQualityEditor(root, run) {
-  const previewInputs = root.querySelectorAll("#draft-title, #draft-excerpt, #draft-content, #draft-featured");
+  const previewInputs = root.querySelectorAll("#draft-title, #draft-excerpt, #draft-featured");
   previewInputs.forEach((el) => {
     el.addEventListener("input", () => refreshQualityPreview(root, run));
   });
+  // Initialize rich text editor
+  initRichEditor(root, run);
   const insertImage = root.querySelector("#insert-image");
   if (insertImage) {
     insertImage.addEventListener("click", () => {
       const url = String(root.querySelector("#image-url")?.value || "").trim();
       const alt = String(root.querySelector("#image-alt")?.value || "Image").trim() || "Image";
-      const textarea = root.querySelector("#draft-content");
+      const editor = root.querySelector("#draft-content-editor");
       if (!url || !/^https?:\/\//i.test(url)) {
         toast("Enter an http(s) image URL", true);
         return;
       }
-      if (!textarea) return;
-      insertAtCursor(textarea, `\n\n![${alt}](${url})\n\n`);
+      if (editor) {
+        editor.focus();
+        document.execCommand("insertHTML", false,
+          `<figure class="post-figure"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" /><figcaption>${escapeHtml(alt)}</figcaption></figure>`);
+      }
       const featured = root.querySelector("#draft-featured");
       if (featured && !String(featured.value || "").trim()) featured.value = url;
       refreshQualityPreview(root, run);
@@ -1090,6 +1107,264 @@ function renderMarkdown(md) {
   return `<p>${blocks}</p>`;
 }
 
+/* ── Rich text editor: Markdown ↔ HTML round-trip ────────────── */
+
+function markdownToEditorHtml(md) {
+  if (!md) return "";
+  // Process code blocks first (protect from further transformation)
+  const codeBlocks = [];
+  let safe = md.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+    const i = codeBlocks.length;
+    codeBlocks.push(`<pre class="pre"><code>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`);
+    return `\n%%CODEBLOCK_${i}%%\n`;
+  });
+  // Inline code
+  safe = safe.replace(/`([^`]+)`/g, "<code>$1</code>");
+  // Images
+  safe = safe.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_m, alt, src) => `<figure class="post-figure"><img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" /><figcaption>${escapeHtml(alt)}</figcaption></figure>`);
+  // Links
+  safe = safe.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  // Bold / Italic
+  safe = safe.replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>");
+  safe = safe.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  safe = safe.replace(/(?<![*\w])\*([^*]+)\*(?![*\w])/g, "<em>$1</em>");
+  // Horizontal rule
+  safe = safe.replace(/^---+$/gm, "<hr>");
+  // Headings
+  safe = safe.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+  safe = safe.replace(/^## (.+)$/gm, "<h2>$1</h2>");
+  safe = safe.replace(/^# (.+)$/gm, "<h1>$1</h1>");
+  // Ordered lists
+  safe = safe.replace(/^\d+\.\s+(.+)$/gm, "<oli>$1</oli>");
+  safe = safe.replace(/(<oli>.*<\/oli>\n?)+/g, (list) =>
+    `<ol>${list.replace(/<\/?oli>/g, (t) => t.replace("oli", "li"))}</ol>`);
+  // Unordered lists
+  safe = safe.replace(/^\s*[-*] (.+)$/gm, "<li>$1</li>");
+  safe = safe.replace(/(<li>.*<\/li>\n?)+/g, (list) => `<ul>${list}</ul>`);
+  // Paragraphs: split on blank lines
+  const lines = safe.split(/\n\n+/);
+  const html = lines.map((block) => {
+    const trimmed = block.trim();
+    if (!trimmed) return "";
+    if (/^<(h[1-6]|ul|ol|pre|figure|hr|blockquote)/.test(trimmed)) return trimmed;
+    if (/^%%CODEBLOCK_\d+%%$/.test(trimmed)) return trimmed;
+    return `<p>${trimmed.replace(/\n/g, "<br>")}</p>`;
+  }).join("\n");
+  // Restore code blocks
+  return html.replace(/%%CODEBLOCK_(\d+)%%/g, (_m, i) => codeBlocks[Number(i)] || "");
+}
+
+function htmlToMarkdown(html) {
+  if (!html) return "";
+  const div = document.createElement("div");
+  div.innerHTML = html;
+
+  function walk(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent || "";
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    const tag = node.tagName.toLowerCase();
+    const children = () => Array.from(node.childNodes).map(walk).join("");
+
+    switch (tag) {
+      case "h1": return `\n# ${children().trim()}\n\n`;
+      case "h2": return `\n## ${children().trim()}\n\n`;
+      case "h3": return `\n### ${children().trim()}\n\n`;
+      case "strong":
+      case "b": return `**${children()}**`;
+      case "em":
+      case "i": return `*${children()}*`;
+      case "a": {
+        const href = node.getAttribute("href") || "";
+        const text = children().trim();
+        return href ? `[${text}](${href})` : text;
+      }
+      case "code": {
+        if (node.parentElement?.tagName === "PRE") return children();
+        return `\`${children()}\``;
+      }
+      case "pre": {
+        const code = node.querySelector("code");
+        const text = code ? code.textContent : node.textContent;
+        return `\n\`\`\`\n${(text || "").trim()}\n\`\`\`\n\n`;
+      }
+      case "img": {
+        const alt = node.getAttribute("alt") || "Image";
+        const src = node.getAttribute("src") || "";
+        return `![${alt}](${src})`;
+      }
+      case "figure": {
+        const img = node.querySelector("img");
+        if (img) {
+          const alt = img.getAttribute("alt") || "Image";
+          const src = img.getAttribute("src") || "";
+          return `\n![${alt}](${src})\n\n`;
+        }
+        return children();
+      }
+      case "figcaption": return "";
+      case "ul": {
+        const items = Array.from(node.querySelectorAll(":scope > li"));
+        return "\n" + items.map((li) => `- ${walk(li).trim()}`).join("\n") + "\n\n";
+      }
+      case "ol": {
+        const items = Array.from(node.querySelectorAll(":scope > li"));
+        return "\n" + items.map((li, i) => `${i + 1}. ${walk(li).trim()}`).join("\n") + "\n\n";
+      }
+      case "li": return children();
+      case "p": return `${children().trim()}\n\n`;
+      case "br": return "\n";
+      case "hr": return "\n---\n\n";
+      case "div": return `${children()}\n`;
+      case "blockquote": {
+        const inner = children().trim().split("\n").map((l) => `> ${l}`).join("\n");
+        return `\n${inner}\n\n`;
+      }
+      default: return children();
+    }
+  }
+
+  const result = Array.from(div.childNodes).map(walk).join("");
+  // Clean up excessive newlines
+  return result.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function getEditorContent(root) {
+  const editor = root.querySelector("#draft-content-editor");
+  if (editor) return htmlToMarkdown(editor.innerHTML);
+  const textarea = root.querySelector("#draft-content");
+  return textarea ? textarea.value : "";
+}
+
+function initRichEditor(root, run) {
+  const editor = root.querySelector("#draft-content-editor");
+  if (!editor) return;
+
+  const toolbar = root.querySelector(".rich-toolbar");
+  if (!toolbar) return;
+
+  function execCmd(cmd, value) {
+    editor.focus();
+    document.execCommand(cmd, false, value || null);
+    refreshQualityPreview(root, run);
+  }
+
+  function updateActiveStates() {
+    toolbar.querySelectorAll("[data-cmd]").forEach((btn) => {
+      const cmd = btn.dataset.cmd;
+      if (cmd === "bold" || cmd === "italic" || cmd === "insertUnorderedList" || cmd === "insertOrderedList") {
+        btn.classList.toggle("active", document.queryCommandState(cmd));
+      }
+    });
+    // Check current block type for heading buttons
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      let node = sel.anchorNode;
+      while (node && node !== editor) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          const tag = node.tagName;
+          toolbar.querySelectorAll("[data-block]").forEach((btn) => {
+            btn.classList.toggle("active", btn.dataset.block.toUpperCase() === tag);
+          });
+          if (["H1", "H2", "H3", "H4"].includes(tag)) break;
+        }
+        node = node.parentNode;
+      }
+    }
+  }
+
+  toolbar.querySelectorAll("[data-cmd]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      execCmd(btn.dataset.cmd, btn.dataset.value);
+      updateActiveStates();
+    });
+  });
+
+  toolbar.querySelectorAll("[data-block]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      editor.focus();
+      document.execCommand("formatBlock", false, `<${btn.dataset.block}>`);
+      refreshQualityPreview(root, run);
+      updateActiveStates();
+    });
+  });
+
+  // Link insertion
+  const linkBtn = toolbar.querySelector("[data-action=link]");
+  if (linkBtn) {
+    linkBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const url = prompt("Link URL:");
+      if (url && /^https?:\/\//i.test(url)) {
+        execCmd("createLink", url);
+      }
+    });
+  }
+
+  // Image insertion
+  const imgBtn = toolbar.querySelector("[data-action=image]");
+  if (imgBtn) {
+    imgBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const url = prompt("Image URL:");
+      if (!url || !/^https?:\/\//i.test(url)) return;
+      const alt = prompt("Alt text:", "Image") || "Image";
+      execCmd("insertHTML",
+        `<figure class="post-figure"><img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}" /><figcaption>${escapeHtml(alt)}</figcaption></figure>`);
+      // Also set featured image if empty
+      const featured = root.querySelector("#draft-featured");
+      if (featured && !String(featured.value || "").trim()) featured.value = url;
+    });
+  }
+
+  // Code block
+  const codeBtn = toolbar.querySelector("[data-action=code]");
+  if (codeBtn) {
+    codeBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const sel = window.getSelection();
+      const text = sel?.toString() || "code here";
+      execCmd("insertHTML", `<pre class="pre"><code>${escapeHtml(text)}</code></pre>`);
+    });
+  }
+
+  // Horizontal rule
+  const hrBtn = toolbar.querySelector("[data-action=hr]");
+  if (hrBtn) {
+    hrBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      execCmd("insertHorizontalRule");
+    });
+  }
+
+  // Keyboard shortcuts
+  editor.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "b") {
+      e.preventDefault();
+      execCmd("bold");
+    } else if ((e.ctrlKey || e.metaKey) && e.key === "i") {
+      e.preventDefault();
+      execCmd("italic");
+    }
+    updateActiveStates();
+  });
+
+  // Update preview on input
+  editor.addEventListener("input", () => {
+    refreshQualityPreview(root, run);
+  });
+
+  // Track active formatting states
+  editor.addEventListener("keyup", updateActiveStates);
+  editor.addEventListener("mouseup", updateActiveStates);
+  editor.addEventListener("click", updateActiveStates);
+}
+
 function renderPublishPreview(run) {
   const a = run.article;
   if (!a) {
@@ -1119,9 +1394,12 @@ function renderPublishPreview(run) {
                 ? PUBLISH_SITES.find((s) => s.id === r.target)?.label || r.target
                 : "Publish";
               const ok = r.success ? "Published" : r.statusCode === 501 ? "Planned" : "Failed";
-              return `<li><strong>${escapeHtml(label)}</strong> · ${ok} — ${escapeHtml(r.message || "")}${
-                r.externalId ? ` · id ${escapeHtml(r.externalId)}` : ""
-              }</li>`;
+              let extra = r.externalId ? ` · id ${escapeHtml(r.externalId)}` : "";
+              if (r.raw && r.raw.html) {
+                const dataUri = "data:text/html;charset=utf-8," + encodeURIComponent(r.raw.html);
+                extra += ` <a href="${dataUri}" download="${escapeHtml(r.raw.filename || "draft.html")}" class="btn" style="margin-left: 0.5rem; text-decoration: none; display: inline-block;">Download HTML</a>`;
+              }
+              return `<li style="margin-bottom: 0.5rem;"><strong>${escapeHtml(label)}</strong> · ${ok} — ${escapeHtml(r.message || "")}${extra}</li>`;
             })
             .join("")}</ul>`
         : ""
@@ -1171,43 +1449,46 @@ function renderQualityTab(run) {
           </div>`
         : `<p class="hint">Optional: click <strong>Quality score</strong> after generating to flag issues. You can still edit and approve here.</p>`
     }
-    <div class="quality-layout">
-      <div class="quality-editor">
-        <p class="hint">Edit the draft, add images, choose publishing sites, then Approve or Reject.</p>
-        <label>Title
-          <input id="draft-title" value="${escapeHtml(a.title || "")}" />
-        </label>
-        <label>Excerpt
-          <textarea id="draft-excerpt" class="short">${escapeHtml(a.excerpt || "")}</textarea>
-        </label>
-        <label>Featured image URL
-          <input id="draft-featured" placeholder="https://" value="${escapeHtml(a.featuredImage || "")}" />
-        </label>
-        <div class="image-insert">
-          <label>Image alt
-            <input id="image-alt" placeholder="Caption" />
-          </label>
-          <label>Image URL
-            <input id="image-url" placeholder="https://" />
-          </label>
-          <button type="button" class="btn" id="insert-image">Add image to draft</button>
+    <div class="quality-single-layout">
+      <div class="quality-editor doc-style-editor">
+        <input id="draft-title" class="doc-title-input" placeholder="Document Title" value="${escapeHtml(a.title || "")}" />
+        <textarea id="draft-excerpt" class="doc-excerpt-input" placeholder="Subtitle / Excerpt">${escapeHtml(a.excerpt || "")}</textarea>
+        
+        <div class="rich-editor">
+          <div class="rich-toolbar">
+            <button type="button" data-cmd="bold" title="Bold (Ctrl+B)"><strong>B</strong></button>
+            <button type="button" data-cmd="italic" title="Italic (Ctrl+I)"><em>I</em></button>
+            <span class="toolbar-sep"></span>
+            <button type="button" data-block="h2" title="Heading 2">H2</button>
+            <button type="button" data-block="h3" title="Heading 3">H3</button>
+            <button type="button" data-block="p" title="Paragraph">¶</button>
+            <span class="toolbar-sep"></span>
+            <button type="button" data-cmd="insertUnorderedList" title="Bullet list">• List</button>
+            <button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button>
+            <span class="toolbar-sep"></span>
+            <button type="button" data-action="link" title="Insert link">🔗</button>
+            <button type="button" data-action="image" title="Insert image">🖼️</button>
+            <button type="button" data-action="code" title="Code block">&lt;/&gt;</button>
+            <button type="button" data-action="hr" title="Horizontal rule">─</button>
+          </div>
+          <div id="draft-content-editor" class="rich-editor-content" contenteditable="true">${markdownToEditorHtml(a.content || "")}</div>
         </div>
-        <label>Body (Markdown)
-          <textarea id="draft-content">${escapeHtml(a.content || "")}</textarea>
-        </label>
-        <fieldset class="destinations">
-          <legend>Publish to</legend>
-          ${dest}
-        </fieldset>
-        <div class="form-actions">
+
+        <div class="doc-meta-panel" style="margin-top: 1rem;">
+          <label>Featured image URL (optional)
+            <input id="draft-featured" placeholder="https://" value="${escapeHtml(a.featuredImage || "")}" />
+          </label>
+          <fieldset class="destinations" style="margin-top: 1rem;">
+            <legend>Publish to</legend>
+            ${dest}
+          </fieldset>
+        </div>
+        
+        <div class="form-actions" style="margin-top: 1.5rem;">
           <button type="button" class="btn" id="save-review">Save draft</button>
           <button type="button" class="btn danger" id="reject-review">Reject</button>
           <button type="button" class="btn primary" id="approve-review">Approve</button>
         </div>
-      </div>
-      <div class="quality-preview">
-        <p class="hint">Preview</p>
-        <div id="quality-preview-mount">${renderPostArticle(run, a)}</div>
       </div>
     </div>`;
 }

@@ -67,3 +67,39 @@ export async function imageStage(
 
   return { heroImage, sectionImages, socialImage, savedPaths };
 }
+
+export function publicImageUrl(runId: string, filename: string): string {
+  return `/api/runs/${encodeURIComponent(runId)}/images/${encodeURIComponent(filename)}`;
+}
+
+/** Attach generated images to the article as a featured URL and inline Markdown. */
+export function applyGeneratedImages(
+  article: GeneratedBlog,
+  result: ImageStageResult,
+  runId: string,
+): GeneratedBlog {
+  const filenames = result.savedPaths.map((saved) => path.basename(saved));
+  const heroFile = filenames.find((name) => name.startsWith("hero-"));
+  const sectionFiles = filenames.filter((name) => name.startsWith("section-"));
+  let content = article.content;
+  const headings = content.match(/^## .+$/gm) ?? [];
+
+  for (let i = 0; i < Math.min(sectionFiles.length, headings.length); i++) {
+    const heading = headings[i]!;
+    const file = sectionFiles[i]!;
+    const alt = result.sectionImages[i]?.altText || heading.replace(/^##\s+/, "");
+    const imageMd = `![${alt}](${publicImageUrl(runId, file)})`;
+    if (content.includes(imageMd)) continue;
+    const idx = content.indexOf(heading);
+    if (idx < 0) continue;
+    const end = content.indexOf("\n", idx);
+    const insertAt = end === -1 ? content.length : end + 1;
+    content = `${content.slice(0, insertAt)}\n${imageMd}\n${content.slice(insertAt)}`;
+  }
+
+  const featuredImage =
+    article.featuredImage ||
+    (heroFile ? publicImageUrl(runId, heroFile) : null);
+
+  return { ...article, content, featuredImage };
+}

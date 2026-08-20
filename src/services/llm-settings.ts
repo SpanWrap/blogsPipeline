@@ -62,6 +62,9 @@ function envKeyFor(provider: LlmProviderId): string | undefined {
   if (provider === "anthropic") {
     return process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
   }
+  if (provider === "deepseek") {
+    return process.env.DEEPSEEK_API_KEY || process.env.LLM_API_KEY;
+  }
   return undefined;
 }
 
@@ -73,8 +76,14 @@ function providerFromEnv(): LlmProviderId {
   if (process.env.OPENAI_API_KEY) return "openai";
   if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) return "gemini";
   if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY) return "anthropic";
+  if (process.env.DEEPSEEK_API_KEY) return "deepseek";
   if (appConfig.llm.apiKey) return /groq\.com/i.test(appConfig.llm.baseUrl) ? "groq" : "openai";
   return "mock";
+}
+
+function sanitizeApiKey(value: string): string {
+  // Strip invisible Unicode separators pasted from password managers/chats.
+  return value.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").trim();
 }
 
 function parseStored(raw: unknown): StoredLlmSettings | null {
@@ -85,7 +94,10 @@ function parseStored(raw: unknown): StoredLlmSettings | null {
   return {
     provider: rec.provider,
     model: rec.model.trim(),
-    apiKey: typeof rec.apiKey === "string" && rec.apiKey.trim() ? rec.apiKey.trim() : undefined,
+    apiKey:
+      typeof rec.apiKey === "string" && rec.apiKey.trim()
+        ? sanitizeApiKey(rec.apiKey)
+        : undefined,
     baseUrl: typeof rec.baseUrl === "string" && rec.baseUrl.trim() ? rec.baseUrl.trim() : undefined,
     updatedAt: typeof rec.updatedAt === "string" ? rec.updatedAt : new Date().toISOString(),
   };
@@ -206,7 +218,7 @@ export async function saveLlmSettings(input: {
   const requested =
     typeof input.model === "string" && input.model.trim() ? input.model.trim() : info.defaultModel;
   const { model } = remapRetiredModel(requested);
-  const incomingKey = typeof input.apiKey === "string" ? input.apiKey.trim() : "";
+  const incomingKey = typeof input.apiKey === "string" ? sanitizeApiKey(input.apiKey) : "";
   const previous = cache ?? loadFileSync();
   const apiKey =
     input.provider === "mock"

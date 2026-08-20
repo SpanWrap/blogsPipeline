@@ -2,31 +2,31 @@ import type { ContentBrief, ResearchAnalysis, ResearchSource } from "../../model
 import { ResearchAnalysisSchema } from "../../models";
 import type { LLMProvider } from "../../providers/llm";
 import { buildAnalysisPrompt } from "../../prompts/analysis/v1";
+import {
+  compactJson,
+  compactSourcesForAnalysis,
+  estimateTokens,
+} from "../../utils/prompt-budget";
+import { logger } from "../../services/logger";
 
 export async function analysisStage(
   brief: ContentBrief,
   sources: ResearchSource[],
   llm: LLMProvider,
 ): Promise<ResearchAnalysis> {
-  const usable = sources.filter((s) => !s.fetchError && s.content.length > 40);
-  const payload = usable.map((s) => ({
-    id: s.id,
-    url: s.url,
-    title: s.title,
-    sourceName: s.sourceName,
-    content: s.content.slice(0, 4000),
-    relevanceScore: s.relevanceScore,
-  }));
-
+  const payload = compactSourcesForAnalysis(sources);
   const prompt = buildAnalysisPrompt({
     topic: brief.topic,
-    sourcesJson: JSON.stringify(payload, null, 2),
+    sourcesJson: compactJson(payload),
+  });
+  logger.info("Analysis prompt budget", {
+    sources: payload.length,
+    approxTokens: estimateTokens(prompt),
   });
 
   const analysis = await llm.generateStructured(prompt, ResearchAnalysisSchema);
-  const known = new Set(usable.map((s) => s.id));
+  const known = new Set(payload.map((s) => String(s.id)));
 
-  // Drop claims that invent source IDs
   const claims = analysis.claims
     .map((c) => ({
       ...c,

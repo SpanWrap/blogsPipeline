@@ -57,25 +57,18 @@ export class SubstackPublisher implements Publisher {
     options: { idempotencyKey: string },
   ): Promise<PublishResult> {
     try {
-      const dir = path.isAbsolute(this.draftsDir)
-        ? this.draftsDir
-        : path.join(process.cwd(), this.draftsDir);
-
-      await mkdir(dir, { recursive: true });
-
       const filename = `${blog.slug}.html`;
-      const filePath = path.join(dir, filename);
       const html = toEmailHtml(blog);
-
-      await writeFile(filePath, html, "utf-8");
-      logger.info("Substack draft exported", { path: filePath });
 
       return {
         success: true,
-        externalId: filePath,
         statusCode: 200,
-        message: `Substack draft saved to ${filePath}. Manual upload to Substack is required.`,
+        message: `Substack HTML generated successfully. Download and manually upload.`,
         idempotencyKey: options.idempotencyKey,
+        raw: {
+          html,
+          filename
+        }
       };
     } catch (error) {
       return {

@@ -12,6 +12,8 @@
  * the template structure (headings, section order, style) directly.
  */
 
+import { compactTemplateForPrompt } from "./prompt-budget";
+
 export function templateHasPlaceholders(markdown: string): boolean {
   return listPlaceholders(markdown).length > 0;
 }
@@ -85,29 +87,21 @@ export function applyMarkdownTemplate(
 /** Build short guidance text for prompts from a template. */
 export function describeTemplateForPrompt(templateMarkdown: string): string {
   const placeholders = listPlaceholders(templateMarkdown);
+  const compact = compactTemplateForPrompt(templateMarkdown);
   const lines = [
-    "ARTICLE TEMPLATE — GUIDELINES AND REQUIRED SECTIONS",
-    "This markdown is a first-class input alongside the topic and research sources.",
-    "Treat headings as required sections. Treat other template prose as writing instructions (what to cover, tone, length, do/don't).",
-    "```markdown",
-    templateMarkdown.slice(0, 12_000),
-    "```",
+    "TEMPLATE",
+    "Headings = required sections. Other prose = writing instructions.",
+    compact,
   ];
   if (placeholders.length) {
     lines.push(
-      "",
-      `Template placeholders present: ${placeholders.map((p) => `{{${p}}}`).join(", ")}`,
-      "- Produce article body that fills the research substance for {{body}} (or whole document if structure-only).",
-      "- Keep the template's section order, headings, and formatting conventions.",
-      "- Follow any section-level instructions in the template; do not invent extra major sections unless the template allows flexibility.",
+      `Placeholders: ${placeholders.map((p) => `{{${p}}}`).join(", ")}`,
+      "Fill research substance into {{body}} / matching structure; keep section order.",
     );
   } else {
     lines.push(
-      "",
-      "- Mirror this template's structure exactly: heading levels, section order, and any labeled sections.",
-      "- Replace placeholder/example prose with research-backed original writing that still obeys the section instructions.",
-      "- Keep stylistic conventions (lists, callouts, FAQ blocks, etc.) where they appear in the template.",
-      "- The `content` field of the JSON response must be valid Markdown following this structure.",
+      "Mirror heading order and style. Replace example prose with research-backed writing.",
+      "`content` must be Markdown following this structure.",
     );
   }
   return lines.join("\n");

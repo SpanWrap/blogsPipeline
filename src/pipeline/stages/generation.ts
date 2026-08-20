@@ -15,6 +15,16 @@ import {
   describeTemplateForPrompt,
   templateHasPlaceholders,
 } from "../../utils/template";
+import {
+  compactAnalysis,
+  compactBrief,
+  compactJson,
+  compactOutline,
+  compactSourcesForGeneration,
+  estimateTokens,
+  pickSourcesForPrompt,
+} from "../../utils/prompt-budget";
+import { logger } from "../../services/logger";
 
 export async function generationStage(
   brief: ContentBrief,
@@ -24,29 +34,24 @@ export async function generationStage(
   llm: LLMProvider,
   templateMarkdown?: string | null,
 ): Promise<GeneratedBlog> {
-  const known = new Set(sources.map((s) => s.id));
-  const sourcesJson = JSON.stringify(
-    sources.map((s) => ({
-      id: s.id,
-      url: s.url,
-      title: s.title,
-      sourceName: s.sourceName,
-      content: s.content.slice(0, 2500),
-    })),
-    null,
-    2,
-  );
+  const selected = pickSourcesForPrompt(sources);
+  const known = new Set(selected.map((s) => s.id));
+  const sourcesJson = compactJson(compactSourcesForGeneration(selected));
 
   const templateGuidance = templateMarkdown?.trim()
     ? describeTemplateForPrompt(templateMarkdown)
     : null;
 
   const prompt = buildGenerationPrompt({
-    briefJson: JSON.stringify(brief, null, 2),
-    outlineJson: JSON.stringify(outline, null, 2),
-    analysisJson: JSON.stringify(analysis, null, 2),
+    briefJson: compactJson(compactBrief(brief)),
+    outlineJson: compactJson(compactOutline(outline)),
+    analysisJson: compactJson(compactAnalysis(analysis)),
     sourcesJson,
     templateGuidance,
+  });
+  logger.info("Generation prompt budget", {
+    sources: selected.length,
+    approxTokens: estimateTokens(prompt),
   });
 
   const article = await llm.generateStructured(prompt, GeneratedBlogSchema);
@@ -56,7 +61,7 @@ export async function generationStage(
   const listed =
     article.sources.length > 0
       ? article.sources
-      : sources.map((s) => ({
+      : selected.map((s) => ({
           title: s.title,
           url: s.url,
           sourceName: s.sourceName,
