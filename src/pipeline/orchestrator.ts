@@ -30,11 +30,22 @@ import {
   markdownDraftToArticle,
 } from "./stages";
 import { completeStage, failStage, setStatus, startStage } from "./state";
-import { injectAffiliateLinks } from "../services/affiliate-links";
+import { injectRelevantAffiliateLinks } from "../services/affiliate-relevance";
 import { recordPublish } from "../services/analytics";
 import { promoteAll } from "../services/social-promotion";
 import { appConfig } from "../config";
 import { describeTemplateForPrompt } from "../utils/template";
+import { applyStyleLockToBrief, stripBannedPhrases } from "../services/style-presets";
+import { readabilityPass } from "../services/readability-pass";
+import { regenerateSection, listArticleSections } from "../services/section-regenerate";
+import { buildRepurposePack } from "../services/repurpose";
+import { buildSeoPack, applySeoChoice } from "../services/enrichment";
+import { saveTemplateMemory, loadTemplateMemory } from "../services/template-memory";
+import { buildResumeDashboard } from "../services/resume-dashboard";
+import { planCrossPost } from "../services/canonical-rules";
+import { diffSummary } from "../services/diff-review";
+import { scoreSEO } from "../services/seo-research";
+import { buildFactCards, unsourcedClaimCount } from "../services/fact-cards";
 
 /** Process-wide lock so two "Run to review" clicks cannot wipe each other's outline/article. */
 const runLocks = new Map<string, Promise<void>>();
@@ -100,17 +111,28 @@ export class BlogPipelineOrchestrator {
     briefInput: ContentBrief,
     options: CreateRunOptions = {},
   ): Promise<PipelineRun> {
-    const brief = ContentBriefSchema.parse(briefInput);
+    let brief = ContentBriefSchema.parse(briefInput);
     const id = createId("run");
     const now = new Date().toISOString();
     let templateId: string | null = options.templateId ?? null;
     let templateName: string | null = null;
     let templateMarkdown: string | null = null;
 
+    if (!templateId) {
+      templateId = loadTemplateMemory().lastTemplateId;
+    }
     if (templateId) {
       const tpl = await this.templateStore.require(templateId);
       templateName = tpl.name;
       templateMarkdown = tpl.markdown;
+      saveTemplateMemory({ lastTemplateId: templateId });
+    }
+
+    const stylePresetId = brief.stylePresetId ?? loadTemplateMemory().lastStylePresetId;
+    if (stylePresetId) {
+      const locked = applyStyleLockToBrief(brief, stylePresetId);
+      brief = { ...brief, tone: locked.tone, stylePresetId };
+      saveTemplateMemory({ lastStylePresetId: stylePresetId });
     }
 
     const run: PipelineRun = {
@@ -137,6 +159,13 @@ export class BlogPipelineOrchestrator {
       failedStage: null,
       errorCode: null,
       retryable: false,
+      stylePresetId: stylePresetId ?? null,
+      previousArticle: null,
+      seoPack: null,
+      thumbnailVariants: [],
+      repurposePack: null,
+      autoAccepted: false,
+      articleHistory: [],
       idempotencyKey: createIdempotencyKey([id, brief.topic, "publish"]),
     };
     return this.store.save(run);
@@ -340,7 +369,10 @@ export class BlogPipelineOrchestrator {
       );
 
       try {
-        const { content, linksInjected } = injectAffiliateLinks(article.content);
+        const { content, linksInjected } = injectRelevantAffiliateLinks(
+          article.content,
+          run.brief.topic,
+        );
         if (linksInjected.length > 0) {
           article = { ...article, content };
           logger.info("Affiliate links injected", { count: linksInjected.length, runId: id });
@@ -397,13 +429,42 @@ export class BlogPipelineOrchestrator {
     run = await this.store.save(run);
     try {
       const quality = qualityStage(article, run.sources, run.analysis);
-      let next: PipelineRun = { ...run, quality };
+      const seoPack = buildSeoPack(article, run.brief.topic);
+      const repurposePack = buildRepurposePack({
+        title: article.title,
+        slug: article.slug,
+        excerpt: article.excerpt,
+        tags: article.tags,
+        content: article.content,
+      });
+      const hasBlocking = quality.issues.some((i) => i.severity === "error");
+      const autoOk =
+        appConfig.quality.autoAcceptEnabled &&
+        quality.score >= appConfig.quality.autoAcceptMinScore &&
+        !hasBlocking &&
+        unsourcedClaimCount(buildFactCards(run.analysis, run.sources)) <= 2;
+
+      let next: PipelineRun = {
+        ...run,
+        quality,
+        seoPack,
+        repurposePack,
+        autoAccepted: autoOk,
+      };
       next = completeStage(next, "quality", {
         score: quality.score,
         passed: quality.passed,
         issueCount: quality.issues.length,
+        autoAccepted: autoOk,
       });
-      next = setStatus(next, "REVIEW_REQUIRED");
+      // Auto-accept moves straight to APPROVED for human-time reduction; otherwise review.
+      next = setStatus(next, autoOk ? "APPROVED" : "REVIEW_REQUIRED");
+      if (autoOk) {
+        next = {
+          ...next,
+          reviewNotes: next.reviewNotes || `Auto-accepted (score ${quality.score})`,
+        };
+      }
       return this.store.save(next);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -419,9 +480,14 @@ export class BlogPipelineOrchestrator {
     const article = GeneratedBlogSchema.parse(articleInput);
     return this.store.save({
       ...run,
+      previousArticle: run.article,
       article,
       quality: null,
       status: "DRAFT_READY",
+      articleHistory: [
+        ...(run.articleHistory ?? []),
+        { at: new Date().toISOString(), note: "Manual article edit" },
+      ].slice(-20),
     });
   }
 
@@ -767,21 +833,44 @@ export class BlogPipelineOrchestrator {
         throw new Error("Outline and analysis are required before accepting a draft");
       }
       let article = markdownDraftToArticle(markdown, run.brief, run.sources);
+      article = {
+        ...article,
+        content: stripBannedPhrases(article.content, run.stylePresetId ?? run.brief.stylePresetId),
+      };
       try {
-        const { content, linksInjected } = injectAffiliateLinks(article.content);
-        if (linksInjected.length > 0) article = { ...article, content };
+        const { content, linksInjected } = injectRelevantAffiliateLinks(
+          article.content,
+          run.brief.topic,
+        );
+        if (linksInjected.length > 0) {
+          article = { ...article, content };
+          logger.info("Affiliate links injected", { count: linksInjected.length, runId: id });
+        }
       } catch {
         /* optional */
       }
 
       let next: PipelineRun = {
         ...run,
+        previousArticle: run.article,
         article,
         quality: null,
         error: null,
         failedStage: null,
         errorCode: null,
         retryable: false,
+        seoPack: buildSeoPack(article, run.brief.topic),
+        repurposePack: buildRepurposePack({
+          title: article.title,
+          slug: article.slug,
+          excerpt: article.excerpt,
+          tags: article.tags,
+          content: article.content,
+        }),
+        articleHistory: [
+          ...(run.articleHistory ?? []),
+          { at: new Date().toISOString(), note: "Accepted streamed draft" },
+        ].slice(-20),
       };
       if (typeof options.generateImages === "boolean") {
         next = { ...next, generateImages: options.generateImages };

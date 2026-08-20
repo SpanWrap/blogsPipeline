@@ -211,6 +211,11 @@ export const appConfig = {
     dataDir: env("ANALYTICS_DATA_DIR", ".data/analytics")!,
     updateIntervalMinutes: envInt("ANALYTICS_UPDATE_INTERVAL_MINUTES", 360),
   },
+  quality: {
+    /** Auto-approve into REVIEW_REQUIRED skip? When score >= threshold and no errors, auto-accept stream drafts. */
+    autoAcceptMinScore: envInt("AUTO_ACCEPT_MIN_SCORE", 80),
+    autoAcceptEnabled: envBool("AUTO_ACCEPT_ENABLED", false),
+  },
   publishing: {
     medium: {
       token: env("MEDIUM_TOKEN"),

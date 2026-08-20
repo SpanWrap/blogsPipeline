@@ -7,6 +7,10 @@ export const ContentBriefSchema = z.object({
   contentType: z.string().min(1).default("educational"),
   keywords: z.array(z.string()).default([]),
   referenceUrls: z.array(z.string().url()).default([]),
+  /** Named voice preset id (founder, tutorial, opinion, neutral). */
+  stylePresetId: z.string().nullable().default(null),
+  /** Optional competitor URLs to bias the angle brief. */
+  competitorUrls: z.array(z.string().url()).default([]),
 });
 
 export type ContentBrief = z.infer<typeof ContentBriefSchema>;
@@ -257,6 +261,56 @@ export const PipelineRunSchema = z.object({
   errorCode: z.string().nullable().default(null),
   /** True when the error is transient and a retry has a reasonable chance of succeeding. */
   retryable: z.boolean().default(false),
+  /** Style preset applied for generation. */
+  stylePresetId: z.string().nullable().default(null),
+  /** Previous article snapshot for diff review. */
+  previousArticle: GeneratedBlogSchema.nullable().default(null),
+  /** SEO suggestion pack attached after draft/quality. */
+  seoPack: z
+    .object({
+      primaryKeyword: z.string().optional(),
+      longTailKeywords: z.array(z.string()).default([]),
+      titles: z.array(z.string()).default([]),
+      descriptions: z.array(z.string()).default([]),
+      slugSuggestions: z.array(z.string()).default([]),
+    })
+    .nullable()
+    .default(null),
+  /** Hero/thumbnail A/B variants. */
+  thumbnailVariants: z
+    .array(
+      z.object({
+        id: z.string(),
+        url: z.string(),
+        label: z.string(),
+        selected: z.boolean().default(false),
+      }),
+    )
+    .default([]),
+  /** Social + newsletter repurpose pack. */
+  repurposePack: z
+    .object({
+      tweet: z.string(),
+      linkedInPost: z.string(),
+      redditTitle: z.string(),
+      redditBody: z.string(),
+      newsletterBlurb: z.string(),
+      youtubeShortOutline: z.array(z.string()).default([]),
+      thread: z.array(z.string()).default([]),
+    })
+    .nullable()
+    .default(null),
+  /** Set when quality auto-accepted the draft. */
+  autoAccepted: z.boolean().default(false),
+  /** Lightweight revision notes for diff/history UI. */
+  articleHistory: z
+    .array(
+      z.object({
+        at: z.string(),
+        note: z.string(),
+      }),
+    )
+    .default([]),
   idempotencyKey: z.string(),
 });
 
