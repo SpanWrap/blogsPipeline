@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=20" />
+    <link rel="stylesheet" href="/styles.css?v=23" />
   </head>
   <body>
     <div id="auth-gate" class="auth-gate">
@@ -49,93 +49,101 @@
         </div>
       </header>
 
-      <div id="page-home">
-        <section class="panel topics">
-          <div class="panel-head">
-            <div>
-              <h2>Hot topics</h2>
-              <p id="digest-updated" class="digest-updated">Loading feeds…</p>
-            </div>
-            <button type="button" id="load-digest" class="btn primary">Refresh</button>
-          </div>
-          <p class="hint">
-            GitHub trending today, Reddit <code>/top</code>, Hacker News, arXiv, Hugging Face
-            papers, Lobsters, and AI coverage from TechCrunch, The Verge, MIT Technology Review,
-            Ars Technica, and IEEE Spectrum. Filter by source, then
-            <strong>Write this</strong> to start a run.
-          </p>
-          <div id="source-filters" class="source-filters"></div>
-          <p id="digest-notes" class="hint" hidden></p>
-          <ul id="topic-list" class="topic-list"></ul>
-        </section>
+      <div id="page-home" class="home-shell" data-view="runs">
+        <aside class="home-sidebar" id="home-sidebar">
+          <nav class="home-nav" aria-label="Workspace">
+            <button type="button" class="home-nav-btn" data-home-view="topics">Hot topics</button>
+            <button type="button" class="home-nav-btn" data-home-view="create">New run</button>
+            <button type="button" class="home-nav-btn active" data-home-view="runs">Runs</button>
+          </nav>
+        </aside>
 
-        <section class="panel create">
-          <h2>New run</h2>
-          <form id="create-form" class="form-grid">
-            <label>
-              Topic
-              <input name="topic" required placeholder="AI agents in customer support" />
-            </label>
-            <label>
-              Audience
-              <input name="targetAudience" value="startup founders" />
-            </label>
-            <label>
-              Tone
-              <input name="tone" value="technical but easy to understand" />
-            </label>
-            <label>
-              Keywords (comma-separated)
-              <input name="keywords" placeholder="AI agents, customer support" />
-            </label>
-            <label>
-              Style lock
-              <select name="stylePresetId" id="style-preset-select">
-                <option value="">Default (use tone field)</option>
-              </select>
-            </label>
-            <label class="full">
-              Article template (sections + instructions)
-              <select name="templateId" id="template-select">
-                <option value="">None (default structure)</option>
-              </select>
-            </label>
-            <div class="form-actions">
-              <button type="submit" class="btn primary">Create run</button>
-              <button type="button" id="create-and-run" class="btn">Create & run to review</button>
-            </div>
-          </form>
-          <div class="batch-box">
-            <h3>Batch Run to review</h3>
-            <p class="hint">One topic per line (max 8). Creates runs through outline for live draft later.</p>
-            <textarea id="batch-topics" rows="4" placeholder="AI agents in support&#10;LLM eval harnesses&#10;RAG failure modes"></textarea>
-            <div class="form-actions">
-              <button type="button" class="btn" id="batch-run">Batch create → outline</button>
-            </div>
-          </div>
-        </section>
-
-        <div class="layout">
-          <aside class="panel list">
+        <main class="home-main" id="home-main">
+          <section class="home-pane" id="view-topics" hidden>
             <div class="panel-head">
-              <h2>Runs</h2>
-              <button type="button" id="refresh" class="btn ghost">Refresh</button>
-            </div>
-            <div id="resume-dashboard" class="resume-dashboard"></div>
-            <div class="runs-write">
-              <button type="button" id="runs-write" class="btn primary">Write blog</button>
+              <div>
+                <h2>Hot topics</h2>
+                <p id="digest-updated" class="digest-updated">Loading feeds…</p>
+              </div>
+              <button type="button" id="load-digest" class="btn primary">Refresh</button>
             </div>
             <p class="hint">
-              Select a run, assign a template on the right if needed, then <strong>Write blog</strong>.
-              Manage templates in <a href="/settings">Settings</a>.
+              GitHub trending, Reddit, Hacker News, arXiv, Hugging Face, Lobsters, and AI press.
+              Filter by source, then <strong>Write this</strong> to start a run.
             </p>
-            <ul id="run-list"></ul>
-          </aside>
+            <div id="source-filters" class="source-filters"></div>
+            <p id="digest-notes" class="hint" hidden></p>
+            <ul id="topic-list" class="topic-list"></ul>
+          </section>
 
-          <main class="panel detail" id="detail">
-            <p class="empty">Select a run to inspect sources, outline, article, and actions.</p>
-          </main>
-        </div>
+          <section class="home-pane" id="view-create" hidden>
+            <h2>New run</h2>
+            <form id="create-form" class="form-grid">
+              <label>
+                Topic
+                <input name="topic" required placeholder="AI agents in customer support" />
+              </label>
+              <label>
+                Audience
+                <input name="targetAudience" value="startup founders" />
+              </label>
+              <label>
+                Tone
+                <input name="tone" value="technical but easy to understand" />
+              </label>
+              <label>
+                Keywords (comma-separated)
+                <input name="keywords" placeholder="AI agents, customer support" />
+              </label>
+              <label>
+                Style lock
+                <select name="stylePresetId" id="style-preset-select">
+                  <option value="">Default (use tone field)</option>
+                </select>
+              </label>
+              <label class="full">
+                Article template (sections + instructions)
+                <select name="templateId" id="template-select">
+                  <option value="">None (default structure)</option>
+                </select>
+              </label>
+              <div class="form-actions">
+                <button type="submit" class="btn primary">Create run</button>
+                <button type="button" id="create-and-run" class="btn">Create & run to review</button>
+              </div>
+            </form>
+            <div class="batch-box">
+              <h3>Batch Run to review</h3>
+              <p class="hint">One topic per line (max 8). Creates runs through outline for live draft later.</p>
+              <textarea id="batch-topics" rows="4" placeholder="AI agents in support&#10;LLM eval harnesses&#10;RAG failure modes"></textarea>
+              <div class="form-actions">
+                <button type="button" class="btn" id="batch-run">Batch create → outline</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="home-pane home-pane-runs" id="view-runs">
+            <div class="runs-layout">
+              <aside class="runs-rail">
+                <div class="panel-head">
+                  <h2>Runs</h2>
+                  <button type="button" id="refresh" class="btn ghost">Refresh</button>
+                </div>
+                <div id="resume-dashboard" class="resume-dashboard"></div>
+                <div class="runs-write">
+                  <button type="button" id="runs-write" class="btn primary">Write blog</button>
+                </div>
+                <p class="hint">
+                  Select a run to open it on the right. Templates live under Settings.
+                </p>
+                <ul id="run-list"></ul>
+              </aside>
+              <div class="detail-panel" id="detail">
+                <p class="empty">Select a run to inspect sources, outline, article, and actions.</p>
+              </div>
+            </div>
+          </section>
+        </main>
       </div>
 
       <div id="page-settings" hidden class="settings-stack">
@@ -298,6 +306,6 @@
       </div>
     </div>
     <p id="toast" class="toast" hidden></p>
-    <script src="/app.js?v=21" type="module"></script>
+    <script src="/app.js?v=23" type="module"></script>
   </body>
 </html>

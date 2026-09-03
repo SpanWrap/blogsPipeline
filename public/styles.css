@@ -28,9 +28,27 @@ body {
 }
 
 .app {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 2rem 1.25rem 4rem;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin-bottom: 0;
 }
 
 .auth-gate {
@@ -99,18 +117,131 @@ body {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
-.top {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  align-items: center;
-  margin-bottom: 1.5rem;
-}
-
 .top-right {
   display: flex;
   align-items: center;
   gap: 0.6rem;
+}
+
+/* ── Home shell: sidebar + main ── */
+
+#page-home.home-shell {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  height: calc(100vh - 4.5rem);
+}
+
+#page-home[hidden],
+.home-pane[hidden] {
+  display: none !important;
+}
+
+.home-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.9rem 0.65rem 1.25rem;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-panel) 70%, var(--bg));
+  min-height: 0;
+  overflow: auto;
+}
+
+.home-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.home-nav-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--muted);
+  padding: 0.65rem 0.8rem;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.home-nav-btn:hover {
+  background: #f7f2e8;
+  color: var(--ink);
+}
+
+.home-nav-btn.active {
+  background: #e7f2ee;
+  color: var(--accent);
+}
+
+.home-main {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+}
+
+.home-pane {
+  max-width: 920px;
+  padding: 1.15rem 1.35rem 2.5rem;
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.home-pane-runs {
+  max-width: none;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.runs-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.runs-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-height: 0;
+  overflow: hidden;
+  padding: 1rem 0.85rem 1.25rem;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-panel) 82%, var(--bg));
+}
+
+.detail-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.15rem 1.35rem 2.5rem;
+}
+
+.create {
+  margin-bottom: 0;
+}
+
+.layout {
+  display: contents;
+}
+
+.layout > * {
+  min-width: 0;
 }
 
 .icon-btn {
@@ -136,6 +267,9 @@ body {
   display: grid;
   gap: 1rem;
   max-width: 720px;
+  padding: 1.25rem 1.35rem 3rem;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .brand {
@@ -292,7 +426,9 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
-  max-height: 70vh;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
   overflow: auto;
 }
 
@@ -1481,7 +1617,47 @@ label.check input {
 }
 
 @media (max-width: 860px) {
-  .layout,
+  #page-home.home-shell {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: calc(100vh - 4.5rem);
+  }
+
+  .home-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    overflow: visible;
+  }
+
+  .home-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .home-nav-btn {
+    flex: 1 1 auto;
+    text-align: center;
+  }
+
+  .home-main {
+    overflow: visible;
+  }
+
+  .home-pane-runs {
+    overflow: visible;
+  }
+
+  .runs-layout {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .runs-rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    max-height: 42vh;
+  }
+
   .form-grid {
     grid-template-columns: 1fr;
   }

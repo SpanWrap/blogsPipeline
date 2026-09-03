@@ -14,6 +14,7 @@ const state = {
   autoAcceptMinScore: 80,
   stylePresets: [],
   dashboard: null,
+  homeView: "runs",
   progress: {
     active: false,
     action: "",
@@ -22,6 +23,26 @@ const state = {
 };
 
 const $ = (sel) => document.querySelector(sel);
+
+function setHomeView(view) {
+  const next = ["topics", "create", "runs"].includes(view) ? view : "runs";
+  state.homeView = next;
+  const shell = $("#page-home");
+  if (shell) shell.dataset.view = next;
+  document.querySelectorAll(".home-nav-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.homeView === next);
+  });
+  const topics = $("#view-topics");
+  const create = $("#view-create");
+  const runs = $("#view-runs");
+  if (topics) topics.hidden = next !== "topics";
+  if (create) create.hidden = next !== "create";
+  if (runs) runs.hidden = next !== "runs";
+}
+
+function showRunsView() {
+  setHomeView("runs");
+}
 
 const LLM_PROVIDERS = [
   {
@@ -457,6 +478,7 @@ function bindDigestWrite(root) {
         await loadRuns();
         state.selectedId = result.run.id;
         state.run = result.run;
+        showRunsView();
         renderList();
         renderDetail();
         document.getElementById("detail")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -582,6 +604,7 @@ function renderTopics() {
         await loadRuns();
         state.selectedId = result.run.id;
         state.run = result.run;
+        showRunsView();
         renderList();
         renderDetail();
         document.getElementById("detail")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -752,6 +775,7 @@ function renderList() {
 
 async function selectRun(id) {
   state.selectedId = id;
+  showRunsView();
   renderList();
   state.run = await api(`/api/runs/${encodeURIComponent(id)}`);
   renderDetail();
@@ -1045,6 +1069,7 @@ async function createRun(andRun) {
     await loadRuns();
     state.selectedId = run.id;
     state.run = run;
+    showRunsView();
     renderList();
     renderDetail();
   } catch (e) {
@@ -2288,6 +2313,7 @@ async function writeBlogFromRun() {
       toastRunResult(state.run, "Write blog finished");
     }
     if (state.run?.article) state.tab = "quality";
+    showRunsView();
     await loadRuns();
     renderList();
     renderDetail();
@@ -2310,6 +2336,11 @@ async function writeBlogFromRun() {
 
 $("#refresh").addEventListener("click", () => loadRuns().catch((e) => toast(e.message, true)));
 $("#runs-write")?.addEventListener("click", () => writeBlogFromRun());
+
+document.querySelectorAll(".home-nav-btn").forEach((btn) => {
+  btn.addEventListener("click", () => setHomeView(btn.dataset.homeView));
+});
+setHomeView(state.homeView);
 
 function updateTemplateSizeHint(markdown) {
   const el = $("#template-size-hint");
