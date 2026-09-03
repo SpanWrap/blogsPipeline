@@ -784,7 +784,7 @@ const PUBLISH_SITES = [
 
 const TAB_LABELS = {
   quality: "Quality",
-  article: "Article",
+  article: "Preview",
   publish: "Publish",
   seo: "SEO pack",
   facts: "Fact cards",
@@ -1343,7 +1343,7 @@ function renderPostArticle(run, article) {
       <h1>${escapeHtml(a.title)}</h1>
       ${a.subtitle ? `<p class="post-dek">${escapeHtml(a.subtitle)}</p>` : ""}
       <p class="post-excerpt">${escapeHtml(a.excerpt || "")}</p>
-      <div class="post-body">${renderMarkdown(a.content)}</div>
+      <div class="post-body">${markdownToEditorHtml(a.content)}</div>
       ${
         (a.sources || []).length
           ? `<aside class="post-sources"><h3>Sources</h3><ul>${a.sources
@@ -2044,8 +2044,6 @@ function renderTab(run, tab) {
     if (!a) return `<p class="empty">No article yet. Run generate or Write blog from Runs.</p>`;
     const sections = (a.content.match(/^##\s+(.+)$/gm) || []).map((h) => h.replace(/^##\s+/, ""));
     return `
-      <h3>${escapeHtml(a.title)}</h3>
-      <p style="color:var(--muted)">${escapeHtml(a.excerpt || "")}</p>
       ${
         run.thumbnailVariants?.length
           ? `<div class="thumb-ab"><p class="hint">Thumbnail A/B</p>${run.thumbnailVariants
@@ -2066,7 +2064,7 @@ function renderTab(run, tab) {
               .join(" ")}</div>`
           : ""
       }
-      <pre class="pre">${escapeHtml(a.content)}</pre>
+      ${renderPostArticle(run, a)}
       <details style="margin-top:1rem">
         <summary>Edit article JSON</summary>
         <textarea id="article-json">${escapeHtml(JSON.stringify(a, null, 2))}</textarea>
