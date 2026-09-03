@@ -18,7 +18,7 @@ export function buildResumeDashboard(runs: PipelineRun[]): ResumeDashboard {
     failed_blocked: { id: "failed_blocked", label: "Failed (needs attention)", count: 0, runIds: [] },
     awaiting_draft_review: {
       id: "awaiting_draft_review",
-      label: "Generating / draft pending accept",
+      label: "Generating / acceptance",
       count: 0,
       runIds: [],
     },

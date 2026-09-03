@@ -31,7 +31,15 @@ import {
   streamDraftStage,
   markdownDraftToArticle,
 } from "./stages";
-import { completeStage, failStage, setStatus, startStage } from "./state";
+import {
+  completeStage,
+  failStage,
+  inFlightAgeMs,
+  isInFlightRun,
+  markInterrupted,
+  setStatus,
+  startStage,
+} from "./state";
 import { injectRelevantAffiliateLinks } from "../services/affiliate-relevance";
 import { recordPublish } from "../services/analytics";
 import { promoteAll } from "../services/social-promotion";
@@ -56,6 +64,10 @@ import { createQuickEditLLM } from "../providers/llm/quick-edit";
 
 /** Process-wide lock so two "Run to review" clicks cannot wipe each other's outline/article. */
 const runLocks = new Map<string, Promise<void>>();
+
+function isRunLockedLocally(id: string): boolean {
+  return runLocks.has(id);
+}
 
 async function withRunLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
   const previous = runLocks.get(id) ?? Promise.resolve();
@@ -212,11 +224,60 @@ export class BlogPipelineOrchestrator {
   }
 
   async get(id: string): Promise<PipelineRun> {
-    return this.store.require(id);
+    const run = await this.store.require(id);
+    return this.maybeRecoverInterrupted(run);
   }
 
   async list(): Promise<PipelineRun[]> {
-    return this.store.list();
+    const runs = await this.store.list();
+    const out: PipelineRun[] = [];
+    for (const run of runs) {
+      out.push(await this.maybeRecoverInterrupted(run));
+    }
+    return out;
+  }
+
+  /**
+   * Mark abandoned in-flight runs as FAILED (retryable).
+   * Local boot: recover immediately (this process is the only worker).
+   * Otherwise: only recover runs older than the LLM timeout (+ grace).
+   */
+  async recoverInterruptedRuns(options: { force?: boolean } = {}): Promise<number> {
+    const force = Boolean(options.force);
+    const maxAgeMs = appConfig.llm.requestTimeoutMs + 60_000;
+    const runs = await this.store.list();
+    let recovered = 0;
+    for (const run of runs) {
+      if (!isInFlightRun(run)) continue;
+      if (isRunLockedLocally(run.id)) continue;
+      if (!force && inFlightAgeMs(run) < maxAgeMs) continue;
+      await this.store.save(markInterrupted(run));
+      recovered += 1;
+      logger.warn("Recovered interrupted pipeline run", {
+        runId: run.id,
+        status: run.status,
+        force,
+      });
+    }
+    return recovered;
+  }
+
+  private async maybeRecoverInterrupted(run: PipelineRun): Promise<PipelineRun> {
+    if (!isInFlightRun(run)) return run;
+    if (isRunLockedLocally(run.id)) return run;
+    const maxAgeMs = appConfig.llm.requestTimeoutMs + 60_000;
+    // After a local process restart, in-memory locks are gone — recover anything
+    // that has been sitting mid-stage longer than a short grace (covers refresh races).
+    const graceMs = process.env.VERCEL ? maxAgeMs : 15_000;
+    if (inFlightAgeMs(run) < graceMs) return run;
+    const recovered = markInterrupted(run);
+    await this.store.save(recovered);
+    logger.warn("Recovered interrupted pipeline run on read", {
+      runId: run.id,
+      previousStatus: run.status,
+      failedStage: recovered.failedStage,
+    });
+    return recovered;
   }
 
   async research(id: string): Promise<PipelineRun> {

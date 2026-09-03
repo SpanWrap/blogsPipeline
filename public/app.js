@@ -601,7 +601,7 @@ async function loadTemplates() {
     state.templates
       .map((t) => `<option value="${t.id}">${escapeHtml(t.name)}</option>`)
       .join("");
-  for (const sel of ["#template-select", "#runs-template"]) {
+  for (const sel of ["#template-select"]) {
     const select = $(sel);
     if (!select) continue;
     const current = select.value;
@@ -1094,6 +1094,17 @@ function renderDetail() {
   const retryBtn = run.retryable && run.failedStage
     ? `<button class="btn" data-act="${escapeHtml(run.failedStage === 'research' ? 'research' : run.failedStage === 'outline' ? 'outline' : run.failedStage === 'generation' ? 'generate' : run.failedStage === 'quality' ? 'quality-check' : 'run')}" title="Retry from the failed stage">⟳ Retry ${escapeHtml(retryStageLabel)}</button>`
     : "";
+  const stalledInFlight =
+    !state.progress.active &&
+    ["RESEARCHING", "GENERATING", "QUALITY_CHECK"].includes(run.status);
+  const runningStage = (run.stages || []).find((s) => s.status === "running");
+  const stalledHint = stalledInFlight
+    ? `<div class="run-error-block">
+        <p class="run-error">This run is stuck on <strong>${escapeHtml(run.status)}</strong> with no live work. Generation likely died (server restart or timeout).</p>
+        <p class="run-error-meta">Refresh the page or click <strong>Run to review</strong> / Retry to continue from the interrupted stage.</p>
+        <button class="btn" data-act="run">⟳ Resume run</button>
+      </div>`
+    : "";
 
   root.innerHTML = `
     <div class="detail-head">
@@ -1109,7 +1120,7 @@ function renderDetail() {
           <p class="run-error">${escapeHtml(run.error)}</p>
           ${run.failedStage ? `<p class="run-error-meta">Stage: <strong>${escapeHtml(retryStageLabel)}</strong>${run.errorCode ? ` · Code: <code>${escapeHtml(run.errorCode)}</code>` : ""}${run.retryable ? " · <span class=\"retryable-badge\">Retryable</span>" : ""}</p>` : ""}
           ${retryBtn}
-        </div>` : ""}
+        </div>` : stalledHint}
       </div>
     </div>
     <div class="template-bar">
@@ -1151,7 +1162,9 @@ function renderDetail() {
         ${
           state.progress.active
             ? `<span class="status warn">Running ${escapeHtml(state.progress.action)}</span>`
-            : `<span class="status">Idle</span>`
+            : stalledInFlight
+              ? `<span class="status bad">Stalled</span>`
+              : `<span class="status">Idle</span>`
         }
       </div>
       <ul id="action-progress-list" class="action-progress-list">
@@ -1160,7 +1173,11 @@ function renderDetail() {
             ? state.progress.lines
                 .map((line) => `<li><span>${escapeHtml(line.at)}</span> ${escapeHtml(line.text)}</li>`)
                 .join("")
-            : `<li class="empty">No activity yet.</li>`
+            : stalledInFlight
+              ? `<li class="empty">No live activity — status is ${escapeHtml(run.status)}${
+                  runningStage ? ` (${escapeHtml(runningStage.stage)} started ${escapeHtml(runningStage.startedAt || "")})` : ""
+                }, but this browser session is idle. Refresh or resume the run.</li>`
+              : `<li class="empty">No activity yet.</li>`
         }
       </ul>
     </div>
@@ -2236,7 +2253,6 @@ async function writeBlogFromRun() {
     toast("Select a run in the list first", true);
     return;
   }
-  const templateId = $("#runs-template")?.value || null;
   setBusy(true);
   try {
     let run = state.run;
@@ -2244,6 +2260,7 @@ async function writeBlogFromRun() {
       run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
       state.run = run;
     }
+    const templateId = run.templateId || null;
     const locked = ["PUBLISHED", "APPROVED"].includes(run.status);
     if (locked) {
       const created = await api("/api/runs", {
@@ -2264,12 +2281,6 @@ async function writeBlogFromRun() {
       });
       toastRunResult(state.run, `Wrote new draft ${state.run.id}`);
     } else {
-      if (templateId !== (run.templateId || null)) {
-        await api(`/api/runs/${encodeURIComponent(run.id)}/assign-template`, {
-          method: "POST",
-          body: JSON.stringify({ templateId }),
-        });
-      }
       state.run = await api(`/api/runs/${encodeURIComponent(run.id)}/run`, {
         method: "POST",
         body: "{}",

@@ -68,7 +68,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
         try {
           const maxTokens =
             options?.maxTokens ??
-            (reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192);
+            (reasoningModel ? 16384 : this.name === "groq" ? 8192 : 12288);
           const body: Record<string, unknown> = {
             model: this.model,
             max_tokens: maxTokens,
@@ -167,7 +167,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
       const body: Record<string, unknown> = {
         model: this.model,
         stream: true,
-        max_tokens: reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192,
+        max_tokens: reasoningModel ? 16384 : this.name === "groq" ? 8192 : 12288,
         messages,
       };
       if (!reasoningModel) body.temperature = 0.4;

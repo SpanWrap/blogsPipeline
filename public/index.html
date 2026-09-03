@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=19" />
+    <link rel="stylesheet" href="/styles.css?v=20" />
   </head>
   <body>
     <div id="auth-gate" class="auth-gate">
@@ -123,17 +123,11 @@
             </div>
             <div id="resume-dashboard" class="resume-dashboard"></div>
             <div class="runs-write">
-              <label>
-                Template
-                <select id="runs-template">
-                  <option value="">None (default structure)</option>
-                </select>
-              </label>
               <button type="button" id="runs-write" class="btn primary">Write blog</button>
             </div>
             <p class="hint">
-              Select a run, then assign a template on the right. <strong>Write blog</strong> generates through review using that template.
-              Add templates in <a href="/settings">Settings</a>.
+              Select a run, assign a template on the right if needed, then <strong>Write blog</strong>.
+              Manage templates in <a href="/settings">Settings</a>.
             </p>
             <ul id="run-list"></ul>
           </aside>
@@ -304,6 +298,6 @@
       </div>
     </div>
     <p id="toast" class="toast" hidden></p>
-    <script src="/app.js?v=19" type="module"></script>
+    <script src="/app.js?v=21" type="module"></script>
   </body>
 </html>

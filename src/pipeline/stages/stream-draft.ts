@@ -31,18 +31,25 @@ export function buildStreamDraftPrompt(input: {
     ? `\nTemplate guidance:\n${input.templateGuidance}\n`
     : "\nNo template. Use intro, body from outline, conclusion.\n";
 
-  return `Write an original blog article in GitHub-flavored Markdown.
+  return `Write an original long-form tech blog article in GitHub-flavored Markdown.
 
 Brief: ${input.briefJson}
 Outline: ${input.outlineJson}
 Analysis: ${input.analysisJson}
 Sources: ${input.sourcesJson}
 ${templateBlock}
+Length & depth (required):
+- Target 1,800–2,500 words (about 8–12 minutes reading time). Do not stop early.
+- Expand every outline section with 2–4 substantial paragraphs; include examples, trade-offs, and practical steps from the sources.
+- Prefer specificity over generic advice.
+
 Rules:
 - Start with a single H1 title (# Title)
 - Use H2/H3 for sections from the outline
 - Ground claims in the provided sources only; no invented stats
-- Clear, scannable prose; no filler
+- Clear, scannable prose; no filler or padded repetition
+- For technical topics, include at least one realistic code or config example when sources support it
+- End with a conclusion that synthesizes takeaways and a clear next step
 - Do not wrap the whole article in a code fence
 - Do not output JSON
 

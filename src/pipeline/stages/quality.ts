@@ -196,7 +196,22 @@ export function qualityStage(
   if (!article.title?.trim()) add("error", "missing_title", "Title is missing.", 25);
   if (!article.content?.trim()) add("error", "empty_content", "Article content is empty.", 40);
   const words = wordCount(article.content);
-  if (words < 250) add("warning", "short_content", `Article is short (${words} words).`, 10);
+  // ~200 wpm → 1,800 words ≈ 9 min; flag thin posts that won't hold readers.
+  if (words < 1200) {
+    add(
+      "warning",
+      "short_content",
+      `Article is short (${words} words). Aim for 1,800–2,500 words (~8–12 min read).`,
+      words < 800 ? 18 : 12,
+    );
+  } else if (words < 1600) {
+    add(
+      "info",
+      "below_target_length",
+      `Article is ${words} words — a bit under the 1,800–2,500 target.`,
+      4,
+    );
+  }
   if (words > 4000) add("info", "long_content", `Article is long (${words} words).`, 2);
   if (!hasIntroduction(article.content)) {
     add("warning", "missing_introduction", "Introduction looks weak or missing.", 8);
@@ -236,8 +251,8 @@ export function qualityStage(
     add("warning", "no_intro_before_h2", "No intro paragraph before first H2 heading.", 5);
   }
   const h2s = h2Count(article.content);
-  if (h2s < 3) add("warning", "too_few_h2", `Only ${h2s} H2 headings (3-8 ideal).`, 5);
-  if (h2s > 8) add("info", "many_h2", `${h2s} H2 headings (3-8 ideal).`, 2);
+  if (h2s < 5) add("warning", "too_few_h2", `Only ${h2s} H2 headings (5–10 ideal for long-form).`, 5);
+  if (h2s > 12) add("info", "many_h2", `${h2s} H2 headings (5–10 ideal).`, 2);
 
   if (isTechnicalTopic(article) && !hasCodeBlocks(article.content)) {
     add("info", "missing_code_blocks", "Technical topic but no code blocks found.", 3);

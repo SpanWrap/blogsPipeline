@@ -107,3 +107,59 @@ export function setStatus(run: PipelineRun, status: PipelineStatus): PipelineRun
     retryable: isFailed ? run.retryable : false,
   };
 }
+
+/** Top-level statuses that mean work is still in flight. */
+export const IN_FLIGHT_STATUSES: readonly PipelineStatus[] = [
+  "RESEARCHING",
+  "GENERATING",
+  "QUALITY_CHECK",
+];
+
+export function findRunningStage(run: PipelineRun): StageRecord | undefined {
+  return run.stages.find((s) => s.status === "running");
+}
+
+/** True when the run looks mid-stage (status or a stage still marked running). */
+export function isInFlightRun(run: PipelineRun): boolean {
+  if (IN_FLIGHT_STATUSES.includes(run.status)) return true;
+  return Boolean(findRunningStage(run));
+}
+
+function inferInterruptedStage(run: PipelineRun): string {
+  const running = findRunningStage(run);
+  if (running?.stage) return running.stage;
+  if (run.status === "GENERATING") return "generation";
+  if (run.status === "RESEARCHING") return "research";
+  if (run.status === "QUALITY_CHECK") return "quality";
+  return "pipeline";
+}
+
+/** How long the current in-flight stage (or last update) has been open. */
+export function inFlightAgeMs(run: PipelineRun, now = Date.now()): number {
+  const running = findRunningStage(run);
+  const startedAt = running?.startedAt ?? run.updatedAt;
+  const start = Date.parse(startedAt);
+  if (!Number.isFinite(start)) return 0;
+  return Math.max(0, now - start);
+}
+
+/**
+ * Mark a run that died mid-stage (process restart, aborted request, etc.) as FAILED
+ * so the UI can show Retry instead of a permanent GENERATING badge.
+ */
+export function markInterrupted(
+  run: PipelineRun,
+  message =
+    "Pipeline was interrupted before this stage finished (server restart or aborted request). Safe to retry.",
+): PipelineRun {
+  const stage = inferInterruptedStage(run);
+  let next = run;
+  if (!findRunningStage(run) || findRunningStage(run)?.stage !== stage) {
+    next = startStage(run, stage);
+  }
+  return failStage(next, stage, message, {
+    errorCode: "INTERRUPTED",
+    retryable: true,
+  });
+}
+

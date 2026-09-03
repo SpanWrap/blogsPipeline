@@ -901,6 +901,20 @@ export function createUiServer() {
   // Auto-start autopilot scheduler if enabled
   maybeStartAutopilotScheduler();
 
+  // Local restarts leave runs stuck in GENERATING/RESEARCHING; mark them failed so Retry works.
+  if (!process.env.VERCEL) {
+    void createOrchestrator()
+      .recoverInterruptedRuns({ force: true })
+      .then((n) => {
+        if (n > 0) logger.warn("Marked interrupted runs as failed on boot", { count: n });
+      })
+      .catch((error) => {
+        logger.warn("Interrupted-run recovery failed on boot", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
   return createServer((req, res) => {
     void (async () => {
       try {

@@ -1079,10 +1079,6 @@ textarea {
   margin-bottom: 0.65rem;
 }
 
-.runs-write select {
-  width: 100%;
-}
-
 .post-preview {
   max-width: 42rem;
   width: 100%;

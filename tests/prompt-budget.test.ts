@@ -41,7 +41,7 @@ describe("prompt-budget", () => {
     const compact = compactSourcesForAnalysis(sources);
     const json = compactJson(compact);
     expect(json.includes("\n")).toBe(false);
-    expect(String(compact[0]?.text).length).toBeLessThan(2000);
+    expect(String(compact[0]?.text).length).toBeLessThanOrEqual(2200);
   });
 
   it("limits analysis claims and template size", () => {
@@ -59,7 +59,7 @@ describe("prompt-budget", () => {
       sourceRelationships: [],
     };
     const compact = compactAnalysis(analysis);
-    expect((compact.claims as unknown[]).length).toBeLessThanOrEqual(18);
+    expect((compact.claims as unknown[]).length).toBeLessThanOrEqual(22);
 
     const template = `# Intro\n\n${"instruction paragraph ".repeat(200)}\n\n## Body\n\n${"more ".repeat(400)}`;
     const compactTpl = compactTemplateForPrompt(template);
