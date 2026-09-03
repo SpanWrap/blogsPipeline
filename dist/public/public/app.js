@@ -8,6 +8,17 @@ const state = {
   run: null,
   tab: "quality",
   busy: false,
+  generateImages: false,
+  hasGeminiKey: false,
+  autoAcceptEnabled: false,
+  autoAcceptMinScore: 80,
+  stylePresets: [],
+  dashboard: null,
+  progress: {
+    active: false,
+    action: "",
+    lines: [],
+  },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -265,11 +276,19 @@ async function loadLlm() {
 async function loadHealth() {
   try {
     const h = await api("/api/health");
+    state.hasGeminiKey = Boolean(h.hasGeminiKey);
+    state.autoAcceptEnabled = Boolean(h.autoAcceptEnabled);
+    state.autoAcceptMinScore = Number(h.autoAcceptMinScore) || 80;
     const rows = [
       ["storage", h.storage],
       ["llm", h.hasLlmKey ? `${h.llmProvider} · ${h.llmModel || ""}`.trim() : `${h.llmProvider} (no key → mock)`],
       ["research", h.researchProvider],
       ["publish key", h.hasSpanwrapKey ? "set" : "missing"],
+      ["gemini images", h.hasGeminiKey ? "key set" : "no key"],
+      [
+        "auto-accept",
+        h.autoAcceptEnabled ? `on (≥${h.autoAcceptMinScore})` : "off",
+      ],
       ["github", h.hasGithubToken ? "token" : "public"],
       ["reddit", h.hasRedditOAuth ? "oauth" : "public"],
       ["x", h.hasXBearer ? "api" : "off"],
@@ -591,6 +610,24 @@ async function loadTemplates() {
       select.value = current;
     }
   }
+  try {
+    const data = await api("/api/style-presets");
+    state.stylePresets = data.presets || [];
+    const presetSel = $("#style-preset-select");
+    if (presetSel) {
+      const remembered = data.memory?.lastStylePresetId || "";
+      presetSel.innerHTML =
+        `<option value="">Default (use tone field)</option>` +
+        state.stylePresets
+          .map(
+            (p) =>
+              `<option value="${escapeHtml(p.id)}" ${p.id === remembered ? "selected" : ""}>${escapeHtml(p.label)}</option>`,
+          )
+          .join("");
+    }
+  } catch {
+    /* optional */
+  }
   const list = $("#template-list");
   if (!list) return;
   if (!state.templates.length) {
@@ -631,6 +668,11 @@ async function loadTemplates() {
 
 async function loadRuns() {
   state.runs = await api("/api/runs");
+  try {
+    state.dashboard = await api("/api/dashboard");
+  } catch {
+    state.dashboard = null;
+  }
   renderList();
   if (state.selectedId) {
     const still = state.runs.find((r) => r.id === state.selectedId);
@@ -644,6 +686,23 @@ async function loadRuns() {
 
 function renderList() {
   const list = $("#run-list");
+  const dash = $("#resume-dashboard");
+  if (dash && state.dashboard?.buckets?.length) {
+    dash.innerHTML = `<div class="dash-title">Smart resume</div>${state.dashboard.buckets
+      .map(
+        (b) =>
+          `<button type="button" class="dash-bucket" data-dash-ids="${escapeHtml(b.runIds.join(","))}"><strong>${escapeHtml(b.label)}</strong> <span>${b.count}</span></button>`,
+      )
+      .join("")}`;
+    dash.querySelectorAll("[data-dash-ids]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = String(btn.dataset.dashIds || "").split(",")[0];
+        if (id) selectRun(id);
+      });
+    });
+  } else if (dash) {
+    dash.innerHTML = "";
+  }
   if (!list) return;
   if (!state.runs.length) {
     list.innerHTML = `<li class="empty">No runs yet.</li>`;
@@ -657,6 +716,7 @@ function renderList() {
           <span class="topic">${escapeHtml(r.topic)}</span>
           <span class="meta">
             <span class="status ${statusClass(r.status)}">${r.status}</span>
+            ${r.autoAccepted ? `<span class="retryable-badge">auto</span>` : ""}
             <span>${r.id}</span>
           </span>
         </button>
@@ -726,6 +786,10 @@ const TAB_LABELS = {
   quality: "Quality",
   article: "Article",
   publish: "Publish",
+  seo: "SEO pack",
+  facts: "Fact cards",
+  diff: "Diff",
+  repurpose: "Repurpose",
   outline: "Outline",
   template: "Template",
   sources: "Sources",
@@ -778,16 +842,105 @@ function insertAtCursor(textarea, text) {
   textarea.focus();
 }
 
+function wantsImages() {
+  const box = $("#generate-images-flag");
+  if (box) state.generateImages = box.checked && !box.disabled;
+  return Boolean(state.generateImages && state.hasGeminiKey);
+}
+
+function stageLabel(stage) {
+  return (
+    {
+      research: "Gathering resources...",
+      analysis: "Analyzing sources...",
+      outline: "Drafting the outline...",
+      generation: "Writing the article...",
+      images: "Generating images with Gemini...",
+      quality: "Scoring quality...",
+      publish: "Publishing...",
+    }[stage] || `${stage}...`
+  );
+}
+
+function pushProgress(text) {
+  const last = state.progress.lines[state.progress.lines.length - 1];
+  if (last?.text === text) return;
+  state.progress.lines = [
+    ...state.progress.lines,
+    { at: new Date().toLocaleTimeString(), text },
+  ].slice(-12);
+  const root = $("#action-progress-list");
+  if (!root) return;
+  root.innerHTML = state.progress.lines
+    .map((line) => `<li><span>${escapeHtml(line.at)}</span> ${escapeHtml(line.text)}</li>`)
+    .join("");
+}
+
+function startProgress(action) {
+  state.progress.active = true;
+  state.progress.action = action;
+  state.progress.lines = [];
+  pushProgress(
+    {
+      run: "Starting full pipeline (research → outline → draft → quality)...",
+      research: "Starting research...",
+      outline: "Starting outline...",
+      generate: "Starting article draft...",
+      "quality-check": "Starting quality checks...",
+      publish: "Starting publish...",
+      "generate-images": "Starting image generation...",
+    }[action] || "Processing request...",
+  );
+}
+
+function stopProgress(success, message) {
+  pushProgress(message || (success ? "Completed." : "Failed."));
+  state.progress.active = false;
+}
+
+function startStagePoll() {
+  let lastKey = "";
+  return setInterval(async () => {
+    if (!state.selectedId) return;
+    try {
+      const latest = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+      const running = (latest.stages || []).find((s) => s.status === "running");
+      const key = running ? `run:${running.stage}` : `status:${latest.status}:${latest.error || ""}`;
+      if (key === lastKey) return;
+      lastKey = key;
+      if (running) pushProgress(stageLabel(running.stage));
+      else if (latest.error) pushProgress(latest.error);
+    } catch {
+      /* ignore poll errors */
+    }
+  }, 1200);
+}
+
 async function act(action, body) {
-  if (!state.selectedId) return null;
+  if (!state.selectedId || state.busy) return null;
+  if (action === "run") {
+    return runToReview(body);
+  }
+  const payload = {
+    ...(body || {}),
+    generateImages: wantsImages(),
+  };
   setBusy(true);
+  startProgress(action);
+  const poller = startStagePoll();
   try {
     state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/${action}`, {
       method: "POST",
-      body: body ? JSON.stringify(body) : "{}",
+      body: JSON.stringify(payload),
     });
+    stopProgress(
+      !["FAILED", "PUBLISH_FAILED"].includes(state.run.status),
+      state.run.error
+        ? `${action} failed: ${state.run.error}`
+        : `${action} completed → ${state.run.status}`,
+    );
     toastRunResult(state.run, `${action} complete`);
-    if (state.run?.article && ["run", "generate", "quality-check"].includes(action)) {
+    if (state.run?.article && ["generate", "quality-check", "accept-stream-draft"].includes(action)) {
       state.tab = "quality";
     }
     if (action === "approve") {
@@ -797,9 +950,67 @@ async function act(action, body) {
     renderDetail();
     return state.run;
   } catch (e) {
+    stopProgress(false, e.message || "Action failed.");
     toast(e.message, true);
+    try {
+      if (state.selectedId) {
+        state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+        renderDetail();
+      }
+    } catch {
+      /* keep current */
+    }
     return null;
   } finally {
+    clearInterval(poller);
+    setBusy(false);
+  }
+}
+
+/** Full pipeline through quality. Resumes if previous run FAILED. */
+async function runToReview(body = {}) {
+  if (!state.selectedId || state.busy) return null;
+  const generateImages = wantsImages();
+  setBusy(true);
+  startProgress("run");
+  const poller = startStagePoll();
+  try {
+    pushProgress(
+      state.run?.status === "FAILED"
+        ? `Resuming from failed stage (${state.run.failedStage || "unknown"})...`
+        : "Starting full pipeline (research → draft → quality)...",
+    );
+
+    state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/run`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...body,
+        generateImages,
+      }),
+    });
+    stopProgress(
+      state.run.status !== "FAILED",
+      state.run.error || `Run finished → ${state.run.status}`,
+    );
+    toastRunResult(state.run, "Run complete");
+    if (state.run?.article) state.tab = "quality";
+    await loadRuns();
+    renderDetail();
+    return state.run;
+  } catch (e) {
+    stopProgress(false, e.message || "Run failed.");
+    toast(e.message, true);
+    try {
+      if (state.selectedId) {
+        state.run = await api(`/api/runs/${encodeURIComponent(state.selectedId)}`);
+        renderDetail();
+      }
+    } catch {
+      /* keep */
+    }
+    return null;
+  } finally {
+    clearInterval(poller);
     setBusy(false);
   }
 }
@@ -812,10 +1023,12 @@ function formBrief(form) {
     tone: String(fd.get("tone") || "").trim(),
     keywords: String(fd.get("keywords") || ""),
     templateId: String(fd.get("templateId") || "") || null,
+    stylePresetId: String(fd.get("stylePresetId") || "") || null,
   };
 }
 
 async function createRun(andRun) {
+  if (state.busy) return;
   const form = $("#create-form");
   const brief = formBrief(form);
   if (!brief.topic || brief.topic.length < 3) {
@@ -831,24 +1044,16 @@ async function createRun(andRun) {
     form.elements.tone.value = "technical but easy to understand";
     await loadRuns();
     state.selectedId = run.id;
-    if (andRun) {
-      state.run = await api(`/api/runs/${encodeURIComponent(run.id)}/run`, {
-        method: "POST",
-        body: "{}",
-      });
-      toastRunResult(state.run, "Run finished");
-      if (state.run?.article) state.tab = "quality";
-      await loadRuns();
-    } else {
-      state.run = run;
-    }
+    state.run = run;
     renderList();
     renderDetail();
   } catch (e) {
     toast(e.message, true);
+    return;
   } finally {
     setBusy(false);
   }
+  if (andRun) await act("run");
 }
 
 function renderDetail() {
@@ -859,7 +1064,21 @@ function renderDetail() {
     return;
   }
 
-  const tabs = ["quality", "article", "publish", "outline", "template", "sources", "analysis", "stages", "raw"];
+  const tabs = [
+    "quality",
+    "article",
+    "seo",
+    "facts",
+    "diff",
+    "repurpose",
+    "publish",
+    "outline",
+    "template",
+    "sources",
+    "analysis",
+    "stages",
+    "raw",
+  ];
   const content = renderTab(run, state.tab);
   const templateOptions = [
     `<option value="">None (default structure)</option>`,
@@ -901,17 +1120,49 @@ function renderDetail() {
       <button type="button" class="btn primary" id="assign-template">Assign template</button>
     </div>
     <p class="hint">
-      The template's sections and instructions go to the LLM with this topic and the research sources.
-      Assign before <strong>Run to review</strong> or <strong>Generate</strong>.
-      Keep templates short — a large template can exceed the model's input/TPM limit.
+      <strong>Run to review</strong> runs research → outline → draft → quality.
+      If a run failed, it resumes from the failed stage. Tabs below inspect/edit results — select text in Quality to Quick Edit.
+      ${state.hasGeminiKey ? " Enable Gemini images to generate art with the draft." : ""}
     </p>
     <div class="actions">
       <button class="btn primary" data-act="run">Run to review</button>
-      <button class="btn" data-act="research">Research</button>
-      <button class="btn" data-act="outline">Outline</button>
-      <button class="btn" data-act="generate">Generate</button>
-      <button class="btn" data-act="quality-check">Quality score</button>
+      <label class="check-inline" title="${state.hasGeminiKey ? "Generate hero/section images with Gemini after the draft" : "Add GEMINI_API_KEY in .env to enable"}">
+        <input type="checkbox" id="generate-images-flag" ${state.hasGeminiKey ? "" : "disabled"} ${state.generateImages && state.hasGeminiKey ? "checked" : ""} />
+        Gemini images
+      </label>
       <button class="btn" data-act="publish-preview">Open publish</button>
+      <button class="btn" data-act="distribute" title="Approve + publish + build social/newsletter pack">One-click distribute</button>
+      <button class="btn" data-act="readability-pass">Readability pass</button>
+      ${run.status === "PUBLISHED" || run.status === "APPROVED" ? `<button class="btn" data-act="refresh">Refresh post</button>` : ""}
+    </div>
+    <details class="stage-actions">
+      <summary>Run one stage (advanced)</summary>
+      <p class="hint">Use only to retry a single step after a failure. Prefer <strong>Run to review</strong> for a full draft.</p>
+      <div class="actions">
+        <button class="btn" data-act="research">Research</button>
+        <button class="btn" data-act="outline">Outline</button>
+        <button class="btn" data-act="generate">Generate</button>
+        <button class="btn" data-act="quality-check">Quality score</button>
+      </div>
+    </details>
+    <div class="progress-panel">
+      <div class="progress-head">
+        <strong>Pipeline activity</strong>
+        ${
+          state.progress.active
+            ? `<span class="status warn">Running ${escapeHtml(state.progress.action)}</span>`
+            : `<span class="status">Idle</span>`
+        }
+      </div>
+      <ul id="action-progress-list" class="action-progress-list">
+        ${
+          state.progress.lines.length
+            ? state.progress.lines
+                .map((line) => `<li><span>${escapeHtml(line.at)}</span> ${escapeHtml(line.text)}</li>`)
+                .join("")
+            : `<li class="empty">No activity yet.</li>`
+        }
+      </ul>
     </div>
     <div class="tabs">
       ${tabs
@@ -924,6 +1175,17 @@ function renderDetail() {
     <div class="section">${content}</div>
   `;
 
+  const genImagesFlag = root.querySelector("#generate-images-flag");
+  if (genImagesFlag) {
+    genImagesFlag.addEventListener("change", () => {
+      state.generateImages = genImagesFlag.checked && !genImagesFlag.disabled;
+      try {
+        localStorage.setItem("pipeline.generateImages", state.generateImages ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+    });
+  }
   root.querySelectorAll("[data-act]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const action = btn.dataset.act;
@@ -982,6 +1244,69 @@ function renderDetail() {
   if (confirmPublish) {
     confirmPublish.addEventListener("click", async () => {
       await act("publish");
+    });
+  }
+  root.querySelectorAll("[data-regen-section]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await act("regenerate-section", { heading: btn.dataset.regenSection });
+      state.tab = "article";
+    });
+  });
+  root.querySelectorAll("[data-seo-title]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await act("apply-seo", { title: btn.dataset.seoTitle });
+      toast("SEO title applied");
+    });
+  });
+  root.querySelectorAll("[data-seo-desc]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await act("apply-seo", { description: btn.dataset.seoDesc });
+      toast("Meta description applied");
+    });
+  });
+  root.querySelectorAll("[data-seo-slug]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await act("apply-seo", { slug: btn.dataset.seoSlug });
+      toast("Slug applied");
+    });
+  });
+  root.querySelectorAll('input[name="thumb"]').forEach((input) => {
+    input.addEventListener("change", async () => {
+      if (!input.checked) return;
+      await act("select-thumbnail", { variantId: input.value });
+    });
+  });
+  const loadDiff = root.querySelector("#load-diff");
+  const diffMount = root.querySelector("#diff-mount");
+  async function renderDiffMount() {
+    if (!diffMount || !run.id) return;
+    try {
+      const diff = await api(`/api/runs/${encodeURIComponent(run.id)}/diff`, {
+        method: "POST",
+        body: "{}",
+      });
+      const hunks = diff.hunks || [];
+      if (!hunks.length) {
+        diffMount.innerHTML = `<p class="empty">No line differences recorded.</p>`;
+        return;
+      }
+      diffMount.innerHTML = hunks
+        .slice(0, 500)
+        .map((h) => {
+          const cls = h.type === "add" ? "diff-add" : h.type === "del" ? "diff-del" : "diff-same";
+          return `<div class="${cls}"><code>${escapeHtml(h.text || " ")}</code></div>`;
+        })
+        .join("");
+    } catch (e) {
+      diffMount.innerHTML = `<p class="empty">${escapeHtml(e.message || "Diff failed")}</p>`;
+    }
+  }
+  if (diffMount) {
+    void renderDiffMount();
+  }
+  if (loadDiff) {
+    loadDiff.addEventListener("click", () => {
+      void renderDiffMount();
     });
   }
   bindQualityEditor(root, run);
@@ -1385,6 +1710,203 @@ function initRichEditor(root, run) {
   editor.addEventListener("keyup", updateActiveStates);
   editor.addEventListener("mouseup", updateActiveStates);
   editor.addEventListener("click", updateActiveStates);
+
+  bindQuickEdit(editor, root, run);
+}
+
+/** Selection → Regenerate (Quick Edit) floating UI, Cursor/VS Code style. */
+function bindQuickEdit(editor, root, run) {
+  let host = document.getElementById("quick-edit-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "quick-edit-host";
+    host.hidden = true;
+    document.body.appendChild(host);
+  }
+
+  let savedRange = null;
+  let selectedText = "";
+  let open = false;
+  let busy = false;
+
+  function clearHost() {
+    host.innerHTML = "";
+    host.hidden = true;
+    open = false;
+  }
+
+  function selectionInEditor() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    const node = sel.anchorNode;
+    if (!node || !editor.contains(node)) return null;
+    const text = sel.toString().replace(/\u00a0/g, " ").trim();
+    if (text.length < 2) return null;
+    return { sel, text, range: sel.getRangeAt(0).cloneRange() };
+  }
+
+  function positionNearSelection(el, range) {
+    const rect = range.getBoundingClientRect();
+    const pad = 8;
+    // Measure after paint so offsetHeight is accurate.
+    el.style.visibility = "hidden";
+    el.style.top = "0px";
+    el.style.left = "0px";
+    const h = el.offsetHeight || 40;
+    const w = el.offsetWidth || 120;
+    let top = rect.top - h - pad;
+    if (top < pad) top = Math.min(window.innerHeight - h - pad, rect.bottom + pad);
+    let left = rect.left + rect.width / 2 - w / 2;
+    left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+    el.style.visibility = "visible";
+  }
+
+  function showRegenChip() {
+    if (busy || open) return;
+    const hit = selectionInEditor();
+    if (!hit) {
+      clearHost();
+      return;
+    }
+    savedRange = hit.range;
+    selectedText = hit.text;
+    host.hidden = false;
+    host.innerHTML = `
+      <div class="quick-edit-chip" role="toolbar">
+        <button type="button" class="quick-edit-chip-btn" data-qe="open">Regenerate</button>
+      </div>`;
+    const chip = host.querySelector(".quick-edit-chip");
+    positionNearSelection(chip, hit.range);
+    chip.querySelector("[data-qe=open]")?.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openQuickEdit();
+    });
+  }
+
+  function openQuickEdit() {
+    if (!selectedText || !savedRange) return;
+    open = true;
+    host.hidden = false;
+    const preview =
+      selectedText.length > 220 ? `${selectedText.slice(0, 220)}…` : selectedText;
+    host.innerHTML = `
+      <div class="quick-edit-panel" role="dialog" aria-label="Regenerate selection">
+        <div class="quick-edit-panel-head">
+          <strong>Regenerate selection</strong>
+          <button type="button" class="quick-edit-close" data-qe="close" aria-label="Close">×</button>
+        </div>
+        <pre class="quick-edit-preview">${escapeHtml(preview)}</pre>
+        <label class="quick-edit-label">
+          <span class="sr-only">Instruction</span>
+          <input type="text" class="quick-edit-input" placeholder="Edit selected text…" autocomplete="off" />
+        </label>
+        <div class="quick-edit-actions">
+          <button type="button" class="btn" data-qe="close">Cancel</button>
+          <button type="button" class="btn primary" data-qe="submit">Regenerate</button>
+        </div>
+        <p class="quick-edit-status" hidden></p>
+      </div>`;
+    const panel = host.querySelector(".quick-edit-panel");
+    positionNearSelection(panel, savedRange);
+    const input = host.querySelector(".quick-edit-input");
+    input?.focus();
+
+    host.querySelectorAll("[data-qe=close]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        clearHost();
+      });
+    });
+    host.querySelector("[data-qe=submit]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      submitQuickEdit();
+    });
+    input?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitQuickEdit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        clearHost();
+      }
+    });
+  }
+
+  async function submitQuickEdit() {
+    if (busy) return;
+    const input = host.querySelector(".quick-edit-input");
+    const status = host.querySelector(".quick-edit-status");
+    const instruction = String(input?.value || "").trim();
+    if (instruction.length < 2) {
+      toast("Add a short instruction for the rewrite", true);
+      input?.focus();
+      return;
+    }
+    if (!state.selectedId || !selectedText) return;
+
+    busy = true;
+    const submitBtn = host.querySelector("[data-qe=submit]");
+    if (submitBtn) submitBtn.disabled = true;
+    const started = Date.now();
+    let tick = null;
+    if (status) {
+      status.hidden = false;
+      status.textContent = "Rewriting selection…";
+      tick = setInterval(() => {
+        status.textContent = `Rewriting selection… ${Math.round((Date.now() - started) / 1000)}s`;
+      }, 400);
+    }
+
+    try {
+      const content = getEditorContent(root) || run.article?.content || "";
+      const result = await api(`/api/runs/${encodeURIComponent(state.selectedId)}/regenerate-selection`, {
+        method: "POST",
+        body: JSON.stringify({
+          selectedText,
+          instruction,
+          content,
+        }),
+      });
+      state.run = result;
+      // Update editor in place — avoid full tab remount latency.
+      const editor = root.querySelector("#draft-content-editor");
+      if (editor && result.article?.content) {
+        editor.innerHTML = markdownToEditorHtml(result.article.content);
+        refreshQualityPreview(root, result);
+      }
+      clearHost();
+      const secs = ((Date.now() - started) / 1000).toFixed(1);
+      toast(`Selection regenerated (${secs}s)`);
+      void loadRuns().catch(() => {});
+    } catch (e) {
+      if (status) status.textContent = e.message || "Regenerate failed";
+      toast(e.message || "Regenerate failed", true);
+      if (submitBtn) submitBtn.disabled = false;
+    } finally {
+      if (tick) clearInterval(tick);
+      busy = false;
+    }
+  }
+
+  editor.addEventListener("mouseup", () => {
+    requestAnimationFrame(showRegenChip);
+  });
+  editor.addEventListener("keyup", (e) => {
+    if (e.key === "Escape") clearHost();
+    else if (e.shiftKey || e.key.startsWith("Arrow")) requestAnimationFrame(showRegenChip);
+  });
+
+  document.addEventListener("mousedown", (e) => {
+    if (!host.contains(e.target) && e.target !== editor && !editor.contains(e.target)) {
+      if (!open) clearHost();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !host.hidden) clearHost();
+  });
 }
 
 function renderPublishPreview(run) {
@@ -1469,8 +1991,9 @@ function renderQualityTab(run) {
                 .join("")}
             </ul>
           </div>`
-        : `<p class="hint">Optional: click <strong>Quality score</strong> after generating to flag issues. You can still edit and approve here.</p>`
+        : ""
     }
+    <p class="hint">Tip: select any passage in the editor to open <strong>Regenerate</strong> (Quick Edit).</p>
     <div class="quality-single-layout">
       <div class="quality-editor doc-style-editor">
         <input id="draft-title" class="doc-title-input" placeholder="Document Title" value="${escapeHtml(a.title || "")}" />
@@ -1519,9 +2042,30 @@ function renderTab(run, tab) {
   if (tab === "article") {
     const a = run.article;
     if (!a) return `<p class="empty">No article yet. Run generate or Write blog from Runs.</p>`;
+    const sections = (a.content.match(/^##\s+(.+)$/gm) || []).map((h) => h.replace(/^##\s+/, ""));
     return `
       <h3>${escapeHtml(a.title)}</h3>
       <p style="color:var(--muted)">${escapeHtml(a.excerpt || "")}</p>
+      ${
+        run.thumbnailVariants?.length
+          ? `<div class="thumb-ab"><p class="hint">Thumbnail A/B</p>${run.thumbnailVariants
+              .map(
+                (v) =>
+                  `<label class="thumb-choice ${v.selected ? "selected" : ""}"><input type="radio" name="thumb" value="${escapeHtml(v.id)}" ${v.selected ? "checked" : ""}/> ${escapeHtml(v.label)}<br/><img src="${escapeHtml(v.url)}" alt=""/></label>`,
+              )
+              .join("")}</div>`
+          : ""
+      }
+      ${
+        sections.length
+          ? `<div class="section-regen"><p class="hint">Section regenerate</p>${sections
+              .map(
+                (h) =>
+                  `<button type="button" class="btn" data-regen-section="${escapeHtml(h)}">↻ ${escapeHtml(h)}</button>`,
+              )
+              .join(" ")}</div>`
+          : ""
+      }
       <pre class="pre">${escapeHtml(a.content)}</pre>
       <details style="margin-top:1rem">
         <summary>Edit article JSON</summary>
@@ -1530,6 +2074,78 @@ function renderTab(run, tab) {
           <button type="button" class="btn" id="save-article">Save article</button>
         </div>
       </details>`;
+  }
+  if (tab === "seo") {
+    const pack = run.seoPack;
+    if (!pack) return `<p class="empty">No SEO pack yet — accept a draft or run quality.</p>`;
+    return `<div class="seo-pack">
+      <p class="hint">Primary keyword: <strong>${escapeHtml(pack.primaryKeyword || "")}</strong></p>
+      <h4>Title variants</h4>
+      ${(pack.titles || []).map((t) => `<button type="button" class="btn" data-seo-title="${escapeHtml(t)}">${escapeHtml(t)}</button>`).join(" ")}
+      <h4>Meta descriptions</h4>
+      ${(pack.descriptions || []).map((t) => `<button type="button" class="btn" data-seo-desc="${escapeHtml(t)}">${escapeHtml(t)}</button>`).join(" ")}
+      <h4>Slug suggestions</h4>
+      ${(pack.slugSuggestions || []).map((t) => `<button type="button" class="btn" data-seo-slug="${escapeHtml(t)}">${escapeHtml(t)}</button>`).join(" ")}
+      <h4>Long-tail</h4>
+      <p>${(pack.longTailKeywords || []).map((k) => escapeHtml(k)).join(" · ")}</p>
+    </div>`;
+  }
+  if (tab === "facts") {
+    const cards = run.factCards || [];
+    const brief = run.competitorBrief;
+    const hasAnalysis = Boolean(run.analysis);
+    const hasSources = Boolean(run.sources?.length);
+    if (!hasSources && !hasAnalysis) {
+      return `<p class="empty">No research yet. Click <strong>Run to review</strong> or <strong>Research</strong> first.</p>`;
+    }
+    if (!cards.length && !brief) {
+      return `<p class="empty">Research finished, but no claims/arguments were extracted yet. Re-run <strong>Research</strong> or continue to outline.</p>
+        <p class="hint">Sources on this run: ${run.sources?.length || 0}. Analysis: ${hasAnalysis ? "yes" : "no"}.</p>`;
+    }
+    return `
+      ${brief ? `<div class="competitor-brief"><h3>Competitor angle brief</h3><p>${escapeHtml(brief.summary)}</p>
+        <h4>Angles to own</h4><ul>${(brief.anglesToOwn || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
+        <h4>Angles to avoid</h4><ul>${(brief.anglesToAvoid || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
+        <h4>Competing viewpoints</h4><ul>${(brief.competingViewpoints || []).map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>
+      </div>` : ""}
+      <h3>Fact cards ${cards.length ? `(${cards.length})` : ""}</h3>
+      ${
+        cards.length
+          ? cards
+              .map(
+                (c) => `<article class="fact-card ${c.grounded ? "ok" : "warn"}">
+          <strong>${escapeHtml(c.claim)}</strong>
+          <div class="meta">${escapeHtml(c.category)} · confidence ${Math.round((c.confidence || 0) * 100)}% · ${c.grounded ? "grounded" : "needs source"}</div>
+          <ul>${(c.sources || []).map((s) => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title)}</a></li>`).join("")}</ul>
+        </article>`,
+              )
+              .join("")
+          : `<p class="hint">No structured claims yet — competitor brief above still applies.</p>`
+      }`;
+  }
+  if (tab === "diff") {
+    if (!run.article) {
+      return `<p class="empty">No draft yet — Diff compares article versions after generate / edit / readability / Quick Edit.</p>`;
+    }
+    if (!run.previousArticle) {
+      return `<p class="empty">No previous version yet. Diff appears after you change the draft (Save, Readability pass, section regenerate, or Quick Edit).</p>`;
+    }
+    return `<div class="diff-panel">
+      <p class="hint">Comparing <strong>${escapeHtml(run.previousArticle.title || "previous")}</strong> → <strong>${escapeHtml(run.article.title || "current")}</strong></p>
+      <div id="diff-mount" class="diff-mount"><p class="hint">Loading diff…</p></div>
+    </div>`;
+  }
+  if (tab === "repurpose") {
+    const p = run.repurposePack;
+    if (!p) return `<p class="empty">No repurpose pack yet — run quality or distribute.</p>`;
+    return `<div class="repurpose-pack">
+      <h4>X / Twitter</h4><pre class="pre">${escapeHtml(p.tweet)}</pre>
+      <h4>LinkedIn</h4><pre class="pre">${escapeHtml(p.linkedInPost)}</pre>
+      <h4>Newsletter</h4><pre class="pre">${escapeHtml(p.newsletterBlurb)}</pre>
+      <h4>Thread</h4><pre class="pre">${escapeHtml((p.thread || []).join("\n\n"))}</pre>
+      <h4>YouTube short outline</h4><ul>${(p.youtubeShortOutline || []).map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>
+      <h4>Reddit</h4><pre class="pre">${escapeHtml(p.redditTitle + "\n\n" + p.redditBody)}</pre>
+    </div>`;
   }
   if (tab === "publish") {
     return renderPublishPreview(run);
@@ -1585,6 +2201,38 @@ $("#create-form")?.addEventListener("submit", (e) => {
   createRun(false);
 });
 $("#create-and-run")?.addEventListener("click", () => createRun(true));
+$("#batch-run")?.addEventListener("click", async () => {
+  if (state.busy) return;
+  const raw = String($("#batch-topics")?.value || "");
+  const topics = raw
+    .split("\n")
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3)
+    .slice(0, 8);
+  if (!topics.length) {
+    toast("Add at least one topic (one per line)", true);
+    return;
+  }
+  setBusy(true);
+  try {
+    const data = await api("/api/runs/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        topics,
+        templateId: $("#template-select")?.value || null,
+        stylePresetId: $("#style-preset-select")?.value || null,
+        generateImages: wantsImages(),
+      }),
+    });
+    toast(`Batch created ${data.runs?.length || 0} runs through outline`);
+    await loadRuns();
+    if (data.runs?.[0]?.id) await selectRun(data.runs[0].id);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
 async function writeBlogFromRun() {
   if (!state.selectedId) {
     toast("Select a run in the list first", true);
@@ -1915,12 +2563,155 @@ $("#template-form")?.querySelector('input[type="file"]')?.addEventListener("chan
   }
 });
 
+// ── Autopilot UI ──
+
+async function loadAutopilotStatus() {
+  try {
+    const res = await fetch("/api/autopilot/status");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderAutopilotStatus(data);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function loadAutopilotHistory() {
+  try {
+    const res = await fetch("/api/autopilot/history?limit=10");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderAutopilotHistory(data.cycles || []);
+  } catch {
+    /* ignore */
+  }
+}
+
+function renderAutopilotStatus(data) {
+  const el = (id) => document.getElementById(id);
+
+  // Status badge
+  const enabledEl = el("ap-enabled");
+  if (enabledEl) {
+    const isOn = data.enabled;
+    enabledEl.innerHTML = `<span class="ap-badge ${isOn ? 'enabled' : 'disabled'}">${isOn ? 'Enabled' : 'Disabled'}</span>`;
+    if (data.cycleBusy) {
+      enabledEl.innerHTML += ` <span class="ap-badge running">Cycle running…</span>`;
+    }
+  }
+
+  // Next run
+  const nextEl = el("ap-next");
+  if (nextEl) {
+    nextEl.textContent = data.nextRun
+      ? new Date(data.nextRun).toLocaleString()
+      : data.enabled ? "Computing…" : "Not scheduled";
+  }
+
+  // Config fields
+  const cfg = data.config || {};
+  const setEl = (id, val) => { const e = el(id); if (e) e.textContent = val; };
+  setEl("ap-platforms", (cfg.platforms || []).join(", ") || "—");
+  setEl("ap-posts", String(cfg.postsPerPlatform ?? "—"));
+  setEl("ap-skip-review", cfg.skipReview ? "Yes" : "No");
+  setEl("ap-min-quality", String(cfg.minQualityScore ?? "—"));
+  setEl("ap-dedup", `${cfg.deduplicationDays ?? 30} days`);
+  setEl("ap-dry-run", cfg.dryRun ? "Yes (no publish)" : "No");
+
+  // Toggle button state
+  const toggleBtn = el("autopilot-toggle");
+  if (toggleBtn) {
+    if (data.enabled) {
+      toggleBtn.textContent = "Disable";
+      toggleBtn.classList.add("ap-toggle-on");
+    } else {
+      toggleBtn.textContent = "Enable";
+      toggleBtn.classList.remove("ap-toggle-on");
+    }
+  }
+}
+
+function renderAutopilotHistory(cycles) {
+  const tbody = document.getElementById("autopilot-history-body");
+  if (!tbody) return;
+
+  if (!cycles.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="empty-row">No cycles recorded yet.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = cycles.map((c) => {
+    const started = new Date(c.startedAt).toLocaleString();
+    const statusClass = c.status === "completed" ? "completed" : c.status === "failed" ? "failed" : "running";
+    return `<tr>
+      <td title="${c.id}">${c.id.slice(0, 12)}…</td>
+      <td><span class="ap-badge ${statusClass}">${c.status}</span></td>
+      <td>${c.topicsSelected}</td>
+      <td>${c.runsCreated ? c.runsCreated.length : 0}</td>
+      <td>${c.runsPublished}</td>
+      <td>${c.runsNeedingReview}</td>
+      <td>${c.errors ? c.errors.length : 0}</td>
+      <td>${started}</td>
+    </tr>`;
+  }).join("");
+}
+
+// Toggle autopilot
+document.getElementById("autopilot-toggle")?.addEventListener("click", async () => {
+  const toggleBtn = document.getElementById("autopilot-toggle");
+  const isEnabled = toggleBtn?.classList.contains("ap-toggle-on");
+  try {
+    const res = await fetch("/api/autopilot/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !isEnabled }),
+    });
+    if (!res.ok) throw new Error("Toggle failed");
+    const data = await res.json();
+    renderAutopilotStatus(data);
+    toast(data.enabled ? "Autopilot enabled" : "Autopilot disabled");
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// Trigger autopilot now
+document.getElementById("autopilot-trigger")?.addEventListener("click", async () => {
+  const btn = document.getElementById("autopilot-trigger");
+  if (!btn) return;
+  const prev = btn.textContent;
+  btn.textContent = "Running…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/autopilot/trigger", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Trigger failed");
+    toast(`Autopilot cycle complete: ${data.runsCreated?.length ?? 0} runs created, ${data.runsPublished ?? 0} published`);
+    await loadAutopilotStatus();
+    await loadAutopilotHistory();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.textContent = prev;
+    btn.disabled = false;
+  }
+});
+
 async function bootApp() {
   const ok = await ensureAuth();
   if (!ok) return;
-  loadHealth();
+  try {
+    state.generateImages = localStorage.getItem("pipeline.generateImages") === "1";
+  } catch {
+    /* ignore */
+  }
+  await loadHealth();
   const boot = [loadLlm(), loadTemplates()];
-  if (isSettingsPage()) boot.push(loadLogs(), loadUsers());
+  if (isSettingsPage()) boot.push(loadLogs(), loadUsers(), loadAutopilotStatus(), loadAutopilotHistory());
   else boot.push(loadRuns(), loadDigest());
   await Promise.all(boot);
 }

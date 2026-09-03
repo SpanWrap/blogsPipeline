@@ -142,28 +142,37 @@ export async function regenerateSelection(input: {
     throw new Error("Could not locate the selected text in the article. Select again and retry.");
   }
 
-  const selectedSources = pickSourcesForPrompt(input.sources);
-  const prompt = `Rewrite the SELECTED PASSAGE only, following the instruction.
-Return ONLY the replacement text (Markdown allowed). No preamble, no quotes, no code fences.
+  const passage = content.slice(span.start, span.end);
+  const before = content.slice(Math.max(0, span.start - 160), span.start).trim();
+  const after = content.slice(span.end, Math.min(content.length, span.end + 160)).trim();
+  // Keep the prompt tiny — large source dumps dominate Quick Edit latency.
+  const prompt = `Rewrite ONLY the selected passage per the instruction.
+Return ONLY the replacement text. No preamble, quotes, or code fences.
+Match the article's voice. Keep Markdown if present.
 
-Topic: ${compactJson(compactBrief(input.brief))}
-Sources (ground claims here): ${compactJson(compactSourcesForGeneration(selectedSources))}
-
+Topic: ${input.brief.topic}
 Instruction: ${instruction}
 
-Selected passage:
+Selected:
 """
-${content.slice(span.start, span.end)}
+${passage}
 """
 
-Surrounding context (do not rewrite this; use only for continuity):
-"""
-${content.slice(Math.max(0, span.start - 280), span.start)}
-⟦SELECTION⟧
-${content.slice(span.end, Math.min(content.length, span.end + 280))}
-"""`;
+Context before: ${before || "(start)"}
+Context after: ${after || "(end)"}`;
 
-  const rewritten = (await input.llm.generateText(prompt)).trim();
+  // Cap tokens ~2× selection length so the model stops quickly.
+  const approxOut = Math.ceil(passage.length / 3);
+  const maxTokens = Math.min(1200, Math.max(220, approxOut * 2 + 80));
+
+  const rewritten = (
+    await input.llm.generateText(prompt, {
+      system: "You are a fast copy editor. Rewrite the selection only. Be concise.",
+      maxTokens,
+      temperature: 0.35,
+      timeoutMs: 45_000,
+    })
+  ).trim();
   const replacement = rewritten
     .replace(/^```(?:markdown|md)?\s*/i, "")
     .replace(/```$/i, "")

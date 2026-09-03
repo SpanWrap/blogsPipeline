@@ -243,6 +243,33 @@ export const appConfig = {
     maxAttempts: envInt("RETRY_MAX_ATTEMPTS", 3),
     baseDelayMs: envInt("RETRY_BASE_DELAY_MS", 500),
   },
+  autopilot: {
+    /** Master switch — set AUTOPILOT_ENABLED=true + configure API keys. */
+    enabled: envBool("AUTOPILOT_ENABLED", false),
+    /** 5-field cron expression. Default: every Monday at 08:00 UTC. */
+    cronExpression: env("AUTOPILOT_CRON", "0 8 * * 1")!,
+    /** Number of unique posts to generate per platform per cycle. */
+    postsPerPlatform: envInt("AUTOPILOT_POSTS_PER_PLATFORM", 2),
+    /** Comma-separated platform list. */
+    targetPlatforms: (
+      env("AUTOPILOT_PLATFORMS", "spanwrap,medium,devto,hashnode,wordpress,substack") || "spanwrap"
+    )
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    /** When true, auto-approve + publish posts that pass quality threshold. */
+    skipReview: envBool("AUTOPILOT_SKIP_REVIEW", false),
+    /** Minimum quality score to auto-approve (only used when skipReview is true). */
+    minQualityScore: envInt("AUTOPILOT_MIN_QUALITY_SCORE", 75),
+    /** Prevent re-covering topics published within this window. */
+    topicDeduplicationDays: envInt("AUTOPILOT_DEDUP_DAYS", 30),
+    /** Generate hero/section images during autopilot cycles. */
+    generateImages: envBool("AUTOPILOT_GENERATE_IMAGES", true),
+    /** Pin a specific template for autopilot runs. */
+    templateId: env("AUTOPILOT_TEMPLATE_ID"),
+    /** Generate drafts but skip publishing (testing). */
+    dryRun: envBool("AUTOPILOT_DRY_RUN", false),
+  },
   auth: {
     /** Optional bootstrap account created on first boot if no users exist. */
     username: env("AUTH_USERNAME"),

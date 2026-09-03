@@ -193,6 +193,11 @@ var init_env = __esm({
         dataDir: env("ANALYTICS_DATA_DIR", ".data/analytics"),
         updateIntervalMinutes: envInt("ANALYTICS_UPDATE_INTERVAL_MINUTES", 360)
       },
+      quality: {
+        /** Auto-approve into REVIEW_REQUIRED skip? When score >= threshold and no errors, auto-accept stream drafts. */
+        autoAcceptMinScore: envInt("AUTO_ACCEPT_MIN_SCORE", 80),
+        autoAcceptEnabled: envBool("AUTO_ACCEPT_ENABLED", false)
+      },
       publishing: {
         medium: {
           token: env("MEDIUM_TOKEN"),
@@ -219,6 +224,28 @@ var init_env = __esm({
       retry: {
         maxAttempts: envInt("RETRY_MAX_ATTEMPTS", 3),
         baseDelayMs: envInt("RETRY_BASE_DELAY_MS", 500)
+      },
+      autopilot: {
+        /** Master switch — set AUTOPILOT_ENABLED=true + configure API keys. */
+        enabled: envBool("AUTOPILOT_ENABLED", false),
+        /** 5-field cron expression. Default: every Monday at 08:00 UTC. */
+        cronExpression: env("AUTOPILOT_CRON", "0 8 * * 1"),
+        /** Number of unique posts to generate per platform per cycle. */
+        postsPerPlatform: envInt("AUTOPILOT_POSTS_PER_PLATFORM", 2),
+        /** Comma-separated platform list. */
+        targetPlatforms: (env("AUTOPILOT_PLATFORMS", "spanwrap,medium,devto,hashnode,wordpress,substack") || "spanwrap").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
+        /** When true, auto-approve + publish posts that pass quality threshold. */
+        skipReview: envBool("AUTOPILOT_SKIP_REVIEW", false),
+        /** Minimum quality score to auto-approve (only used when skipReview is true). */
+        minQualityScore: envInt("AUTOPILOT_MIN_QUALITY_SCORE", 75),
+        /** Prevent re-covering topics published within this window. */
+        topicDeduplicationDays: envInt("AUTOPILOT_DEDUP_DAYS", 30),
+        /** Generate hero/section images during autopilot cycles. */
+        generateImages: envBool("AUTOPILOT_GENERATE_IMAGES", true),
+        /** Pin a specific template for autopilot runs. */
+        templateId: env("AUTOPILOT_TEMPLATE_ID"),
+        /** Generate drafts but skip publishing (testing). */
+        dryRun: envBool("AUTOPILOT_DRY_RUN", false)
       },
       auth: {
         /** Optional bootstrap account created on first boot if no users exist. */
@@ -308,6 +335,23 @@ var init_topics = __esm({
 
 // src/models/index.ts
 import { z as z2 } from "zod";
+function coerceClaimCategory(value) {
+  if (typeof value !== "string") return "fact";
+  const v = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (CLAIM_CATEGORIES.includes(v)) {
+    return v;
+  }
+  if (v.includes("stat")) return "statistic";
+  if (v.includes("argu")) return "argument";
+  if (v.includes("example") || v.includes("case_study") || v.includes("anecdote")) return "example";
+  if (v.includes("view") || v.includes("opinion") || v.includes("perspective")) return "viewpoint";
+  if (v.includes("term") || v.includes("defin") || v.includes("glossary")) return "terminology";
+  if (v.includes("quote") || v.includes("citation")) return "quote";
+  if (v.includes("verif") || v.includes("uncertain") || v.includes("unconfirmed") || v.includes("need")) {
+    return "verification_needed";
+  }
+  return "fact";
+}
 function parsePublishTargets(input) {
   const allowed = new Set(PUBLISH_TARGET_VALUES);
   const unique = [];
@@ -322,7 +366,7 @@ function parsePublishTargets(input) {
   }
   return unique;
 }
-var ContentBriefSchema, ArticleTemplateSchema, SourceSchema, ClaimSchema, ResearchAnalysisSchema, OutlineSectionSchema, BlogOutlineSchema, BlogSourceRefSchema, GeneratedBlogSchema, QualityIssueSchema, QualityResultSchema, PUBLISH_TARGET_VALUES, PublishTargetSchema, PublishResultSchema, TargetPublishResultSchema, PipelineStatusSchema, StageRecordSchema, PipelineRunSchema;
+var ContentBriefSchema, ArticleTemplateSchema, SourceSchema, CLAIM_CATEGORIES, ClaimSchema, ResearchAnalysisSchema, OutlineSectionSchema, BlogOutlineSchema, BlogSourceRefSchema, GeneratedBlogSchema, QualityIssueSchema, QualityResultSchema, PUBLISH_TARGET_VALUES, PublishTargetSchema, PublishResultSchema, TargetPublishResultSchema, PipelineStatusSchema, StageRecordSchema, PipelineRunSchema;
 var init_models = __esm({
   "src/models/index.ts"() {
     "use strict";
@@ -333,7 +377,11 @@ var init_models = __esm({
       tone: z2.string().min(1).default("clear and professional"),
       contentType: z2.string().min(1).default("educational"),
       keywords: z2.array(z2.string()).default([]),
-      referenceUrls: z2.array(z2.string().url()).default([])
+      referenceUrls: z2.array(z2.string().url()).default([]),
+      /** Named voice preset id (founder, tutorial, opinion, neutral). */
+      stylePresetId: z2.string().nullable().optional().default(null),
+      /** Optional competitor URLs to bias the angle brief. */
+      competitorUrls: z2.array(z2.string().url()).optional().default([])
     });
     ArticleTemplateSchema = z2.object({
       id: z2.string(),
@@ -354,20 +402,21 @@ var init_models = __esm({
       relevanceScore: z2.number().min(0).max(1).default(0),
       fetchError: z2.string().optional()
     });
+    CLAIM_CATEGORIES = [
+      "fact",
+      "statistic",
+      "argument",
+      "example",
+      "viewpoint",
+      "terminology",
+      "quote",
+      "verification_needed"
+    ];
     ClaimSchema = z2.object({
       claim: z2.string().min(1),
       sourceIds: z2.array(z2.string()).min(1),
       confidence: z2.number().min(0).max(1).default(0.5),
-      category: z2.enum([
-        "fact",
-        "statistic",
-        "argument",
-        "example",
-        "viewpoint",
-        "terminology",
-        "quote",
-        "verification_needed"
-      ]).default("fact")
+      category: z2.preprocess(coerceClaimCategory, z2.enum(CLAIM_CATEGORIES)).default("fact")
     });
     ResearchAnalysisSchema = z2.object({
       summary: z2.string(),
@@ -497,6 +546,52 @@ var init_models = __esm({
       errorCode: z2.string().nullable().default(null),
       /** True when the error is transient and a retry has a reasonable chance of succeeding. */
       retryable: z2.boolean().default(false),
+      /** Style preset applied for generation. */
+      stylePresetId: z2.string().nullable().default(null),
+      /** Previous article snapshot for diff review. */
+      previousArticle: GeneratedBlogSchema.nullable().default(null),
+      /** SEO suggestion pack attached after draft/quality. */
+      seoPack: z2.object({
+        primaryKeyword: z2.string().optional(),
+        longTailKeywords: z2.array(z2.string()).default([]),
+        titles: z2.array(z2.string()).default([]),
+        descriptions: z2.array(z2.string()).default([]),
+        slugSuggestions: z2.array(z2.string()).default([])
+      }).nullable().default(null),
+      /** Hero/thumbnail A/B variants. */
+      thumbnailVariants: z2.array(
+        z2.object({
+          id: z2.string(),
+          url: z2.string(),
+          label: z2.string(),
+          selected: z2.boolean().default(false)
+        })
+      ).default([]),
+      /** Social + newsletter repurpose pack. */
+      repurposePack: z2.object({
+        tweet: z2.string(),
+        linkedInPost: z2.string(),
+        redditTitle: z2.string(),
+        redditBody: z2.string(),
+        newsletterBlurb: z2.string(),
+        youtubeShortOutline: z2.array(z2.string()).default([]),
+        thread: z2.array(z2.string()).default([])
+      }).nullable().default(null),
+      /** Set when quality auto-accepted the draft. */
+      autoAccepted: z2.boolean().default(false),
+      /** Lightweight revision notes for diff/history UI. */
+      articleHistory: z2.array(
+        z2.object({
+          at: z2.string(),
+          note: z2.string()
+        })
+      ).default([]),
+      /** Tracks runs created by the autopilot scheduler. Null for manually created runs. */
+      autopilotSource: z2.object({
+        cycleId: z2.string(),
+        targetPlatform: z2.string(),
+        topicRank: z2.number()
+      }).nullable().default(null),
       idempotencyKey: z2.string()
     });
   }
@@ -560,8 +655,38 @@ var init_mock = __esm({
     MockLLMProvider = class {
       name = "mock";
       model = "mock-1";
-      async generateText(prompt) {
+      async generateText(prompt, _options) {
         return `Mock response for: ${prompt.slice(0, 80)}`;
+      }
+      async streamText(prompt, onDelta, _options) {
+        const topic = extractField(prompt, "topic") ?? "AI agents";
+        const full = [
+          `# ${topic}: a practical guide`,
+          "",
+          "Customer support teams need faster answers without losing trust.",
+          "",
+          "## Why this matters now",
+          "",
+          "Support load grows with product complexity. Automation helps when scope is clear.",
+          "",
+          "## What the research shows",
+          "",
+          "Grounded pilots with escalation paths outperform unbounded agent rollouts.",
+          "",
+          "## How to apply it",
+          "",
+          "Start with high-volume intents, measure deflection, and keep humans for edge cases.",
+          ""
+        ].join("\n");
+        const parts = full.match(/.{1,24}/gs) ?? [full];
+        let out = "";
+        for (const part of parts) {
+          if (_options?.signal?.aborted) throw new Error("Stream aborted");
+          out += part;
+          await onDelta(part);
+          await new Promise((r) => setTimeout(r, 8));
+        }
+        return out;
       }
       async generateStructured(prompt, schema) {
         const lower = prompt.toLowerCase();
@@ -1280,16 +1405,17 @@ var init_openai_compatible = __esm({
           async () => {
             const controller = new AbortController();
             const reasoningModel = /reasoner|r1/i.test(this.model);
-            const timeoutMs = reasoningModel ? Math.max(appConfig.llm.requestTimeoutMs, 24e4) : appConfig.llm.requestTimeoutMs;
+            const timeoutMs = options?.timeoutMs ?? (reasoningModel ? Math.max(appConfig.llm.requestTimeoutMs, 24e4) : appConfig.llm.requestTimeoutMs);
             const timer = setTimeout(() => controller.abort(), timeoutMs);
             try {
+              const maxTokens = options?.maxTokens ?? (reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192);
               const body = {
                 model: this.model,
-                max_tokens: reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192,
+                max_tokens: maxTokens,
                 messages
               };
               if (!reasoningModel) {
-                body.temperature = 0.4;
+                body.temperature = options?.temperature ?? 0.4;
               }
               if (options?.json && this.jsonMode && !reasoningModel) {
                 body.response_format = { type: "json_object" };
@@ -1326,7 +1452,7 @@ var init_openai_compatible = __esm({
             }
           },
           {
-            maxAttempts: appConfig.retry.maxAttempts,
+            maxAttempts: Math.min(2, appConfig.retry.maxAttempts),
             baseDelayMs: appConfig.retry.baseDelayMs,
             shouldRetry: (error) => {
               const message = error instanceof Error ? error.message : String(error);
@@ -1345,8 +1471,89 @@ var init_openai_compatible = __esm({
           }
         );
       }
-      async generateText(prompt) {
-        return this.chat([{ role: "user", content: prompt }]);
+      async generateText(prompt, options) {
+        const messages = [
+          ...options?.system ? [{ role: "system", content: options.system }] : [],
+          { role: "user", content: prompt }
+        ];
+        return this.chat(messages, options);
+      }
+      async streamText(prompt, onDelta, options) {
+        const reasoningModel = /reasoner|r1/i.test(this.model);
+        const timeoutMs = reasoningModel ? Math.max(appConfig.llm.requestTimeoutMs, 24e4) : appConfig.llm.requestTimeoutMs;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const onAbort = () => controller.abort();
+        options?.signal?.addEventListener("abort", onAbort, { once: true });
+        try {
+          const messages = [
+            ...options?.system ? [{ role: "system", content: options.system }] : [],
+            { role: "user", content: prompt }
+          ];
+          const body = {
+            model: this.model,
+            stream: true,
+            max_tokens: reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192,
+            messages
+          };
+          if (!reasoningModel) body.temperature = 0.4;
+          const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+            method: "POST",
+            signal: controller.signal,
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${sanitizeHeaderValue(this.apiKey)}`,
+              ...this.extraHeaders
+            },
+            body: JSON.stringify(body)
+          });
+          if (!response.ok) {
+            const errBody = await response.text();
+            const error = new Error(formatLlmHttpError(response.status, errBody, this.model));
+            error.status = response.status;
+            throw error;
+          }
+          if (!response.body) throw new Error("LLM stream returned no body");
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let full = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const rawLine of lines) {
+              const line = rawLine.trim();
+              if (!line.startsWith("data:")) continue;
+              const data = line.slice(5).trim();
+              if (!data || data === "[DONE]") continue;
+              try {
+                const parsed = JSON.parse(data);
+                const delta = parsed.choices?.[0]?.delta?.content;
+                if (delta) {
+                  full += delta;
+                  await onDelta(delta);
+                }
+              } catch {
+              }
+            }
+          }
+          if (!full.trim()) throw new Error("Empty LLM stream");
+          return full;
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") {
+            if (options?.signal?.aborted) throw new Error("Stream aborted");
+            throw new Error(
+              `LLM request timed out after ${Math.round(timeoutMs / 1e3)}s (${this.name}/${this.model}). Use deepseek-chat for drafting, or raise LLM_REQUEST_TIMEOUT_MS.`
+            );
+          }
+          throw error;
+        } finally {
+          clearTimeout(timer);
+          options?.signal?.removeEventListener("abort", onAbort);
+        }
       }
       async generateStructured(prompt, schema, options) {
         const system = options?.system ?? "You are a careful research assistant. Respond with valid JSON only matching the requested schema. Never invent source IDs or URLs.";
@@ -2450,6 +2657,14 @@ var init_mongo_store = __esm({
 });
 
 // src/services/storage.ts
+var storage_exports = {};
+__export(storage_exports, {
+  FileRunStore: () => FileRunStore,
+  MongoRunStore: () => MongoRunStore,
+  createRunStore: () => createRunStore,
+  getRunStore: () => getRunStore,
+  runStore: () => runStore
+});
 function createRunStore(backend = appConfig.storage.backend) {
   if (backend === "mongodb") {
     const uri = appConfig.storage.mongoUri;
@@ -2472,7 +2687,7 @@ function getRunStore() {
   }
   return defaultStore;
 }
-var defaultStore;
+var defaultStore, runStore;
 var init_storage = __esm({
   "src/services/storage.ts"() {
     "use strict";
@@ -2482,6 +2697,13 @@ var init_storage = __esm({
     init_file_store();
     init_mongo_store();
     defaultStore = null;
+    runStore = {
+      save: (run) => getRunStore().save(run),
+      get: (id) => getRunStore().get(id),
+      require: (id) => getRunStore().require(id),
+      delete: (id) => getRunStore().delete(id),
+      list: () => getRunStore().list()
+    };
   }
 });
 
@@ -2722,7 +2944,7 @@ var init_mock3 = __esm({
     MockResearchProvider = class {
       name = "mock-research";
       async discover(brief) {
-        const keyword = brief.keywords[0] ?? brief.topic;
+        const keyword = brief.keywords?.[0] ?? brief.topic;
         const refs = (brief.referenceUrls ?? []).map((url, i) => ({
           url,
           title: `Reference ${i + 1}`,
@@ -2734,7 +2956,7 @@ var init_mock3 = __esm({
           {
             url: "https://example.com/ai-agents-support-foundations",
             title: `${keyword}: foundations`,
-            snippet: `Overview of ${brief.topic} for ${brief.targetAudience}.`,
+            snippet: `Overview of ${brief.topic} for ${brief.targetAudience ?? "general readers"}.`,
             relevanceScore: 0.9
           },
           {
@@ -2818,7 +3040,7 @@ var init_web_search = __esm({
       apiKey;
       name = "serper";
       async discover(brief) {
-        const query = [brief.topic, ...brief.keywords].filter(Boolean).join(" ");
+        const query = [brief.topic, ...brief.keywords ?? []].filter(Boolean).join(" ");
         const response = await fetch("https://google.serper.dev/search", {
           method: "POST",
           headers: {
@@ -2849,7 +3071,7 @@ var init_web_search = __esm({
       apiKey;
       name = "tavily";
       async discover(brief) {
-        const query = [brief.topic, ...brief.keywords].filter(Boolean).join(" ");
+        const query = [brief.topic, ...brief.keywords ?? []].filter(Boolean).join(" ");
         const response = await fetch("https://api.tavily.com/search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3116,7 +3338,8 @@ function dedupeDiscoveries(items) {
   }
   return out;
 }
-async function researchStage(brief, options = {}) {
+async function researchStage(briefInput, options = {}) {
+  const brief = ContentBriefSchema.parse(briefInput);
   const primary = options.researchProvider ?? createResearchProvider();
   const direct = new DirectURLProvider();
   const discovered = dedupeDiscoveries([
@@ -3200,6 +3423,7 @@ var init_research2 = __esm({
   "src/pipeline/stages/research.ts"() {
     "use strict";
     init_config();
+    init_models();
     init_research();
     init_extraction();
     init_logger();
@@ -3265,10 +3489,10 @@ function pickSourcesForPrompt(sources, limit = getPromptBudget().maxSources) {
 function compactBrief(brief) {
   return {
     topic: truncateForPrompt(brief.topic, 200),
-    audience: truncateForPrompt(brief.targetAudience, 80),
-    tone: truncateForPrompt(brief.tone, 60),
-    type: truncateForPrompt(brief.contentType, 40),
-    keywords: brief.keywords.slice(0, 8).map((k) => truncateForPrompt(k, 40))
+    audience: truncateForPrompt(brief.targetAudience ?? "general readers", 80),
+    tone: truncateForPrompt(brief.tone ?? "clear and professional", 60),
+    type: truncateForPrompt(brief.contentType ?? "educational", 40),
+    keywords: (brief.keywords ?? []).slice(0, 8).map((k) => truncateForPrompt(k, 40))
   };
 }
 function compactSourcesForAnalysis(sources, budget = getPromptBudget()) {
@@ -3353,8 +3577,9 @@ async function analysisStage(brief, sources, llm) {
   const known = new Set(payload.map((s) => String(s.id)));
   const claims = analysis.claims.map((c) => ({
     ...c,
+    // Keep claims even when unsourced so Fact cards can surface verification gaps.
     sourceIds: c.sourceIds.filter((id) => known.has(id))
-  })).filter((c) => c.sourceIds.length > 0);
+  }));
   return ResearchAnalysisSchema.parse({
     ...analysis,
     claims
@@ -4429,6 +4654,96 @@ var init_images3 = __esm({
   }
 });
 
+// src/pipeline/stages/stream-draft.ts
+function buildStreamDraftPrompt(input) {
+  const templateBlock = input.templateGuidance ? `
+Template guidance:
+${input.templateGuidance}
+` : "\nNo template. Use intro, body from outline, conclusion.\n";
+  return `Write an original blog article in GitHub-flavored Markdown.
+
+Brief: ${input.briefJson}
+Outline: ${input.outlineJson}
+Analysis: ${input.analysisJson}
+Sources: ${input.sourcesJson}
+${templateBlock}
+Rules:
+- Start with a single H1 title (# Title)
+- Use H2/H3 for sections from the outline
+- Ground claims in the provided sources only; no invented stats
+- Clear, scannable prose; no filler
+- Do not wrap the whole article in a code fence
+- Do not output JSON
+
+Return Markdown only.`;
+}
+function markdownDraftToArticle(markdown, brief, sources) {
+  const text = markdown.replace(/\r\n/g, "\n").trim();
+  if (!text) throw new Error("Empty draft \u2014 nothing to accept");
+  const titleMatch = text.match(/^#\s+(.+?)\s*$/m);
+  const title = (titleMatch?.[1] || brief.topic).trim();
+  const withoutTitle = titleMatch ? text.replace(titleMatch[0], "").trim() : text;
+  const firstPara = withoutTitle.split(/\n\n+/).map((p) => p.replace(/^#+\s+/, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").trim()).find((p) => p.length > 40) || withoutTitle.slice(0, 180);
+  const excerpt = firstPara.slice(0, 220).replace(/\s+/g, " ").trim();
+  const listed = sources.slice(0, 8).map((s) => ({
+    title: s.title,
+    url: s.url,
+    sourceName: s.sourceName
+  }));
+  const tags = Array.from(
+    /* @__PURE__ */ new Set([...(brief.keywords || []).slice(0, 5), ...title.toLowerCase().split(/\W+/).filter((w) => w.length > 4).slice(0, 3)])
+  ).slice(0, 8);
+  return GeneratedBlogSchema.parse({
+    title,
+    subtitle: "",
+    slug: toSlug(title),
+    excerpt: excerpt || `Overview of ${brief.topic}`,
+    content: text,
+    tags,
+    keywords: brief.keywords?.length ? brief.keywords : tags,
+    seoTitle: title.slice(0, 60),
+    seoDescription: (excerpt || title).slice(0, 160),
+    sources: listed,
+    sourceMap: [],
+    featuredImage: resolveFeaturedImage({
+      featuredImage: null,
+      content: text,
+      sourceUrls: listed.map((s) => s.url)
+    })
+  });
+}
+async function streamDraftStage(brief, sources, analysis, outline, llm, onDelta, templateGuidance, signal) {
+  if (!llm.streamText) {
+    throw new Error("Current LLM provider does not support streaming");
+  }
+  const selected = pickSourcesForPrompt(sources);
+  const prompt = buildStreamDraftPrompt({
+    briefJson: compactJson(compactBrief(brief)),
+    outlineJson: compactJson(compactOutline(outline)),
+    analysisJson: compactJson(compactAnalysis(analysis)),
+    sourcesJson: compactJson(compactSourcesForGeneration(selected)),
+    templateGuidance: templateGuidance?.trim() || null
+  });
+  logger.info("Stream draft prompt budget", {
+    sources: selected.length,
+    approxTokens: estimateTokens(prompt)
+  });
+  return llm.streamText(prompt, onDelta, {
+    system: "You are an expert tech blog writer. Stream a complete Markdown article. Never invent sources or statistics.",
+    signal
+  });
+}
+var init_stream_draft = __esm({
+  "src/pipeline/stages/stream-draft.ts"() {
+    "use strict";
+    init_models();
+    init_prompt_budget();
+    init_slug();
+    init_images();
+    init_logger();
+  }
+});
+
 // src/pipeline/stages/index.ts
 var init_stages = __esm({
   "src/pipeline/stages/index.ts"() {
@@ -4440,6 +4755,7 @@ var init_stages = __esm({
     init_quality();
     init_publishing2();
     init_images3();
+    init_stream_draft();
   }
 });
 
@@ -4624,6 +4940,40 @@ var init_affiliate_links = __esm({
       { name: "Railway", url: "https://railway.app" },
       { name: "Render", url: "https://render.com" }
     ];
+  }
+});
+
+// src/services/affiliate-relevance.ts
+function scoreMapping(content, topic, mapping) {
+  const hay = `${content}
+${topic}`.toLowerCase();
+  const names = [mapping.name, ...mapping.aliases ?? []];
+  let hits = 0;
+  for (const name of names) {
+    const re = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
+    hits += (hay.match(re) ?? []).length;
+  }
+  if (hits === 0) return 0;
+  return Math.min(1, 0.35 + hits * 0.2);
+}
+function injectRelevantAffiliateLinks(content, topic, config, minRelevance = 0.35) {
+  const cfg = config ?? loadAffiliateConfig();
+  const scored = cfg.links.map((link) => ({ ...link, relevance: scoreMapping(content, topic, link) })).filter((l) => l.relevance >= minRelevance).sort((a, b) => b.relevance - a.relevance);
+  const filtered = {
+    ...cfg,
+    links: scored,
+    maxTotalLinks: Math.min(cfg.maxTotalLinks ?? 6, 6)
+  };
+  const result = injectAffiliateLinks(content, filtered);
+  return {
+    ...result,
+    scored
+  };
+}
+var init_affiliate_relevance = __esm({
+  "src/services/affiliate-relevance.ts"() {
+    "use strict";
+    init_affiliate_links();
   }
 });
 
@@ -4832,6 +5182,626 @@ var init_social_promotion = __esm({
   }
 });
 
+// src/services/style-presets.ts
+var style_presets_exports = {};
+__export(style_presets_exports, {
+  STYLE_PRESETS: () => STYLE_PRESETS,
+  StylePresetSchema: () => StylePresetSchema,
+  applyStyleLockToBrief: () => applyStyleLockToBrief,
+  getStylePreset: () => getStylePreset,
+  stripBannedPhrases: () => stripBannedPhrases
+});
+import { z as z4 } from "zod";
+function getStylePreset(id) {
+  if (!id) return null;
+  return STYLE_PRESETS.find((p) => p.id === id) ?? null;
+}
+function applyStyleLockToBrief(brief, presetId) {
+  const preset = getStylePreset(presetId);
+  if (!preset) return { tone: brief.tone, styleGuidance: null };
+  return {
+    tone: preset.tone,
+    styleGuidance: [
+      `Style preset: ${preset.label}`,
+      preset.voiceNotes,
+      preset.bannedPhrases.length ? `Avoid these phrases: ${preset.bannedPhrases.map((p) => `"${p}"`).join(", ")}` : ""
+    ].filter(Boolean).join("\n")
+  };
+}
+function stripBannedPhrases(content, presetId) {
+  const preset = getStylePreset(presetId);
+  if (!preset?.bannedPhrases.length) return content;
+  let next = content;
+  for (const phrase of preset.bannedPhrases) {
+    const re = new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    next = next.replace(re, "");
+  }
+  return next.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n");
+}
+var StylePresetSchema, STYLE_PRESETS;
+var init_style_presets = __esm({
+  "src/services/style-presets.ts"() {
+    "use strict";
+    StylePresetSchema = z4.object({
+      id: z4.string(),
+      label: z4.string(),
+      tone: z4.string(),
+      voiceNotes: z4.string(),
+      bannedPhrases: z4.array(z4.string()).default([])
+    });
+    STYLE_PRESETS = [
+      {
+        id: "founder",
+        label: "Founder / operator",
+        tone: "direct, practical, first-person plural when useful",
+        voiceNotes: "Lead with decisions and trade-offs. Short paragraphs. Concrete examples over theory.",
+        bannedPhrases: ["in today's fast-paced world", "leverage synergies", "game-changer", "delve into"]
+      },
+      {
+        id: "tutorial",
+        label: "Tutorial / how-to",
+        tone: "clear instructional, second person",
+        voiceNotes: "Step-by-step. Numbered actions. Call out pitfalls. Assume smart but busy readers.",
+        bannedPhrases: ["simply", "just", "obviously", "as we all know"]
+      },
+      {
+        id: "opinion",
+        label: "Opinion / analysis",
+        tone: "confident, evidence-backed, slightly opinionated",
+        voiceNotes: "State the thesis early. Steelman the counterargument. End with a clear take.",
+        bannedPhrases: ["it remains to be seen", "only time will tell", "in conclusion"]
+      },
+      {
+        id: "neutral",
+        label: "Neutral educational",
+        tone: "clear and professional",
+        voiceNotes: "Balanced. Define terms once. Prefer precise verbs over hype adjectives.",
+        bannedPhrases: ["revolutionary", "disruptive", "cutting-edge"]
+      }
+    ];
+  }
+});
+
+// src/services/readability-pass.ts
+function readabilityPass(article) {
+  let content = article.content.replace(/\r\n/g, "\n");
+  content = content.split(/\n{2,}/).map((block) => {
+    if (block.startsWith("#") || block.startsWith("```") || block.startsWith("|")) return block;
+    const words = block.trim().split(/\s+/);
+    if (words.length < 90) return block;
+    const mid = Math.floor(words.length / 2);
+    const joined = words.join(" ");
+    const approx = words.slice(0, mid).join(" ").length;
+    const window = joined.slice(Math.max(0, approx - 40), approx + 80);
+    const m = window.match(/[.!?]\s+/);
+    if (!m || m.index == null) {
+      return `${words.slice(0, mid).join(" ")}
+
+${words.slice(mid).join(" ")}`;
+    }
+    const splitAt = Math.max(0, approx - 40) + m.index + m[0].length;
+    return `${joined.slice(0, splitAt).trim()}
+
+${joined.slice(splitAt).trim()}`;
+  }).join("\n\n");
+  content = content.replace(/\bIt is important to note that\b/gi, "").replace(/\bIn order to\b/gi, "To").replace(/\bDue to the fact that\b/gi, "Because").replace(/\bA large number of\b/gi, "Many").replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  const excerpt = article.excerpt.length > 180 ? `${article.excerpt.slice(0, 177).trim()}...` : article.excerpt;
+  return {
+    ...article,
+    content,
+    excerpt,
+    seoDescription: (article.seoDescription || excerpt).slice(0, 160)
+  };
+}
+var init_readability_pass = __esm({
+  "src/services/readability-pass.ts"() {
+    "use strict";
+  }
+});
+
+// src/services/section-regenerate.ts
+function splitSections(content) {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const sections = [];
+  let current = null;
+  for (const line of lines) {
+    const h2 = line.match(/^##\s+(.+)$/);
+    if (h2) {
+      if (current) {
+        const body = current.lines.join("\n").trim();
+        sections.push({
+          heading: current.heading,
+          body,
+          full: `## ${current.heading}
+
+${body}`.trim()
+        });
+      }
+      current = { heading: h2[1].trim(), lines: [] };
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+  if (current) {
+    const body = current.lines.join("\n").trim();
+    sections.push({
+      heading: current.heading,
+      body,
+      full: `## ${current.heading}
+
+${body}`.trim()
+    });
+  }
+  return sections;
+}
+function listArticleSections(content) {
+  return splitSections(content).map((s) => s.heading);
+}
+async function regenerateSection(input) {
+  const sections = splitSections(input.article.content);
+  const idx = sections.findIndex(
+    (s) => s.heading.toLowerCase() === input.heading.trim().toLowerCase()
+  );
+  if (idx < 0) throw new Error(`Section not found: ${input.heading}`);
+  const selected = pickSourcesForPrompt(input.sources);
+  const outlineHint = input.outline?.sections.find((s) => s.heading.toLowerCase() === input.heading.toLowerCase()) ?? null;
+  const prompt = `Rewrite ONLY the Markdown section below. Keep the same ## heading text.
+Return ONLY that section (## heading + body). No title, no other sections.
+
+Topic brief: ${compactJson(compactBrief(input.brief))}
+Outline for this section: ${outlineHint ? compactJson(outlineHint) : input.heading}
+Analysis summary: ${input.analysis?.summary ?? ""}
+Sources: ${compactJson(compactSourcesForGeneration(selected))}
+
+Current section:
+${sections[idx].full}
+
+Rules: grounded in sources only; scannable; no filler.`;
+  const rewritten = (await input.llm.generateText(prompt)).trim();
+  const cleaned = rewritten.replace(/^```(?:markdown|md)?\s*/i, "").replace(/```$/i, "").trim();
+  const nextFull = cleaned.startsWith("##") ? cleaned : `## ${sections[idx].heading}
+
+${cleaned}`;
+  const before = input.article.content;
+  const startMarker = `## ${sections[idx].heading}`;
+  const start = before.indexOf(startMarker);
+  if (start < 0) throw new Error("Could not locate section in article content");
+  const rest = before.slice(start + startMarker.length);
+  const nextH2 = rest.search(/\n##\s+/);
+  const end = nextH2 >= 0 ? start + startMarker.length + nextH2 : before.length;
+  const updated = `${before.slice(0, start).trimEnd()}
+
+${nextFull.trim()}
+
+${before.slice(end).trimStart()}`.trim();
+  return { ...input.article, content: updated };
+}
+function findSelectionSpan(content, selectedText) {
+  const needle = selectedText.trim();
+  if (!needle) return null;
+  const exact = content.indexOf(needle);
+  if (exact >= 0) return { start: exact, end: exact + needle.length };
+  const norm = (s) => s.replace(/\s+/g, " ").trim();
+  const target = norm(needle);
+  if (!target) return null;
+  const hay = norm(content);
+  const at = hay.indexOf(target);
+  if (at < 0) return null;
+  let hi = 0;
+  let start = -1;
+  let end = -1;
+  for (let ci = 0; ci < content.length; ci++) {
+    const ch = content[ci];
+    if (/\s/.test(ch)) {
+      if (hi < hay.length && hay[hi] === " ") hi++;
+      continue;
+    }
+    if (hi === at && start < 0) start = ci;
+    hi++;
+    if (start >= 0 && hi === at + target.length) {
+      end = ci + 1;
+      break;
+    }
+  }
+  return start >= 0 && end > start ? { start, end } : null;
+}
+async function regenerateSelection(input) {
+  const selected = input.selectedText.trim();
+  const instruction = input.instruction.trim();
+  if (selected.length < 2) throw new Error("Select at least a few characters to regenerate");
+  if (instruction.length < 2) throw new Error("Add a regeneration instruction");
+  const content = (input.content ?? input.article.content).replace(/\r\n/g, "\n");
+  const span = findSelectionSpan(content, selected);
+  if (!span) {
+    throw new Error("Could not locate the selected text in the article. Select again and retry.");
+  }
+  const passage = content.slice(span.start, span.end);
+  const before = content.slice(Math.max(0, span.start - 160), span.start).trim();
+  const after = content.slice(span.end, Math.min(content.length, span.end + 160)).trim();
+  const prompt = `Rewrite ONLY the selected passage per the instruction.
+Return ONLY the replacement text. No preamble, quotes, or code fences.
+Match the article's voice. Keep Markdown if present.
+
+Topic: ${input.brief.topic}
+Instruction: ${instruction}
+
+Selected:
+"""
+${passage}
+"""
+
+Context before: ${before || "(start)"}
+Context after: ${after || "(end)"}`;
+  const approxOut = Math.ceil(passage.length / 3);
+  const maxTokens = Math.min(1200, Math.max(220, approxOut * 2 + 80));
+  const rewritten = (await input.llm.generateText(prompt, {
+    system: "You are a fast copy editor. Rewrite the selection only. Be concise.",
+    maxTokens,
+    temperature: 0.35,
+    timeoutMs: 45e3
+  })).trim();
+  const replacement = rewritten.replace(/^```(?:markdown|md)?\s*/i, "").replace(/```$/i, "").trim();
+  if (!replacement) throw new Error("Model returned an empty rewrite");
+  const updatedContent = `${content.slice(0, span.start)}${replacement}${content.slice(span.end)}`;
+  return {
+    article: { ...input.article, content: updatedContent },
+    replacement
+  };
+}
+var init_section_regenerate = __esm({
+  "src/services/section-regenerate.ts"() {
+    "use strict";
+    init_prompt_budget();
+  }
+});
+
+// src/services/repurpose.ts
+function buildRepurposePack(article) {
+  const base = generatePromotionContent(article);
+  const url = `${appConfig.social.blogBaseUrl.replace(/\/$/, "")}/${article.slug}`;
+  const excerpt = article.excerpt ?? "";
+  const newsletterBlurb = [
+    `**${article.title}**`,
+    "",
+    excerpt || `New post on ${article.title}.`,
+    "",
+    `[Read the full article \u2192](${url})`
+  ].join("\n");
+  const sentences = (article.content || excerpt).replace(/```[\s\S]*?```/g, "").replace(/^#+\s+/gm, "").split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.length > 40).slice(0, 5);
+  const thread = [
+    `${article.title}`,
+    ...sentences.slice(0, 4),
+    `Full write-up: ${url}`
+  ].map((t, i, arr) => `${i + 1}/${arr.length} ${t}`.slice(0, 280));
+  const youtubeShortOutline = [
+    `Hook: ${article.title}`,
+    `Problem in 10s`,
+    `One concrete tactic`,
+    `Mistake to avoid`,
+    `CTA: ${url}`
+  ];
+  return {
+    ...base,
+    newsletterBlurb,
+    youtubeShortOutline,
+    thread
+  };
+}
+var init_repurpose = __esm({
+  "src/services/repurpose.ts"() {
+    "use strict";
+    init_config();
+    init_social_promotion();
+  }
+});
+
+// src/services/fact-cards.ts
+function buildFactCards(analysis, sources) {
+  if (!analysis) return [];
+  const byId = new Map(sources.map((s) => [s.id, s]));
+  const fromClaims = (analysis.claims ?? []).map((c) => {
+    const linked = c.sourceIds.map((id) => byId.get(id)).filter(Boolean).map((s) => ({
+      id: s.id,
+      title: s.title,
+      url: s.url,
+      sourceName: s.sourceName
+    }));
+    return {
+      claim: c.claim,
+      category: c.category,
+      confidence: c.confidence,
+      sources: linked,
+      grounded: linked.length > 0
+    };
+  });
+  if (fromClaims.length) return fromClaims;
+  return (analysis.keyArguments ?? []).slice(0, 8).map((arg) => ({
+    claim: arg,
+    category: "argument",
+    confidence: 0.5,
+    sources: [],
+    grounded: false
+  }));
+}
+function unsourcedClaimCount(cards) {
+  return cards.filter((c) => !c.grounded || c.category === "verification_needed").length;
+}
+var init_fact_cards = __esm({
+  "src/services/fact-cards.ts"() {
+    "use strict";
+  }
+});
+
+// src/services/competitor-brief.ts
+function buildCompetitorBrief(analysis, sources, topic) {
+  const viewpoints = analysis?.competingViewpoints ?? [];
+  const args = analysis?.keyArguments ?? [];
+  const topSources = [...sources].sort((a, b) => b.relevanceScore - a.relevanceScore).slice(0, 5).map((s) => ({ title: s.title, url: s.url }));
+  return {
+    summary: analysis?.summary || `Angle brief for \u201C${topic}\u201D: differentiate with operator-ready takeaways, not generic definitions.`,
+    anglesToOwn: args.slice(0, 5).length ? args.slice(0, 5) : [
+      `Practical playbook for ${topic}`,
+      "Trade-offs and failure modes",
+      "Metrics that prove it worked"
+    ],
+    anglesToAvoid: [
+      "Generic 'what is X' definitions without new evidence",
+      "Uncited statistics",
+      "Vendor hype without counterpoints",
+      ...viewpoints.slice(0, 2).map((v) => `Echoing without critique: ${v}`)
+    ],
+    competingViewpoints: viewpoints,
+    sourceHints: topSources
+  };
+}
+var init_competitor_brief = __esm({
+  "src/services/competitor-brief.ts"() {
+    "use strict";
+  }
+});
+
+// src/services/enrichment.ts
+function buildSeoPack(article, topic) {
+  const kw = analyzeKeywords(topic, article.content);
+  const meta = generateMetaSuggestions({
+    title: article.title,
+    content: article.content,
+    tags: article.tags
+  });
+  return {
+    primaryKeyword: kw.primaryKeyword,
+    longTailKeywords: kw.longTailKeywords,
+    titles: meta.titles,
+    descriptions: meta.descriptions,
+    slugSuggestions: meta.slugSuggestions
+  };
+}
+function enrichRunView(run) {
+  return {
+    factCards: buildFactCards(run.analysis, run.sources),
+    competitorBrief: buildCompetitorBrief(run.analysis, run.sources, run.brief.topic),
+    seoPack: run.seoPack ?? (run.article ? buildSeoPack(run.article, run.brief.topic) : null),
+    repurposePack: run.repurposePack ?? (run.article ? buildRepurposePack({
+      title: run.article.title,
+      slug: run.article.slug,
+      excerpt: run.article.excerpt,
+      tags: run.article.tags,
+      content: run.article.content
+    }) : null)
+  };
+}
+function applySeoChoice(article, choice) {
+  return {
+    ...article,
+    title: choice.title?.trim() || article.title,
+    seoTitle: choice.title?.trim() || article.seoTitle,
+    seoDescription: choice.description?.trim() || article.seoDescription,
+    slug: choice.slug?.trim() || article.slug
+  };
+}
+var init_enrichment = __esm({
+  "src/services/enrichment.ts"() {
+    "use strict";
+    init_seo_research();
+    init_fact_cards();
+    init_competitor_brief();
+    init_repurpose();
+  }
+});
+
+// src/services/template-memory.ts
+var template_memory_exports = {};
+__export(template_memory_exports, {
+  loadTemplateMemory: () => loadTemplateMemory,
+  saveTemplateMemory: () => saveTemplateMemory
+});
+import fs3 from "node:fs";
+import path8 from "node:path";
+function memoryPath() {
+  return path8.join(appConfig.dataDir, "template-memory.json");
+}
+function loadTemplateMemory() {
+  try {
+    const raw = JSON.parse(fs3.readFileSync(memoryPath(), "utf8"));
+    return {
+      lastTemplateId: raw.lastTemplateId ?? null,
+      lastStylePresetId: raw.lastStylePresetId ?? null,
+      updatedAt: raw.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString()
+    };
+  } catch {
+    return { lastTemplateId: null, lastStylePresetId: null, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+  }
+}
+function saveTemplateMemory(partial) {
+  const prev = loadTemplateMemory();
+  const next = {
+    lastTemplateId: partial.lastTemplateId !== void 0 ? partial.lastTemplateId : prev.lastTemplateId,
+    lastStylePresetId: partial.lastStylePresetId !== void 0 ? partial.lastStylePresetId : prev.lastStylePresetId,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  fs3.mkdirSync(path8.dirname(memoryPath()), { recursive: true });
+  fs3.writeFileSync(memoryPath(), JSON.stringify(next, null, 2), "utf8");
+  return next;
+}
+var init_template_memory = __esm({
+  "src/services/template-memory.ts"() {
+    "use strict";
+    init_config();
+  }
+});
+
+// src/services/resume-dashboard.ts
+function buildResumeDashboard(runs) {
+  const buckets = {
+    failed_retryable: { id: "failed_retryable", label: "Failed (retryable)", count: 0, runIds: [] },
+    failed_blocked: { id: "failed_blocked", label: "Failed (needs attention)", count: 0, runIds: [] },
+    awaiting_draft_review: {
+      id: "awaiting_draft_review",
+      label: "Generating / draft pending accept",
+      count: 0,
+      runIds: []
+    },
+    review_required: { id: "review_required", label: "Ready to approve", count: 0, runIds: [] },
+    approved: { id: "approved", label: "Approved \u2014 ready to publish", count: 0, runIds: [] },
+    publish_failed: { id: "publish_failed", label: "Publish failed", count: 0, runIds: [] },
+    published: { id: "published", label: "Published", count: 0, runIds: [] }
+  };
+  for (const run of runs) {
+    let key = null;
+    if (run.status === "FAILED" && run.retryable) key = "failed_retryable";
+    else if (run.status === "FAILED") key = "failed_blocked";
+    else if (run.status === "GENERATING" || run.status === "OUTLINE_READY" && !run.article)
+      key = "awaiting_draft_review";
+    else if (run.status === "REVIEW_REQUIRED" || run.status === "DRAFT_READY" || run.status === "QUALITY_CHECK")
+      key = "review_required";
+    else if (run.status === "APPROVED") key = "approved";
+    else if (run.status === "PUBLISH_FAILED") key = "publish_failed";
+    else if (run.status === "PUBLISHED") key = "published";
+    if (!key) continue;
+    buckets[key].count += 1;
+    buckets[key].runIds.push(run.id);
+  }
+  return {
+    buckets: Object.values(buckets).filter((b) => b.count > 0),
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+var init_resume_dashboard = __esm({
+  "src/services/resume-dashboard.ts"() {
+    "use strict";
+  }
+});
+
+// src/services/canonical-rules.ts
+function planCrossPost(targets, slug) {
+  const unique = [...new Set(targets.length ? targets : ["spanwrap"])];
+  const primary = unique.includes("spanwrap") ? "spanwrap" : unique[0];
+  const base = primary === "spanwrap" ? appConfig.social.blogBaseUrl : primary === "medium" ? appConfig.publishing.medium.canonicalBase : primary === "devto" ? appConfig.publishing.devto.canonicalBase : primary === "hashnode" ? appConfig.publishing.hashnode.canonicalBase : appConfig.social.blogBaseUrl;
+  const canonicalUrl = base ? `${base.replace(/\/$/, "")}/${slug}` : null;
+  const notes = [
+    `${primary} is the canonical destination.`,
+    unique.length > 1 ? `Secondary targets (${unique.filter((t) => t !== primary).join(", ")}) should use the canonical URL when the publisher supports it.` : "Single-target publish."
+  ];
+  return { primary, targets: unique, canonicalUrl, notes };
+}
+var init_canonical_rules = __esm({
+  "src/services/canonical-rules.ts"() {
+    "use strict";
+    init_config();
+  }
+});
+
+// src/services/diff-review.ts
+function diffArticles(before, after) {
+  const a = before.replace(/\r\n/g, "\n").split("\n");
+  const b = after.replace(/\r\n/g, "\n").split("\n");
+  const n = a.length;
+  const m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
+  for (let i2 = n - 1; i2 >= 0; i2--) {
+    for (let j2 = m - 1; j2 >= 0; j2--) {
+      dp[i2][j2] = a[i2] === b[j2] ? dp[i2 + 1][j2 + 1] + 1 : Math.max(dp[i2 + 1][j2], dp[i2][j2 + 1]);
+    }
+  }
+  const hunks = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      hunks.push({ type: "same", text: a[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      hunks.push({ type: "del", text: a[i] });
+      i++;
+    } else {
+      hunks.push({ type: "add", text: b[j] });
+      j++;
+    }
+  }
+  while (i < n) hunks.push({ type: "del", text: a[i++] });
+  while (j < m) hunks.push({ type: "add", text: b[j++] });
+  return hunks;
+}
+function diffSummary(before, after) {
+  if (!before || !after) {
+    return {
+      changed: Boolean(after),
+      hunks: after ? [{ type: "add", text: after.content }] : [],
+      beforeTitle: before?.title ?? null,
+      afterTitle: after?.title ?? null
+    };
+  }
+  const hunks = diffArticles(before.content, after.content);
+  const changed = before.title !== after.title || before.excerpt !== after.excerpt || hunks.some((h) => h.type !== "same");
+  return { changed, hunks, beforeTitle: before.title, afterTitle: after.title };
+}
+var init_diff_review = __esm({
+  "src/services/diff-review.ts"() {
+    "use strict";
+  }
+});
+
+// src/providers/llm/quick-edit.ts
+function createQuickEditLLM(fallback) {
+  if (process.env.LLM_QUICK_EDIT_FAST === "false") return fallback;
+  const groqKey = process.env.GROQ_API_KEY?.trim();
+  if (groqKey) {
+    const model = process.env.LLM_QUICK_EDIT_MODEL?.trim() || "llama-3.1-8b-instant";
+    try {
+      return new OpenAICompatibleLLMProvider(
+        groqKey,
+        process.env.GROQ_BASE_URL?.trim() || "https://api.groq.com/openai/v1",
+        model,
+        "groq"
+      );
+    } catch {
+    }
+  }
+  if (/reasoner|r1/i.test(fallback.model)) {
+    const cfg = getResolvedLlmConfig();
+    if (cfg.apiKey && (cfg.provider === "deepseek" || /deepseek/i.test(cfg.baseUrl))) {
+      try {
+        return new OpenAICompatibleLLMProvider(
+          cfg.apiKey,
+          cfg.baseUrl || "https://api.deepseek.com/v1",
+          "deepseek-chat",
+          "deepseek"
+        );
+      } catch {
+      }
+    }
+  }
+  return fallback;
+}
+var init_quick_edit = __esm({
+  "src/providers/llm/quick-edit.ts"() {
+    "use strict";
+    init_llm_settings();
+    init_openai_compatible();
+  }
+});
+
 // src/pipeline/orchestrator.ts
 async function withRunLock(id, fn) {
   const previous = runLocks.get(id) ?? Promise.resolve();
@@ -4865,10 +5835,23 @@ var init_orchestrator = __esm({
     init_idempotency();
     init_stages();
     init_state();
-    init_affiliate_links();
+    init_affiliate_relevance();
     init_analytics();
     init_social_promotion();
     init_config();
+    init_template();
+    init_style_presets();
+    init_readability_pass();
+    init_section_regenerate();
+    init_repurpose();
+    init_enrichment();
+    init_template_memory();
+    init_resume_dashboard();
+    init_canonical_rules();
+    init_diff_review();
+    init_seo_research();
+    init_fact_cards();
+    init_quick_edit();
     runLocks = /* @__PURE__ */ new Map();
     EDITABLE_STATUSES = [
       "CREATED",
@@ -4895,16 +5878,29 @@ var init_orchestrator = __esm({
         this.offlineExtract = deps.offlineExtract ?? false;
       }
       async create(briefInput, options = {}) {
-        const brief = ContentBriefSchema.parse(briefInput);
+        let brief = ContentBriefSchema.parse(briefInput);
         const id = createId("run");
         const now = (/* @__PURE__ */ new Date()).toISOString();
-        let templateId = options.templateId ?? null;
+        let templateId = options.templateId !== void 0 ? options.templateId : loadTemplateMemory().lastTemplateId;
         let templateName = null;
         let templateMarkdown = null;
         if (templateId) {
-          const tpl = await this.templateStore.require(templateId);
-          templateName = tpl.name;
-          templateMarkdown = tpl.markdown;
+          try {
+            const tpl = await this.templateStore.require(templateId);
+            templateName = tpl.name;
+            templateMarkdown = tpl.markdown;
+            saveTemplateMemory({ lastTemplateId: templateId });
+          } catch {
+            templateId = null;
+            templateName = null;
+            templateMarkdown = null;
+          }
+        }
+        const stylePresetId = brief.stylePresetId ?? loadTemplateMemory().lastStylePresetId;
+        if (stylePresetId) {
+          const locked = applyStyleLockToBrief(brief, stylePresetId);
+          brief = { ...brief, tone: locked.tone, stylePresetId };
+          saveTemplateMemory({ lastStylePresetId: stylePresetId });
         }
         const run = {
           id,
@@ -4930,6 +5926,14 @@ var init_orchestrator = __esm({
           failedStage: null,
           errorCode: null,
           retryable: false,
+          stylePresetId: stylePresetId ?? null,
+          previousArticle: null,
+          seoPack: null,
+          thumbnailVariants: [],
+          repurposePack: null,
+          autoAccepted: false,
+          articleHistory: [],
+          autopilotSource: null,
           idempotencyKey: createIdempotencyKey([id, brief.topic, "publish"])
         };
         return this.store.save(run);
@@ -5115,7 +6119,10 @@ var init_orchestrator = __esm({
             run.templateMarkdown
           );
           try {
-            const { content, linksInjected } = injectAffiliateLinks(article.content);
+            const { content, linksInjected } = injectRelevantAffiliateLinks(
+              article.content,
+              run.brief.topic
+            );
             if (linksInjected.length > 0) {
               article = { ...article, content };
               logger.info("Affiliate links injected", { count: linksInjected.length, runId: id });
@@ -5145,11 +6152,18 @@ var init_orchestrator = __esm({
       async qualityCheck(id) {
         return withRunLock(id, () => this.qualityCheckUnlocked(id));
       }
-      async qualityCheckUnlocked(id) {
+      async qualityCheckUnlocked(id, options = {}) {
         let run = await this.store.require(id);
+        if (options.article && !run.article) {
+          run = await this.store.save({ ...run, article: options.article });
+        }
         if (!run.article) {
           return this.store.save(
-            failStage(startStage(run, "quality"), "quality", "Article required for quality check")
+            failStage(
+              startStage(run, "quality"),
+              "quality",
+              "No draft yet. Click Run to review (or Generate) first, then Quality score."
+            )
           );
         }
         const article = run.article;
@@ -5157,13 +6171,36 @@ var init_orchestrator = __esm({
         run = await this.store.save(run);
         try {
           const quality = qualityStage(article, run.sources, run.analysis);
-          let next = { ...run, quality };
+          const seoPack = buildSeoPack(article, run.brief.topic);
+          const repurposePack = buildRepurposePack({
+            title: article.title,
+            slug: article.slug,
+            excerpt: article.excerpt,
+            tags: article.tags,
+            content: article.content
+          });
+          const hasBlocking = quality.issues.some((i) => i.severity === "error");
+          const autoOk = appConfig.quality.autoAcceptEnabled && quality.score >= appConfig.quality.autoAcceptMinScore && !hasBlocking && unsourcedClaimCount(buildFactCards(run.analysis, run.sources)) <= 2;
+          let next = {
+            ...run,
+            quality,
+            seoPack,
+            repurposePack,
+            autoAccepted: autoOk
+          };
           next = completeStage(next, "quality", {
             score: quality.score,
             passed: quality.passed,
-            issueCount: quality.issues.length
+            issueCount: quality.issues.length,
+            autoAccepted: autoOk
           });
-          next = setStatus(next, "REVIEW_REQUIRED");
+          next = setStatus(next, autoOk ? "APPROVED" : "REVIEW_REQUIRED");
+          if (autoOk) {
+            next = {
+              ...next,
+              reviewNotes: next.reviewNotes || `Auto-accepted (score ${quality.score})`
+            };
+          }
           return this.store.save(next);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -5178,9 +6215,14 @@ var init_orchestrator = __esm({
         const article = GeneratedBlogSchema.parse(articleInput);
         return this.store.save({
           ...run,
+          previousArticle: run.article,
           article,
           quality: null,
-          status: "DRAFT_READY"
+          status: "DRAFT_READY",
+          articleHistory: [
+            ...run.articleHistory ?? [],
+            { at: (/* @__PURE__ */ new Date()).toISOString(), note: "Manual article edit" }
+          ].slice(-20)
         });
       }
       /** Save Quality-tab edits (draft + destination sites) without resetting review status. */
@@ -5334,10 +6376,36 @@ var init_orchestrator = __esm({
         try {
           const result = await imageStage(next.article, next.id);
           const article = applyGeneratedImages(next.article, result, next.id);
-          next = { ...next, article };
+          const filenames = result.savedPaths.map((p) => p.split(/[/\\]/).pop());
+          const heroFile = filenames.find((n) => n.startsWith("hero-"));
+          const socialFile = filenames.find((n) => n.startsWith("social-"));
+          const sectionFile = filenames.find((n) => n.startsWith("section-"));
+          const variants = [
+            heroFile ? {
+              id: "a",
+              url: publicImageUrl(next.id, heroFile),
+              label: "Hero A",
+              selected: true
+            } : null,
+            socialFile || sectionFile ? {
+              id: "b",
+              url: publicImageUrl(next.id, socialFile || sectionFile),
+              label: socialFile ? "Social B" : "Section B",
+              selected: !heroFile
+            } : null
+          ].filter(Boolean);
+          next = {
+            ...next,
+            article: {
+              ...article,
+              featuredImage: variants.find((v) => v.selected)?.url ?? article.featuredImage
+            },
+            thumbnailVariants: variants
+          };
           next = completeStage(next, "images", {
             total: (result.sectionImages?.length ?? 0) + (result.heroImage ? 1 : 0) + (result.socialImage ? 1 : 0),
-            saved: result.savedPaths.length
+            saved: result.savedPaths.length,
+            thumbnails: variants.length
           });
           return next;
         } catch (error) {
@@ -5350,8 +6418,10 @@ var init_orchestrator = __esm({
         }
       }
       /**
-       * Convenience: research → outline → generate → quality (stops before approve/publish).
-       * Stops at the first failed stage so quality does not run without a draft.
+       * Primary UI/CLI action.
+       * - Fresh or completed runs: full pipeline (research → outline → draft → quality)
+       * - FAILED runs: resume from failedStage, keeping earlier artifacts
+       * - stopAfter: "outline" stops after outline (batch / advanced flows)
        */
       async runUntilReview(id, options = {}) {
         return withRunLock(id, async () => {
@@ -5360,9 +6430,13 @@ var init_orchestrator = __esm({
             await this.store.save({ ...current, generateImages: options.generateImages });
           }
           let run = await this.store.require(id);
-          if (!run.analysis || run.sources.length === 0) {
+          const resumeFrom = !options.forceFull && run.status === "FAILED" ? run.failedStage : null;
+          const skipResearch = resumeFrom === "outline" || resumeFrom === "generation" || resumeFrom === "images" || resumeFrom === "quality";
+          const skipOutline = resumeFrom === "generation" || resumeFrom === "images" || resumeFrom === "quality";
+          const skipGenerate = resumeFrom === "quality" && Boolean(run.article);
+          if (!skipResearch) {
             run = await this.researchUnlocked(id);
-            if (run.status === "FAILED" || !run.analysis) {
+            if (run.status === "FAILED" || !run.analysis || run.sources.length === 0) {
               return run.status === "FAILED" ? run : this.store.save(
                 failStage(
                   startStage(run, "analysis"),
@@ -5371,8 +6445,11 @@ var init_orchestrator = __esm({
                 )
               );
             }
+          } else if (!run.analysis || run.sources.length === 0) {
+            run = await this.researchUnlocked(id);
+            if (run.status === "FAILED" || !run.analysis) return run;
           }
-          if (!run.outline) {
+          if (!skipOutline) {
             run = await this.outlineUnlocked(id);
             if (run.status === "FAILED" || !run.outline || !run.analysis) {
               return run.status === "FAILED" ? run : this.store.save(
@@ -5383,13 +6460,320 @@ var init_orchestrator = __esm({
                 )
               );
             }
+          } else if (!run.outline) {
+            run = await this.outlineUnlocked(id);
+            if (run.status === "FAILED" || !run.outline) return run;
           }
-          if (!run.article) {
+          if (options.stopAfter === "outline") {
+            return this.store.save(setStatus({ ...run, error: null }, "OUTLINE_READY"));
+          }
+          if (!skipGenerate) {
+            run = await this.generateUnlocked(id, {
+              snapshot: run,
+              generateImages: options.generateImages
+            });
+            if (run.status === "FAILED" || !run.article) return run;
+          } else if (!run.article) {
             run = await this.generateUnlocked(id, { snapshot: run });
             if (run.status === "FAILED" || !run.article) return run;
           }
-          return this.qualityCheckUnlocked(id);
+          return this.qualityCheckUnlocked(id, { article: run.article });
         });
+      }
+      /** Mark generation as running and stream a Markdown draft to the caller (SSE). */
+      async streamDraft(id, onDelta, signal) {
+        return withRunLock(id, async () => {
+          let run = await this.store.require(id);
+          if (!run.outline || !run.analysis) {
+            throw new Error("Outline and analysis are required before streaming a draft");
+          }
+          const analysis = run.analysis;
+          const outline = run.outline;
+          run = setStatus(
+            startStage(run, "generation", { provider: this.llm.name, model: this.llm.model }),
+            "GENERATING"
+          );
+          run = await this.store.save(run);
+          try {
+            const templateGuidance = run.templateMarkdown?.trim() ? describeTemplateForPrompt(run.templateMarkdown) : null;
+            const markdown = await streamDraftStage(
+              run.brief,
+              run.sources,
+              analysis,
+              outline,
+              this.llm,
+              onDelta,
+              templateGuidance,
+              signal
+            );
+            run = await this.store.save({
+              ...run,
+              // Keep GENERATING until accept/reject; stash draft in reviewNotes marker is awkward —
+              // UI holds markdown client-side until accept.
+              error: null
+            });
+            return { markdown, run };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const failed = await this.store.save(failStage(run, "generation", message));
+            throw Object.assign(new Error(message), { run: failed });
+          }
+        });
+      }
+      /** Persist an accepted streamed Markdown draft as the run article. */
+      async acceptStreamDraft(id, markdown, options = {}) {
+        return withRunLock(id, async () => {
+          let run = await this.store.require(id);
+          if (!run.outline || !run.analysis) {
+            throw new Error("Outline and analysis are required before accepting a draft");
+          }
+          let article = markdownDraftToArticle(markdown, run.brief, run.sources);
+          article = {
+            ...article,
+            content: stripBannedPhrases(article.content, run.stylePresetId ?? run.brief.stylePresetId)
+          };
+          try {
+            const { content, linksInjected } = injectRelevantAffiliateLinks(
+              article.content,
+              run.brief.topic
+            );
+            if (linksInjected.length > 0) {
+              article = { ...article, content };
+              logger.info("Affiliate links injected", { count: linksInjected.length, runId: id });
+            }
+          } catch {
+          }
+          let next = {
+            ...run,
+            previousArticle: run.article,
+            article,
+            quality: null,
+            error: null,
+            failedStage: null,
+            errorCode: null,
+            retryable: false,
+            seoPack: buildSeoPack(article, run.brief.topic),
+            repurposePack: buildRepurposePack({
+              title: article.title,
+              slug: article.slug,
+              excerpt: article.excerpt,
+              tags: article.tags,
+              content: article.content
+            }),
+            articleHistory: [
+              ...run.articleHistory ?? [],
+              { at: (/* @__PURE__ */ new Date()).toISOString(), note: "Accepted streamed draft" }
+            ].slice(-20)
+          };
+          if (typeof options.generateImages === "boolean") {
+            next = { ...next, generateImages: options.generateImages };
+          }
+          next = completeStage(next, "generation", {
+            title: article.title,
+            provider: this.llm.name,
+            model: this.llm.model,
+            streamed: true
+          });
+          next = setStatus(next, "DRAFT_READY");
+          next = await this.store.save(next);
+          if (next.generateImages) {
+            next = await this.attachGeneratedImages(next);
+            next = await this.store.save(setStatus(next, "DRAFT_READY"));
+          }
+          return next;
+        });
+      }
+      /** Discard a streamed suggestion and mark generation failed/cancelled for retry. */
+      async rejectStreamDraft(id, reason = "Draft rejected by reviewer") {
+        return withRunLock(id, async () => {
+          const run = await this.store.require(id);
+          return this.store.save(
+            failStage(startStage(run, "generation"), "generation", reason, {
+              errorCode: "DRAFT_REJECTED",
+              retryable: true
+            })
+          );
+        });
+      }
+      async readabilityPass(id) {
+        return withRunLock(id, async () => {
+          const run = await this.store.require(id);
+          if (!run.article) throw new Error("Article required for readability pass");
+          const article = readabilityPass(run.article);
+          return this.store.save({
+            ...run,
+            previousArticle: run.article,
+            article,
+            quality: null,
+            status: "DRAFT_READY",
+            articleHistory: [
+              ...run.articleHistory ?? [],
+              { at: (/* @__PURE__ */ new Date()).toISOString(), note: "Readability pass" }
+            ].slice(-20)
+          });
+        });
+      }
+      async regenerateSection(id, heading) {
+        return withRunLock(id, async () => {
+          const run = await this.store.require(id);
+          if (!run.article) throw new Error("Article required");
+          const article = await regenerateSection({
+            article: run.article,
+            heading,
+            brief: run.brief,
+            outline: run.outline,
+            analysis: run.analysis,
+            sources: run.sources,
+            llm: this.llm
+          });
+          return this.store.save({
+            ...run,
+            previousArticle: run.article,
+            article,
+            quality: null,
+            status: "DRAFT_READY",
+            articleHistory: [
+              ...run.articleHistory ?? [],
+              { at: (/* @__PURE__ */ new Date()).toISOString(), note: `Regenerated section: ${heading}` }
+            ].slice(-20)
+          });
+        });
+      }
+      /** Quick Edit: rewrite a selected passage with an instruction. */
+      async regenerateSelection(id, input) {
+        return withRunLock(id, async () => {
+          const run = await this.store.require(id);
+          if (!run.article) throw new Error("Article required");
+          const baseArticle = input.content && input.content.trim() ? { ...run.article, content: input.content } : run.article;
+          const { article, replacement } = await regenerateSelection({
+            article: baseArticle,
+            selectedText: input.selectedText,
+            instruction: input.instruction,
+            content: baseArticle.content,
+            brief: run.brief,
+            sources: run.sources,
+            llm: createQuickEditLLM(this.llm)
+          });
+          const saved = await this.store.save({
+            ...run,
+            previousArticle: run.article,
+            article,
+            quality: null,
+            status: run.status === "APPROVED" || run.status === "PUBLISHED" ? run.status : "DRAFT_READY",
+            articleHistory: [
+              ...run.articleHistory ?? [],
+              { at: (/* @__PURE__ */ new Date()).toISOString(), note: "Quick Edit selection regenerate" }
+            ].slice(-20)
+          });
+          return Object.assign(saved, { replacement });
+        });
+      }
+      async applySeoPack(id, choice) {
+        const run = await this.store.require(id);
+        if (!run.article) throw new Error("Article required");
+        const article = applySeoChoice(run.article, choice);
+        return this.store.save({
+          ...run,
+          previousArticle: run.article,
+          article,
+          seoPack: run.seoPack ?? buildSeoPack(article, run.brief.topic)
+        });
+      }
+      async selectThumbnail(id, variantId) {
+        const run = await this.store.require(id);
+        if (!run.article) throw new Error("Article required");
+        const variants = (run.thumbnailVariants ?? []).map((v) => ({
+          ...v,
+          selected: v.id === variantId
+        }));
+        const chosen = variants.find((v) => v.id === variantId);
+        if (!chosen) throw new Error(`Unknown thumbnail variant: ${variantId}`);
+        return this.store.save({
+          ...run,
+          thumbnailVariants: variants,
+          article: { ...run.article, featuredImage: chosen.url }
+        });
+      }
+      async refreshPublished(id) {
+        const source = await this.store.require(id);
+        if (source.status !== "PUBLISHED" && source.status !== "APPROVED") {
+          throw new Error("Refresh is for published or approved runs");
+        }
+        const created = await this.create(
+          {
+            ...source.brief,
+            topic: source.brief.topic,
+            referenceUrls: [
+              ...source.brief.referenceUrls,
+              ...source.publishResult?.url && /^https?:/i.test(String(source.publishResult.url)) ? [String(source.publishResult.url)] : []
+            ]
+          },
+          { templateId: source.templateId }
+        );
+        return this.store.save({
+          ...created,
+          reviewNotes: `Refresh of ${source.id}`,
+          stylePresetId: source.stylePresetId,
+          generateImages: source.generateImages,
+          publishTargets: source.publishTargets
+        });
+      }
+      async distribute(id) {
+        let run = await this.store.require(id);
+        if (!run.article) throw new Error("Article required to distribute");
+        const plan = planCrossPost(run.publishTargets, run.article.slug);
+        if (run.status !== "APPROVED" && run.status !== "PUBLISH_FAILED") {
+          run = await this.approve(id, run.reviewNotes ?? "One-click distribute");
+        }
+        run = await this.publish(id);
+        const repurposePack = buildRepurposePack({
+          title: run.article.title,
+          slug: run.article.slug,
+          excerpt: run.article.excerpt,
+          tags: run.article.tags,
+          content: run.article.content
+        });
+        return this.store.save({
+          ...run,
+          repurposePack,
+          reviewNotes: [run.reviewNotes, ...plan.notes].filter(Boolean).join(" \xB7 ")
+        });
+      }
+      async batchCreateAndRun(briefs, options = {}) {
+        const results = [];
+        for (const brief of briefs.slice(0, 8)) {
+          const created = await this.create(brief, { templateId: options.templateId });
+          const run = await this.runUntilReview(created.id, {
+            generateImages: options.generateImages,
+            stopAfter: "outline"
+          });
+          results.push(run);
+        }
+        return results;
+      }
+      getResumeDashboard(runs) {
+        return buildResumeDashboard(runs ?? []);
+      }
+      async getDiff(id) {
+        const run = await this.store.require(id);
+        return diffSummary(run.previousArticle, run.article);
+      }
+      listSections(id) {
+        return this.store.require(id).then((run) => listArticleSections(run.article?.content ?? ""));
+      }
+      /** Heuristic check used by UI auto-accept of streamed drafts before quality. */
+      shouldAutoAcceptMarkdown(markdown, topic) {
+        if (!appConfig.quality.autoAcceptEnabled) return false;
+        const fake = {
+          title: topic,
+          content: markdown,
+          seoTitle: topic,
+          seoDescription: markdown.slice(0, 150),
+          keywords: [],
+          slug: "draft"
+        };
+        const seo = scoreSEO(fake);
+        return seo.score >= appConfig.quality.autoAcceptMinScore && seo.issues.every((i) => i.severity !== "error");
       }
     };
   }
@@ -5825,9 +7209,9 @@ async function fetchPublicTop(sub, opts, now) {
   const perSub = Math.max(3, Math.ceil((opts.limit ?? 15) / Math.max(1, opts.subreddits?.length ?? 1)));
   const feeds = redditTopUrls(sub, perSub);
   const errors = [];
-  for (const path12 of feeds.json) {
+  for (const path14 of feeds.json) {
     try {
-      const data = await requestJson(path12, {
+      const data = await requestJson(path14, {
         userAgent: opts.userAgent,
         timeoutMs: opts.timeoutMs,
         retry: false
@@ -5842,9 +7226,9 @@ async function fetchPublicTop(sub, opts, now) {
       errors.push(error instanceof Error ? error.message : String(error));
     }
   }
-  for (const path12 of feeds.html) {
+  for (const path14 of feeds.html) {
     try {
-      const html = await requestText(path12, {
+      const html = await requestText(path14, {
         userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         timeoutMs: opts.timeoutMs,
         retry: false
@@ -6717,7 +8101,7 @@ var init_tech_digest = __esm({
 
 // src/services/topic-store.ts
 import { mkdir as mkdir4, readdir as readdir3, readFile as readFile3, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
-import path8 from "node:path";
+import path9 from "node:path";
 function createTopicStore(backend = appConfig.storage.backend) {
   if (backend === "mongodb") {
     const uri = appConfig.storage.mongoUri;
@@ -6743,10 +8127,10 @@ var init_topic_store = __esm({
       }
       rootDir;
       dir() {
-        return path8.join(this.rootDir, "topics");
+        return path9.join(this.rootDir, "topics");
       }
       filePath(id) {
-        return path8.join(this.dir(), `${id}.json`);
+        return path9.join(this.dir(), `${id}.json`);
       }
       async ensureReady() {
         await mkdir4(this.dir(), { recursive: true });
@@ -6768,7 +8152,7 @@ var init_topic_store = __esm({
         const out = [];
         for (const file of files) {
           if (!file.endsWith(".json")) continue;
-          const raw = await readFile3(path8.join(this.dir(), file), "utf8");
+          const raw = await readFile3(path9.join(this.dir(), file), "utf8");
           out.push(TopicRecommendationSchema.parse(JSON.parse(raw)));
         }
         return out.sort((a, b) => b.heatScore - a.heatScore);
@@ -6791,7 +8175,7 @@ var init_topic_store = __esm({
         await this.ensureReady();
         const files = await readdir3(this.dir());
         await Promise.all(
-          files.filter((f) => f.endsWith(".json")).map((f) => unlink2(path8.join(this.dir(), f)).catch(() => void 0))
+          files.filter((f) => f.endsWith(".json")).map((f) => unlink2(path9.join(this.dir(), f)).catch(() => void 0))
         );
       }
     };
@@ -6880,6 +8264,746 @@ var init_topic_store = __esm({
   }
 });
 
+// src/services/topic-selector.ts
+async function selectAutopilotTopics(options) {
+  const { platforms, postsPerPlatform, recentTopics, llm, offline } = options;
+  const totalNeeded = platforms.length * postsPerPlatform;
+  const fetchLimit = Math.max(totalNeeded * 3, 30);
+  const recommendations = await discoverTopicRecommendations({
+    limit: fetchLimit,
+    offline
+  });
+  if (recommendations.length === 0) {
+    logger.warn("Autopilot: no trending topics discovered");
+    return [];
+  }
+  logger.info("Autopilot: discovered trending topics", {
+    count: recommendations.length,
+    topHeat: recommendations[0]?.heatScore
+  });
+  const recentNormalized = recentTopics.map((t) => normalizeForDedup(t));
+  const candidates = recommendations.filter((rec) => {
+    const norm = normalizeForDedup(rec.topic);
+    return !recentNormalized.some((recent) => topicSimilarity(norm, recent) > 0.6);
+  });
+  if (candidates.length === 0) {
+    logger.warn("Autopilot: all topics filtered by dedup \u2014 falling back to raw recommendations");
+    candidates.push(...recommendations.slice(0, totalNeeded));
+  }
+  logger.info("Autopilot: candidates after dedup", {
+    before: recommendations.length,
+    after: candidates.length,
+    recentTopics: recentTopics.length
+  });
+  const picks = await llmSelectTopics(
+    candidates.slice(0, 40),
+    // cap to avoid huge prompts
+    platforms,
+    postsPerPlatform,
+    llm
+  );
+  return picks;
+}
+async function llmSelectTopics(candidates, platforms, postsPerPlatform, llm) {
+  const totalNeeded = platforms.length * postsPerPlatform;
+  const candidateList = candidates.map((c, i) => `${i + 1}. [heat=${c.heatScore}] ${c.topic} \u2014 ${c.whyItMatters}`).join("\n");
+  const platformDescriptions = platforms.map((p) => {
+    const s = PLATFORM_STRATEGY[p];
+    return `- ${p}: ${s.style} (audience: ${s.audience})`;
+  }).join("\n");
+  const prompt = `You are a tech blog content strategist maximizing views and engagement.
+
+## Trending Topics (ranked by heat score)
+${candidateList}
+
+## Target Platforms (${postsPerPlatform} unique posts each)
+${platformDescriptions}
+
+## Instructions
+Select exactly ${totalNeeded} topics from the list above. Rules:
+1. Pick topics that are TRENDING, CATCHY, and would generate MAXIMUM VIEWS when written about
+2. Every topic must be about AI, machine learning, or technology
+3. Each platform needs exactly ${postsPerPlatform} topic(s) \u2014 assign each topic to the best-fit platform
+4. NO duplicate topics \u2014 each selected topic must be unique
+5. Favor topics with higher heat scores, but also consider "blog-worthiness" (can it become an engaging long-form post?)
+6. For each pick, craft a catchy, click-worthy title angle tailored to that platform's audience
+7. Suggest 3-5 SEO keywords for each
+
+Respond ONLY with a JSON array (no markdown code fences):
+[
+  {
+    "topicIndex": <1-based index from the list>,
+    "platform": "<platform name>",
+    "titleAngle": "<catchy title>",
+    "keywords": ["kw1", "kw2", "kw3"]
+  }
+]`;
+  try {
+    const response = await llm.generateText(prompt);
+    const text = response.trim();
+    const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+    const parsed = JSON.parse(jsonStr);
+    const picks = [];
+    const usedTopics = /* @__PURE__ */ new Set();
+    for (const item of parsed) {
+      if (picks.length >= totalNeeded) break;
+      const idx = item.topicIndex - 1;
+      if (idx < 0 || idx >= candidates.length) continue;
+      if (usedTopics.has(idx)) continue;
+      const platform = item.platform;
+      if (!platforms.includes(platform)) continue;
+      usedTopics.add(idx);
+      const rec = candidates[idx];
+      const strategy = PLATFORM_STRATEGY[platform];
+      picks.push({
+        recommendation: rec,
+        targetPlatform: platform,
+        titleAngle: item.titleAngle || rec.topic,
+        keywords: item.keywords?.length ? item.keywords : rec.keywords,
+        rank: picks.length + 1,
+        brief: {
+          topic: item.titleAngle || rec.topic,
+          targetAudience: strategy.audience,
+          tone: strategy.tone,
+          contentType: strategy.contentType,
+          keywords: item.keywords?.length ? item.keywords : rec.keywords,
+          referenceUrls: rec.signals.map((s) => s.url).filter((u) => Boolean(u)).slice(0, 3)
+        }
+      });
+    }
+    logger.info("Autopilot: LLM selected topics", {
+      requested: totalNeeded,
+      selected: picks.length,
+      platforms: [...new Set(picks.map((p) => p.targetPlatform))]
+    });
+    if (picks.length < totalNeeded) {
+      fillWithFallback(picks, candidates, platforms, postsPerPlatform, usedTopics);
+    }
+    return picks;
+  } catch (error) {
+    logger.warn("Autopilot: LLM topic selection failed, using heuristic fallback", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return heuristicSelect(candidates, platforms, postsPerPlatform);
+  }
+}
+function heuristicSelect(candidates, platforms, postsPerPlatform) {
+  const picks = [];
+  const usedTopics = /* @__PURE__ */ new Set();
+  fillWithFallback(picks, candidates, platforms, postsPerPlatform, usedTopics);
+  return picks;
+}
+function fillWithFallback(picks, candidates, platforms, postsPerPlatform, usedTopics) {
+  const platformCounts = /* @__PURE__ */ new Map();
+  for (const p of picks) {
+    platformCounts.set(p.targetPlatform, (platformCounts.get(p.targetPlatform) ?? 0) + 1);
+  }
+  for (const platform of platforms) {
+    const current = platformCounts.get(platform) ?? 0;
+    const needed = postsPerPlatform - current;
+    if (needed <= 0) continue;
+    const strategy = PLATFORM_STRATEGY[platform];
+    for (let i = 0; i < candidates.length && (platformCounts.get(platform) ?? 0) < postsPerPlatform; i++) {
+      if (usedTopics.has(i)) continue;
+      const rec = candidates[i];
+      usedTopics.add(i);
+      platformCounts.set(platform, (platformCounts.get(platform) ?? 0) + 1);
+      picks.push({
+        recommendation: rec,
+        targetPlatform: platform,
+        titleAngle: rec.topic,
+        keywords: rec.keywords,
+        rank: picks.length + 1,
+        brief: {
+          topic: rec.topic,
+          targetAudience: strategy.audience,
+          tone: strategy.tone,
+          contentType: strategy.contentType,
+          keywords: rec.keywords,
+          referenceUrls: rec.signals.map((s) => s.url).filter((u) => Boolean(u)).slice(0, 3)
+        }
+      });
+    }
+  }
+}
+function normalizeForDedup(text) {
+  return text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+function topicSimilarity(a, b) {
+  const wordsA = new Set(a.split(" ").filter((w) => w.length > 2));
+  const wordsB = new Set(b.split(" ").filter((w) => w.length > 2));
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  let intersection = 0;
+  for (const w of wordsA) {
+    if (wordsB.has(w)) intersection++;
+  }
+  return intersection / (wordsA.size + wordsB.size - intersection);
+}
+var PLATFORM_STRATEGY;
+var init_topic_selector = __esm({
+  "src/services/topic-selector.ts"() {
+    "use strict";
+    init_topic_discovery();
+    init_logger();
+    PLATFORM_STRATEGY = {
+      spanwrap: {
+        tone: "authoritative and comprehensive",
+        contentType: "seo-optimized guide",
+        audience: "developers and tech enthusiasts searching for in-depth guides",
+        style: "long-form SEO articles with practical examples and code snippets"
+      },
+      medium: {
+        tone: "engaging and conversational",
+        contentType: "thought leadership",
+        audience: "tech professionals and curious generalists on Medium",
+        style: "personal insight pieces with storytelling, opinion, and clear takeaways"
+      },
+      devto: {
+        tone: "practical and tutorial-focused",
+        contentType: "tutorial",
+        audience: "software developers learning new tools and techniques on Dev.to",
+        style: "hands-on tutorials with step-by-step code, real examples, and developer tips"
+      },
+      hashnode: {
+        tone: "deep-technical and analytical",
+        contentType: "technical deep dive",
+        audience: "senior engineers and architects reading Hashnode for technical depth",
+        style: "architecture breakdowns, benchmarks, and technical analysis with diagrams"
+      },
+      wordpress: {
+        tone: "professional and educational",
+        contentType: "comprehensive guide",
+        audience: "business-savvy technologists and decision-makers",
+        style: "well-structured guides with sections, comparisons, and actionable recommendations"
+      },
+      substack: {
+        tone: "analytical and newsletter-friendly",
+        contentType: "weekly analysis",
+        audience: "newsletter subscribers who want curated AI/tech insight and opinion",
+        style: "newsletter-style analysis with personal commentary, curated links, and predictions"
+      }
+    };
+  }
+});
+
+// src/services/autopilot-log.ts
+import { mkdir as mkdir5, readdir as readdir4, readFile as readFile4, writeFile as writeFile5 } from "node:fs/promises";
+import path10 from "node:path";
+function createAutopilotLogStore(backend = appConfig.storage.backend) {
+  if (backend === "mongodb") {
+    const uri = appConfig.storage.mongoUri;
+    if (!uri) throw new Error("MONGODB_URI required for autopilot log store");
+    return new MongoAutopilotLogStore(uri);
+  }
+  return new FileAutopilotLogStore(appConfig.dataDir);
+}
+function getAutopilotLogStore() {
+  if (!defaultStore2) defaultStore2 = createAutopilotLogStore();
+  return defaultStore2;
+}
+function newCycleLog() {
+  return {
+    id: createId("cycle"),
+    startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    completedAt: null,
+    status: "running",
+    topicsDiscovered: 0,
+    topicsSelected: 0,
+    runsCreated: [],
+    runsPublished: 0,
+    runsNeedingReview: 0,
+    errors: []
+  };
+}
+var FileAutopilotLogStore, MongoAutopilotLogStore, defaultStore2;
+var init_autopilot_log = __esm({
+  "src/services/autopilot-log.ts"() {
+    "use strict";
+    init_config();
+    init_mongo_connection();
+    init_idempotency();
+    FileAutopilotLogStore = class {
+      constructor(rootDir = appConfig.dataDir) {
+        this.rootDir = rootDir;
+      }
+      rootDir;
+      dir() {
+        return path10.join(this.rootDir, "autopilot");
+      }
+      filePath(id) {
+        return path10.join(this.dir(), `${id}.json`);
+      }
+      async ensureReady() {
+        await mkdir5(this.dir(), { recursive: true });
+      }
+      async create(log2) {
+        await this.ensureReady();
+        await writeFile5(this.filePath(log2.id), JSON.stringify(log2, null, 2), "utf8");
+        return log2;
+      }
+      async update(log2) {
+        return this.create(log2);
+      }
+      async list(limit = 20) {
+        await this.ensureReady();
+        const files = await readdir4(this.dir());
+        const logs = [];
+        for (const file of files) {
+          if (!file.endsWith(".json")) continue;
+          try {
+            const raw = await readFile4(path10.join(this.dir(), file), "utf8");
+            logs.push(JSON.parse(raw));
+          } catch {
+          }
+        }
+        return logs.sort((a, b) => b.startedAt > a.startedAt ? 1 : -1).slice(0, limit);
+      }
+      async latest() {
+        const all = await this.list(1);
+        return all[0] ?? null;
+      }
+    };
+    MongoAutopilotLogStore = class {
+      constructor(uri, dbName = appConfig.storage.mongoDb, collectionName = "autopilot_cycles") {
+        this.uri = uri;
+        this.dbName = dbName;
+        this.collectionName = collectionName;
+      }
+      uri;
+      dbName;
+      collectionName;
+      client = null;
+      collection = null;
+      connecting = null;
+      async ensureConnected() {
+        if (this.collection) return this.collection;
+        if (!this.connecting) {
+          this.connecting = (async () => {
+            try {
+              const { client, db } = await connectMongo(this.uri, this.dbName);
+              const col = db.collection(this.collectionName);
+              await col.createIndex({ startedAt: -1 });
+              this.client = client;
+              this.collection = col;
+              return col;
+            } catch (error) {
+              this.client = null;
+              this.collection = null;
+              this.connecting = null;
+              throw error instanceof Error ? error : new Error(formatMongoError(error));
+            }
+          })();
+        }
+        return this.connecting;
+      }
+      async create(log2) {
+        const col = await this.ensureConnected();
+        await col.insertOne({ ...log2, _id: log2.id });
+        return log2;
+      }
+      async update(log2) {
+        const col = await this.ensureConnected();
+        await col.replaceOne(
+          { _id: log2.id },
+          { ...log2, _id: log2.id },
+          { upsert: true }
+        );
+        return log2;
+      }
+      async list(limit = 20) {
+        const col = await this.ensureConnected();
+        const docs = await col.find({}).sort({ startedAt: -1 }).limit(limit).toArray();
+        return docs.map((d) => {
+          const { _id, ...rest } = d;
+          return { ...rest, id: String(_id) };
+        });
+      }
+      async latest() {
+        const all = await this.list(1);
+        return all[0] ?? null;
+      }
+      async close() {
+        if (this.client) {
+          await this.client.close();
+          this.client = null;
+          this.collection = null;
+          this.connecting = null;
+        }
+      }
+    };
+    defaultStore2 = null;
+  }
+});
+
+// src/services/autopilot.ts
+async function runAutopilotCycle(options = {}) {
+  const logStore = getAutopilotLogStore();
+  const cycle = newCycleLog();
+  await logStore.create(cycle);
+  const cfg = appConfig.autopilot;
+  const platforms = options.platforms ?? cfg.targetPlatforms;
+  const postsPerPlatform = options.postsPerPlatform ?? cfg.postsPerPlatform;
+  const dryRun = options.dryRun ?? cfg.dryRun;
+  const skipReview = cfg.skipReview;
+  const minQuality = cfg.minQualityScore;
+  logger.info("Autopilot cycle started", {
+    cycleId: cycle.id,
+    platforms,
+    postsPerPlatform,
+    dryRun,
+    skipReview
+  });
+  try {
+    const orch2 = createOrchestrator();
+    const recentTopics = await getRecentTopics(orch2, cfg.topicDeduplicationDays);
+    const llm = createLLMProvider();
+    const picks = await selectAutopilotTopics({
+      platforms,
+      postsPerPlatform,
+      recentTopics,
+      llm,
+      offline: options.offline
+    });
+    cycle.topicsDiscovered = picks.length > 0 ? picks.length + 5 : 0;
+    cycle.topicsSelected = picks.length;
+    await logStore.update(cycle);
+    if (picks.length === 0) {
+      cycle.status = "completed";
+      cycle.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+      cycle.errors.push("No suitable topics found for this cycle");
+      await logStore.update(cycle);
+      logger.warn("Autopilot cycle completed with no topics", { cycleId: cycle.id });
+      return cycle;
+    }
+    logger.info("Autopilot: topics selected", {
+      cycleId: cycle.id,
+      count: picks.length,
+      platforms: [...new Set(picks.map((p) => p.targetPlatform))]
+    });
+    for (const pick of picks) {
+      const record = await processAutopilotPick(orch2, pick, cycle.id, {
+        dryRun,
+        skipReview,
+        minQuality,
+        generateImages: cfg.generateImages,
+        templateId: cfg.templateId
+      });
+      cycle.runsCreated.push(record);
+      if (record.status === "PUBLISHED") {
+        cycle.runsPublished++;
+      } else if (record.status === "REVIEW_REQUIRED") {
+        cycle.runsNeedingReview++;
+      }
+      await logStore.update(cycle);
+    }
+    cycle.status = "completed";
+    cycle.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    await logStore.update(cycle);
+    logger.info("Autopilot cycle completed", {
+      cycleId: cycle.id,
+      created: cycle.runsCreated.length,
+      published: cycle.runsPublished,
+      needsReview: cycle.runsNeedingReview,
+      errors: cycle.errors.length
+    });
+    return cycle;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    cycle.status = "failed";
+    cycle.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    cycle.errors.push(`Cycle failed: ${message}`);
+    await logStore.update(cycle);
+    logger.error("Autopilot cycle failed", { cycleId: cycle.id, error: message });
+    return cycle;
+  }
+}
+async function processAutopilotPick(orch2, pick, cycleId, options) {
+  const record = {
+    runId: "",
+    topic: pick.titleAngle,
+    platform: pick.targetPlatform,
+    status: "CREATED"
+  };
+  try {
+    const created = await orch2.create(pick.brief, {
+      templateId: options.templateId ?? null
+    });
+    record.runId = created.id;
+    const store = await Promise.resolve().then(() => (init_storage(), storage_exports)).then((m) => m.getRunStore());
+    await store.save({
+      ...created,
+      publishTargets: [pick.targetPlatform],
+      autopilotSource: {
+        cycleId,
+        targetPlatform: pick.targetPlatform,
+        topicRank: pick.rank
+      }
+    });
+    logger.info("Autopilot: pipeline run created", {
+      runId: created.id,
+      topic: pick.titleAngle,
+      platform: pick.targetPlatform
+    });
+    let run = await orch2.runUntilReview(created.id, {
+      generateImages: options.generateImages
+    });
+    record.status = run.status;
+    if (run.status === "FAILED") {
+      record.error = run.error ?? "Pipeline failed";
+      return record;
+    }
+    if (options.skipReview && !options.dryRun && run.status === "REVIEW_REQUIRED" && run.quality && run.quality.score >= options.minQuality && run.quality.passed) {
+      run = await orch2.approve(created.id, `Autopilot auto-approved (quality=${run.quality.score})`);
+      record.status = run.status;
+      run = await orch2.publish(created.id);
+      record.status = run.status;
+      if (run.status === "PUBLISH_FAILED") {
+        record.error = run.error ?? "Publish failed";
+      }
+      logger.info("Autopilot: auto-published", {
+        runId: created.id,
+        platform: pick.targetPlatform,
+        status: run.status
+      });
+    } else if (options.dryRun) {
+      logger.info("Autopilot: dry-run \u2014 skipping publish", {
+        runId: created.id,
+        status: run.status,
+        qualityScore: run.quality?.score
+      });
+    } else {
+      logger.info("Autopilot: awaiting human review", {
+        runId: created.id,
+        platform: pick.targetPlatform,
+        qualityScore: run.quality?.score,
+        qualityPassed: run.quality?.passed
+      });
+    }
+    return record;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    record.status = "FAILED";
+    record.error = message;
+    logger.error("Autopilot: run processing failed", {
+      topic: pick.titleAngle,
+      platform: pick.targetPlatform,
+      error: message
+    });
+    return record;
+  }
+}
+async function getRecentTopics(orch2, deduplicationDays) {
+  try {
+    const allRuns = await orch2.list();
+    const cutoff = new Date(Date.now() - deduplicationDays * 864e5).toISOString();
+    return allRuns.filter((r) => r.createdAt >= cutoff).map((r) => r.brief.topic);
+  } catch (error) {
+    logger.warn("Autopilot: failed to load recent topics for dedup", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return [];
+  }
+}
+var init_autopilot = __esm({
+  "src/services/autopilot.ts"() {
+    "use strict";
+    init_config();
+    init_pipeline();
+    init_llm();
+    init_topic_selector();
+    init_autopilot_log();
+    init_logger();
+  }
+});
+
+// src/services/scheduler.ts
+function parseRange(field, min, max) {
+  const values = /* @__PURE__ */ new Set();
+  for (const part of field.split(",")) {
+    const stepMatch = part.match(/^(.+)\/(\d+)$/);
+    const step = stepMatch ? parseInt(stepMatch[2], 10) : 1;
+    const range = stepMatch ? stepMatch[1] : part;
+    if (range === "*") {
+      for (let i = min; i <= max; i += step) values.add(i);
+    } else if (range.includes("-")) {
+      const [startStr, endStr] = range.split("-");
+      const start = parseInt(startStr, 10);
+      const end = parseInt(endStr, 10);
+      for (let i = start; i <= end; i += step) values.add(i);
+    } else {
+      const val = parseInt(range, 10);
+      if (!isNaN(val) && val >= min && val <= max) values.add(val);
+    }
+  }
+  return values;
+}
+function parseCronExpression(expression) {
+  const parts = expression.trim().split(/\s+/);
+  if (parts.length !== 5) {
+    throw new Error(`Invalid cron expression "${expression}" \u2014 expected 5 fields`);
+  }
+  return {
+    minutes: parseRange(parts[0], 0, 59),
+    hours: parseRange(parts[1], 0, 23),
+    daysOfMonth: parseRange(parts[2], 1, 31),
+    months: parseRange(parts[3], 1, 12),
+    daysOfWeek: parseRange(parts[4], 0, 6)
+    // 0 = Sunday
+  };
+}
+function matchesCron(date, fields) {
+  return fields.minutes.has(date.getUTCMinutes()) && fields.hours.has(date.getUTCHours()) && fields.daysOfMonth.has(date.getUTCDate()) && fields.months.has(date.getUTCMonth() + 1) && fields.daysOfWeek.has(date.getUTCDay());
+}
+function nextCronTime(after, fields) {
+  const candidate = new Date(after.getTime());
+  candidate.setUTCSeconds(0, 0);
+  candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+  const maxIterations = 400 * 24 * 60;
+  for (let i = 0; i < maxIterations; i++) {
+    if (matchesCron(candidate, fields)) {
+      return candidate;
+    }
+    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+  }
+  const fallback = new Date(after.getTime() + 7 * 864e5);
+  logger.warn("Autopilot scheduler: could not compute next cron time, defaulting to +7d");
+  return fallback;
+}
+function getAutopilotScheduler() {
+  if (!defaultScheduler) defaultScheduler = new AutopilotScheduler();
+  return defaultScheduler;
+}
+function maybeStartAutopilotScheduler() {
+  if (appConfig.autopilot.enabled) {
+    const scheduler = getAutopilotScheduler();
+    if (!scheduler.running) {
+      scheduler.start();
+    }
+  }
+}
+var AutopilotScheduler, defaultScheduler;
+var init_scheduler = __esm({
+  "src/services/scheduler.ts"() {
+    "use strict";
+    init_config();
+    init_logger();
+    init_autopilot();
+    init_autopilot_log();
+    AutopilotScheduler = class {
+      timer = null;
+      cronFields = null;
+      nextRunTime = null;
+      cycleBusy = false;
+      _enabled = false;
+      get enabled() {
+        return this._enabled;
+      }
+      get running() {
+        return this.timer !== null;
+      }
+      /**
+       * Start the scheduler. Parses the cron expression and sets the first timer.
+       */
+      start() {
+        if (this.timer) return;
+        const cronExpr = appConfig.autopilot.cronExpression;
+        try {
+          this.cronFields = parseCronExpression(cronExpr);
+        } catch (error) {
+          logger.error("Autopilot scheduler: invalid cron expression", {
+            expression: cronExpr,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          return;
+        }
+        this._enabled = true;
+        this.scheduleNext();
+        logger.info("Autopilot scheduler started", {
+          cron: cronExpr,
+          nextRun: this.nextRunTime?.toISOString()
+        });
+      }
+      /** Stop the scheduler. */
+      stop() {
+        if (this.timer) {
+          clearTimeout(this.timer);
+          this.timer = null;
+        }
+        this._enabled = false;
+        this.nextRunTime = null;
+        logger.info("Autopilot scheduler stopped");
+      }
+      /** Manually trigger an autopilot cycle right now. */
+      async triggerNow(options = {}) {
+        if (this.cycleBusy) {
+          throw new Error("An autopilot cycle is already running");
+        }
+        return this.executeCycle(options);
+      }
+      /** Get current scheduler status. */
+      async status() {
+        const logStore = getAutopilotLogStore();
+        const lastCycle = await logStore.latest();
+        const cfg = appConfig.autopilot;
+        return {
+          enabled: this._enabled,
+          running: this.running,
+          cycleBusy: this.cycleBusy,
+          cronExpression: cfg.cronExpression,
+          nextRun: this.nextRunTime?.toISOString() ?? null,
+          lastCycle,
+          config: {
+            platforms: cfg.targetPlatforms,
+            postsPerPlatform: cfg.postsPerPlatform,
+            skipReview: cfg.skipReview,
+            dryRun: cfg.dryRun,
+            generateImages: cfg.generateImages,
+            minQualityScore: cfg.minQualityScore,
+            deduplicationDays: cfg.topicDeduplicationDays
+          }
+        };
+      }
+      scheduleNext() {
+        if (!this.cronFields || !this._enabled) return;
+        this.nextRunTime = nextCronTime(/* @__PURE__ */ new Date(), this.cronFields);
+        const delay = Math.max(1e3, this.nextRunTime.getTime() - Date.now());
+        const maxDelay = 24 * 60 * 60 * 1e3;
+        const actualDelay = Math.min(delay, maxDelay);
+        this.timer = setTimeout(async () => {
+          this.timer = null;
+          if (delay > maxDelay) {
+            this.scheduleNext();
+            return;
+          }
+          try {
+            await this.executeCycle();
+          } catch (error) {
+            logger.error("Autopilot scheduler: cycle execution failed", {
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+          if (this._enabled) {
+            this.scheduleNext();
+          }
+        }, actualDelay);
+        if (this.timer && typeof this.timer === "object" && "unref" in this.timer) {
+          this.timer.unref();
+        }
+      }
+      async executeCycle(options = {}) {
+        this.cycleBusy = true;
+        try {
+          const result = await runAutopilotCycle(options);
+          return result;
+        } finally {
+          this.cycleBusy = false;
+        }
+      }
+    };
+    defaultScheduler = null;
+  }
+});
+
 // src/services/auth.ts
 import {
   createHash as createHash2,
@@ -6890,7 +9014,7 @@ import {
 } from "node:crypto";
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { promisify } from "node:util";
-import path9 from "node:path";
+import path11 from "node:path";
 function normalizeUsername(raw) {
   return raw.trim().toLowerCase();
 }
@@ -6937,7 +9061,7 @@ function getAuthSecret() {
       "AUTH_SECRET is required on Vercel (32+ random characters). Add it in Project \u2192 Environment Variables."
     );
   }
-  const filePath2 = path9.join(appConfig.dataDir, "auth-secret");
+  const filePath2 = path11.join(appConfig.dataDir, "auth-secret");
   try {
     const existing = readFileSync2(filePath2, "utf8").trim();
     if (existing.length >= 16) return existing;
@@ -7061,8 +9185,8 @@ function createUserStore() {
   return new FileUserStore(appConfig.dataDir);
 }
 function getUserStore() {
-  if (!defaultStore2) defaultStore2 = createUserStore();
-  return defaultStore2;
+  if (!defaultStore3) defaultStore3 = createUserStore();
+  return defaultStore3;
 }
 async function ensureSeedUser() {
   if (!seedPromise) {
@@ -7122,7 +9246,7 @@ async function authenticateUser(usernameRaw, password) {
   await store.upsert(next);
   return next;
 }
-var scrypt, AUTH_COOKIE, USERNAME_PATTERN, MAX_LOGIN_ATTEMPTS, LOGIN_WINDOW_MS, loginAttempts, FileUserStore, MongoUserStore, defaultStore2, seedPromise;
+var scrypt, AUTH_COOKIE, USERNAME_PATTERN, MAX_LOGIN_ATTEMPTS, LOGIN_WINDOW_MS, loginAttempts, FileUserStore, MongoUserStore, defaultStore3, seedPromise;
 var init_auth = __esm({
   "src/services/auth.ts"() {
     "use strict";
@@ -7141,7 +9265,7 @@ var init_auth = __esm({
       }
       rootDir;
       filePath() {
-        return path9.join(this.rootDir, "users.json");
+        return path11.join(this.rootDir, "users.json");
       }
       readAll() {
         try {
@@ -7212,14 +9336,14 @@ var init_auth = __esm({
         return user;
       }
     };
-    defaultStore2 = null;
+    defaultStore3 = null;
     seedPromise = null;
   }
 });
 
 // src/services/activity-log.ts
 import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import path10 from "node:path";
+import path12 from "node:path";
 function parseEntry(raw) {
   if (!raw || typeof raw !== "object") return null;
   const rec = raw;
@@ -7246,8 +9370,8 @@ function createActivityLogStore() {
   return new FileActivityLogStore(appConfig.dataDir);
 }
 function getActivityLogStore() {
-  if (!defaultStore3) defaultStore3 = createActivityLogStore();
-  return defaultStore3;
+  if (!defaultStore4) defaultStore4 = createActivityLogStore();
+  return defaultStore4;
 }
 async function recordActivity(input) {
   try {
@@ -7255,7 +9379,7 @@ async function recordActivity(input) {
   } catch {
   }
 }
-var MAX_FILE_ENTRIES, FileActivityLogStore, MongoActivityLogStore, defaultStore3;
+var MAX_FILE_ENTRIES, FileActivityLogStore, MongoActivityLogStore, defaultStore4;
 var init_activity_log = __esm({
   "src/services/activity-log.ts"() {
     "use strict";
@@ -7269,7 +9393,7 @@ var init_activity_log = __esm({
       }
       rootDir;
       filePath() {
-        return path10.join(this.rootDir, "activity-log.json");
+        return path12.join(this.rootDir, "activity-log.json");
       }
       readAll() {
         try {
@@ -7339,7 +9463,7 @@ var init_activity_log = __esm({
         );
       }
     };
-    defaultStore3 = null;
+    defaultStore4 = null;
   }
 });
 
@@ -7350,9 +9474,12 @@ __export(ui_server_exports, {
   startUiServer: () => startUiServer
 });
 import { createServer } from "node:http";
-import { readFile as readFile4 } from "node:fs/promises";
-import path11 from "node:path";
+import { readFile as readFile5 } from "node:fs/promises";
+import path13 from "node:path";
 import { fileURLToPath } from "node:url";
+function runView(run) {
+  return { ...run, ...enrichRunView(run) };
+}
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) {
@@ -7382,8 +9509,8 @@ async function serveStatic(res, urlPath) {
   const traced = tracedStatic[urlPath];
   if (traced) {
     try {
-      const data = await readFile4(traced);
-      const ext = path11.extname(traced.pathname);
+      const data = await readFile5(traced);
+      const ext = path13.extname(traced.pathname);
       const headers = {
         "Content-Type": MIME[ext] ?? "application/octet-stream"
       };
@@ -7396,14 +9523,14 @@ async function serveStatic(res, urlPath) {
   }
   const rel = urlPath === "/" ? "/index.html" : urlPath;
   for (const publicDir of publicCandidates) {
-    const root = path11.normalize(publicDir);
-    const filePath2 = path11.normalize(path11.join(root, rel));
-    if (!filePath2.startsWith(root + path11.sep) && filePath2 !== root) {
+    const root = path13.normalize(publicDir);
+    const filePath2 = path13.normalize(path13.join(root, rel));
+    if (!filePath2.startsWith(root + path13.sep) && filePath2 !== root) {
       continue;
     }
     try {
-      const data = await readFile4(filePath2);
-      const ext = path11.extname(filePath2);
+      const data = await readFile5(filePath2);
+      const ext = path13.extname(filePath2);
       const headers = {
         "Content-Type": MIME[ext] ?? "application/octet-stream"
       };
@@ -7569,8 +9696,57 @@ async function handleAuthedApi(req, res, url, session, ip) {
         hasGithubToken: Boolean(appConfig.trends.githubToken),
         hasRedditOAuth: Boolean(appConfig.trends.redditClientId && appConfig.trends.redditClientSecret),
         hasXBearer: Boolean(appConfig.trends.xBearerToken),
-        hasGeminiKey: Boolean(appConfig.images.geminiApiKey)
+        hasGeminiKey: Boolean(appConfig.images.geminiApiKey),
+        autoAcceptEnabled: appConfig.quality.autoAcceptEnabled,
+        autoAcceptMinScore: appConfig.quality.autoAcceptMinScore
       });
+    }
+    if (method === "GET" && pathname === "/api/autopilot/status") {
+      const scheduler = getAutopilotScheduler();
+      const status = await scheduler.status();
+      return sendJson(res, 200, status);
+    }
+    if (method === "POST" && pathname === "/api/autopilot/trigger") {
+      const scheduler = getAutopilotScheduler();
+      const body = JSON.parse(await readBody(req) || "{}");
+      try {
+        const cycle = await scheduler.triggerNow({
+          dryRun: body.dryRun,
+          platforms: body.platforms,
+          postsPerPlatform: body.postsPerPlatform
+        });
+        await log2("autopilot_triggered", {
+          cycleId: cycle.id,
+          created: cycle.runsCreated.length,
+          published: cycle.runsPublished
+        });
+        return sendJson(res, 200, cycle);
+      } catch (error) {
+        return sendJson(res, 409, {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    if (method === "POST" && pathname === "/api/autopilot/toggle") {
+      const body = JSON.parse(await readBody(req) || "{}");
+      const scheduler = getAutopilotScheduler();
+      if (body.enabled) {
+        scheduler.start();
+      } else {
+        scheduler.stop();
+      }
+      await log2(body.enabled ? "autopilot_enabled" : "autopilot_disabled", {});
+      return sendJson(res, 200, await scheduler.status());
+    }
+    if (method === "GET" && pathname === "/api/autopilot/history") {
+      const limitRaw = url.searchParams.get("limit");
+      const limit = limitRaw ? Math.min(parseInt(limitRaw, 10), 50) : 20;
+      const logStore = getAutopilotLogStore();
+      const history = await logStore.list(limit);
+      return sendJson(res, 200, { cycles: history });
+    }
+    if (method === "GET" && pathname === "/api/autopilot/config") {
+      return sendJson(res, 200, appConfig.autopilot);
     }
     if (method === "GET" && pathname === "/api/llm") {
       return sendJson(res, 200, publicLlmStatus());
@@ -7692,9 +9868,43 @@ async function handleAuthedApi(req, res, url, session, ip) {
           updatedAt: r.updatedAt,
           createdAt: r.createdAt,
           qualityScore: r.quality?.score ?? null,
-          error: r.error
+          error: r.error,
+          failedStage: r.failedStage,
+          retryable: r.retryable,
+          autoAccepted: r.autoAccepted
         }))
       );
+    }
+    if (method === "GET" && pathname === "/api/dashboard") {
+      const runs = await orch().list();
+      return sendJson(res, 200, orch().getResumeDashboard(runs));
+    }
+    if (method === "GET" && pathname === "/api/style-presets") {
+      const { STYLE_PRESETS: STYLE_PRESETS2 } = await Promise.resolve().then(() => (init_style_presets(), style_presets_exports));
+      const { loadTemplateMemory: loadTemplateMemory2 } = await Promise.resolve().then(() => (init_template_memory(), template_memory_exports));
+      return sendJson(res, 200, { presets: STYLE_PRESETS2, memory: loadTemplateMemory2() });
+    }
+    if (method === "POST" && pathname === "/api/runs/batch") {
+      const raw = JSON.parse(await readBody(req) || "{}");
+      const topics = Array.isArray(raw.topics) ? raw.topics : [];
+      if (!topics.length) return sendJson(res, 400, { error: "topics array required" });
+      const briefs = topics.slice(0, 8).map(
+        (t) => ContentBriefSchema.parse({
+          topic: String(t).slice(0, 140),
+          targetAudience: raw.targetAudience ?? "startup founders",
+          tone: raw.tone ?? "technical but easy to understand",
+          contentType: "educational",
+          keywords: Array.isArray(raw.keywords) ? raw.keywords : [],
+          stylePresetId: raw.stylePresetId ?? null,
+          referenceUrls: []
+        })
+      );
+      const runs = await orch().batchCreateAndRun(briefs, {
+        generateImages: raw.generateImages === true,
+        templateId: raw.templateId || null
+      });
+      await log2("runs_batch", { count: runs.length });
+      return sendJson(res, 201, { runs });
     }
     if (method === "POST" && pathname === "/api/runs") {
       const raw = JSON.parse(await readBody(req) || "{}");
@@ -7704,13 +9914,15 @@ async function handleAuthedApi(req, res, url, session, ip) {
         tone: raw.tone ?? "clear and professional",
         contentType: raw.contentType ?? "educational",
         keywords: Array.isArray(raw.keywords) ? raw.keywords : typeof raw.keywords === "string" ? raw.keywords.split(",").map((k) => k.trim()).filter(Boolean) : [],
-        referenceUrls: Array.isArray(raw.referenceUrls) ? raw.referenceUrls : []
+        referenceUrls: Array.isArray(raw.referenceUrls) ? raw.referenceUrls : [],
+        stylePresetId: raw.stylePresetId ?? null,
+        competitorUrls: Array.isArray(raw.competitorUrls) ? raw.competitorUrls : []
       });
       const run = await orch().create(brief, {
         templateId: raw.templateId || null
       });
       await log2("run_created", { runId: run.id, topic: run.brief.topic });
-      return sendJson(res, 201, run);
+      return sendJson(res, 201, runView(run));
     }
     if (pathname === "/api/templates" && method === "GET") {
       const list = await getTemplateStore().list();
@@ -7764,10 +9976,10 @@ async function handleAuthedApi(req, res, url, session, ip) {
       if (!/^[\w.-]+$/.test(filename)) {
         return sendJson(res, 400, { error: "Invalid image filename" });
       }
-      const filePath2 = path11.join(appConfig.images.outputDir, runId, filename);
+      const filePath2 = path13.join(appConfig.images.outputDir, runId, filename);
       try {
-        const buf = await readFile4(filePath2);
-        const ext = path11.extname(filename).toLowerCase();
+        const buf = await readFile5(filePath2);
+        const ext = path13.extname(filename).toLowerCase();
         const mime = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : ext === ".gif" ? "image/gif" : "image/jpeg";
         res.writeHead(200, {
           "Content-Type": mime,
@@ -7785,7 +9997,7 @@ async function handleAuthedApi(req, res, url, session, ip) {
       const action = runMatch[2];
       if (method === "GET" && !action) {
         const run = await orch().get(id);
-        return sendJson(res, 200, run);
+        return sendJson(res, 200, runView(run));
       }
       if (method === "DELETE" && !action) {
         const ok = await orch().delete(id);
@@ -7796,6 +10008,44 @@ async function handleAuthedApi(req, res, url, session, ip) {
         const bodyText = await readBody(req);
         const body = bodyText ? JSON.parse(bodyText) : {};
         const o = orch();
+        if (action === "generate-stream") {
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache, no-transform",
+            Connection: "keep-alive",
+            "X-Accel-Buffering": "no"
+          });
+          const send = (event, data) => {
+            res.write(`event: ${event}
+data: ${JSON.stringify(data)}
+
+`);
+          };
+          const ac = new AbortController();
+          req.on("close", () => ac.abort());
+          try {
+            send("status", { stage: "generation", message: "Streaming draft..." });
+            const { markdown, run: run2 } = await o.streamDraft(
+              id,
+              async (chunk) => {
+                send("delta", { text: chunk });
+              },
+              ac.signal
+            );
+            send("done", {
+              markdown,
+              runId: run2.id,
+              status: run2.status
+            });
+            await log2("run_generate_stream", { runId: id, chars: markdown.length });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            send("error", { error: message });
+            await log2("run_generate_stream_failed", { runId: id, error: message });
+          }
+          res.end();
+          return;
+        }
         let run;
         switch (action) {
           case "research":
@@ -7811,7 +10061,19 @@ async function handleAuthedApi(req, res, url, session, ip) {
             run = await o.qualityCheck(id);
             break;
           case "run":
-            run = await o.runUntilReview(id, { generateImages: body.generateImages });
+            run = await o.runUntilReview(id, {
+              generateImages: body.generateImages,
+              stopAfter: body.stopAfter === "outline" ? "outline" : null,
+              forceFull: body.forceFull === true
+            });
+            break;
+          case "accept-stream-draft":
+            run = await o.acceptStreamDraft(id, String(body.markdown ?? ""), {
+              generateImages: body.generateImages
+            });
+            break;
+          case "reject-stream-draft":
+            run = await o.rejectStreamDraft(id, body.reason ? String(body.reason) : void 0);
             break;
           case "approve":
             run = await o.approve(id, body.notes);
@@ -7843,6 +10105,39 @@ async function handleAuthedApi(req, res, url, session, ip) {
           case "generate-images":
             run = await o.generateImages(id);
             break;
+          case "readability-pass":
+            run = await o.readabilityPass(id);
+            break;
+          case "regenerate-section":
+            run = await o.regenerateSection(id, String(body.heading ?? ""));
+            break;
+          case "regenerate-selection":
+            run = await o.regenerateSelection(id, {
+              selectedText: String(body.selectedText ?? ""),
+              instruction: String(body.instruction ?? ""),
+              content: body.content != null ? String(body.content) : void 0
+            });
+            break;
+          case "apply-seo":
+            run = await o.applySeoPack(id, {
+              title: body.title,
+              description: body.description,
+              slug: body.slug
+            });
+            break;
+          case "select-thumbnail":
+            run = await o.selectThumbnail(id, String(body.variantId ?? ""));
+            break;
+          case "refresh":
+            run = await o.refreshPublished(id);
+            break;
+          case "distribute":
+            run = await o.distribute(id);
+            break;
+          case "diff":
+            return sendJson(res, 200, await o.getDiff(id));
+          case "sections":
+            return sendJson(res, 200, { sections: await o.listSections(id) });
           default:
             return sendJson(res, 404, { error: `Unknown action: ${action}` });
         }
@@ -7852,6 +10147,15 @@ async function handleAuthedApi(req, res, url, session, ip) {
           generate: "run_generate",
           "quality-check": "run_quality",
           run: "run_started",
+          "accept-stream-draft": "run_accept_stream_draft",
+          "reject-stream-draft": "run_reject_stream_draft",
+          "readability-pass": "run_readability",
+          "regenerate-section": "run_regen_section",
+          "regenerate-selection": "run_regen_selection",
+          "apply-seo": "run_apply_seo",
+          "select-thumbnail": "run_select_thumbnail",
+          refresh: "run_refresh",
+          distribute: "run_distribute",
           approve: "run_approved",
           reject: "run_rejected",
           publish: "run_published",
@@ -7865,7 +10169,7 @@ async function handleAuthedApi(req, res, url, session, ip) {
           runId: id,
           status: run.status
         });
-        return sendJson(res, 200, run);
+        return sendJson(res, 200, runView(run));
       }
     }
     return sendJson(res, 404, { error: "Not found" });
@@ -7878,6 +10182,7 @@ async function handleAuthedApi(req, res, url, session, ip) {
 function createUiServer() {
   const host = appConfig.ui.host;
   const port = appConfig.ui.port;
+  maybeStartAutopilotScheduler();
   return createServer((req, res) => {
     void (async () => {
       try {
@@ -7929,13 +10234,16 @@ var init_ui_server = __esm({
     init_tech_digest();
     init_topic_store();
     init_llm_settings();
+    init_scheduler();
+    init_autopilot_log();
     init_auth();
     init_activity_log();
-    moduleDir = path11.dirname(fileURLToPath(import.meta.url));
+    init_enrichment();
+    moduleDir = path13.dirname(fileURLToPath(import.meta.url));
     publicCandidates = [
-      path11.join(moduleDir, "public"),
-      path11.join(process.cwd(), "public"),
-      path11.join(process.cwd(), "src/ui-server/public")
+      path13.join(moduleDir, "public"),
+      path13.join(process.cwd(), "public"),
+      path13.join(process.cwd(), "src/ui-server/public")
     ];
     isBundled = !import.meta.url.includes("ui-server");
     getStaticUrl = (relPath) => {

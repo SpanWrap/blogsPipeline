@@ -322,7 +322,17 @@ export const PipelineRunSchema = z.object({
       }),
     )
     .default([]),
+  /** Tracks runs created by the autopilot scheduler. Null for manually created runs. */
+  autopilotSource: z
+    .object({
+      cycleId: z.string(),
+      targetPlatform: z.string(),
+      topicRank: z.number(),
+    })
+    .nullable()
+    .default(null),
   idempotencyKey: z.string(),
+
 });
 
 export type PipelineRun = z.infer<typeof PipelineRunSchema>;

@@ -13,6 +13,7 @@
 7. Human review/edit/approve
 8. Publish to one or many platforms
 9. Optional social promotion + analytics tracking
+10. Optional weekly autopilot scheduler (discover → draft → auto-publish)
 
 It is intentionally decoupled from the main Spanwrap web app. It publishes to Spanwrap via HTTP API and can also publish/export to Medium, Dev.to, Hashnode, WordPress, and Substack.
 
@@ -43,6 +44,7 @@ It is intentionally decoupled from the main Spanwrap web app. It publishes to Sp
 - Browser app: `src/ui-server/public/*`
 - Orchestrator: `src/pipeline/orchestrator.ts`
 - Pipeline stages: `src/pipeline/stages/*`
+- Services: `src/services/*` (including `autopilot.ts`, `scheduler.ts`, `topic-selector.ts`)
 - Providers:
   - LLM: `src/providers/llm/*`
   - Research: `src/providers/research/*`
@@ -96,6 +98,16 @@ Reviewers can:
 
 Recent UX work has focused on clearer live progress and avoiding misleading stage messages.
 
+## Autopilot (Weekly Automation)
+
+The project includes an integrated weekly autopilot scheduler (`src/services/scheduler.ts` and `src/services/autopilot.ts`).
+
+- **Trigger**: Runs every Monday at 08:00 UTC (configurable) when `AUTOPILOT_ENABLED=true`.
+- **Topic Selection**: Fetches trending topics and uses the LLM to pick the top topics, deduplicating against the last 30 days of published posts.
+- **Platform Tailoring**: Assigns each topic to a specific publishing platform (Spanwrap, Medium, Dev.to, Hashnode, WordPress, Substack) and tailors the angle, tone, and audience to fit the platform.
+- **Auto-publishing**: Can operate entirely headless (auto-approving and publishing if `AUTOPILOT_SKIP_REVIEW=true` and quality score is high) or can leave drafts in `REVIEW_REQUIRED` for human editing.
+- **UI/CLI**: Managed via the Autopilot panel in the UI Settings or via the `npm run pipeline -- autopilot` CLI commands.
+
 ## Publishing targets
 
 - Spanwrap (HTTP publish)
@@ -123,6 +135,7 @@ See `.env.example` for full settings. High-signal variables:
 - Typecheck: `npm run typecheck`
 - Test: `npm test`
 - CLI entry: `npm run pipeline -- <command>`
+- Autopilot CLI: `npm run pipeline -- autopilot <run|status|history|enable|disable>`
 
 ## Current engineering constraints and expectations
 

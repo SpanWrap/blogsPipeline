@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=18" />
+    <link rel="stylesheet" href="/styles.css?v=19" />
   </head>
   <body>
     <div id="auth-gate" class="auth-gate">
@@ -225,6 +225,53 @@
           <ul id="template-list" class="template-list"></ul>
         </section>
 
+        <section class="panel autopilot-panel">
+          <div class="panel-head">
+            <h2>Autopilot</h2>
+            <div class="autopilot-controls">
+              <button type="button" id="autopilot-trigger" class="btn primary">Run Now</button>
+              <button type="button" id="autopilot-toggle" class="btn">Enable</button>
+            </div>
+          </div>
+          <p class="hint">
+            Weekly automated blog pipeline. Discovers trending AI/tech topics, generates platform-tailored drafts,
+            and publishes to configured platforms. Set <code>AUTOPILOT_ENABLED=true</code> in <code>.env</code>
+            for scheduled runs, or click <strong>Run Now</strong> to trigger manually.
+          </p>
+          <div id="autopilot-status" class="autopilot-status">
+            <dl class="status-grid">
+              <div><dt>Status</dt><dd id="ap-enabled">—</dd></div>
+              <div><dt>Next run</dt><dd id="ap-next">—</dd></div>
+              <div><dt>Platforms</dt><dd id="ap-platforms">—</dd></div>
+              <div><dt>Posts/platform</dt><dd id="ap-posts">—</dd></div>
+              <div><dt>Skip review</dt><dd id="ap-skip-review">—</dd></div>
+              <div><dt>Min quality</dt><dd id="ap-min-quality">—</dd></div>
+              <div><dt>Dedup window</dt><dd id="ap-dedup">—</dd></div>
+              <div><dt>Dry run</dt><dd id="ap-dry-run">—</dd></div>
+            </dl>
+          </div>
+          <div class="autopilot-history">
+            <h3>Recent cycles</h3>
+            <table id="autopilot-history-table" class="ap-history-table">
+              <thead>
+                <tr>
+                  <th>Cycle</th>
+                  <th>Status</th>
+                  <th>Topics</th>
+                  <th>Runs</th>
+                  <th>Published</th>
+                  <th>Review</th>
+                  <th>Errors</th>
+                  <th>Started</th>
+                </tr>
+              </thead>
+              <tbody id="autopilot-history-body">
+                <tr><td colspan="8" class="empty-row">No cycles recorded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="panel">
           <div class="panel-head">
             <h2>People</h2>
@@ -257,6 +304,6 @@
       </div>
     </div>
     <p id="toast" class="toast" hidden></p>
-    <script src="/app.js?v=18" type="module"></script>
+    <script src="/app.js?v=19" type="module"></script>
   </body>
 </html>

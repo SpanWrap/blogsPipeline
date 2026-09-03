@@ -63,6 +63,8 @@ Hobby plans cap function time (~60s). Research + generate can exceed that; **Pro
 
 `STORAGE_BACKEND` is forced to MongoDB on Vercel even if you leave it as `file` locally.
 
+Weekly autopilot uses **Vercel Cron** (`GET /api/cron/autopilot`, Monday 08:00 UTC) because serverless functions do not keep in-process timers. Set `AUTOPILOT_ENABLED=true` and keep `CRON_SECRET` as the platform-injected secret.
+
 ## Markdown templates (intern format)
 
 Interns can hand you a `.md` file defining structure and optional placeholders. Research writing is generated to fit that template.

@@ -1,4 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "fluid": true
+  "fluid": true,
+  "crons": [
+    {
+      "path": "/api/cron/autopilot",
+      "schedule": "0 8 * * 1"
+    }
+  ]
 }

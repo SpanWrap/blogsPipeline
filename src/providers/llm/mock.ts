@@ -16,7 +16,7 @@ export class MockLLMProvider implements LLMProvider {
   readonly name = "mock";
   readonly model = "mock-1";
 
-  async generateText(prompt: string): Promise<string> {
+  async generateText(prompt: string, _options?: { maxTokens?: number; temperature?: number; system?: string; timeoutMs?: number }): Promise<string> {
     return `Mock response for: ${prompt.slice(0, 80)}`;
   }
 

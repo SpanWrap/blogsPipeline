@@ -7,10 +7,19 @@ export type StreamTextOptions = {
   signal?: AbortSignal;
 };
 
+export type GenerateTextOptions = {
+  system?: string;
+  /** Cap output length — critical for Quick Edit latency. */
+  maxTokens?: number;
+  temperature?: number;
+  /** Override default request timeout (ms). */
+  timeoutMs?: number;
+};
+
 export interface LLMProvider {
   readonly name: string;
   readonly model: string;
-  generateText(prompt: string): Promise<string>;
+  generateText(prompt: string, options?: GenerateTextOptions): Promise<string>;
   generateStructured<T>(
     prompt: string,
     schema: z.ZodType<T>,

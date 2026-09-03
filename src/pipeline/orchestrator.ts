@@ -52,6 +52,7 @@ import { planCrossPost } from "../services/canonical-rules";
 import { diffSummary } from "../services/diff-review";
 import { scoreSEO } from "../services/seo-research";
 import { buildFactCards, unsourcedClaimCount } from "../services/fact-cards";
+import { createQuickEditLLM } from "../providers/llm/quick-edit";
 
 /** Process-wide lock so two "Run to review" clicks cannot wipe each other's outline/article. */
 const runLocks = new Map<string, Promise<void>>();
@@ -176,6 +177,7 @@ export class BlogPipelineOrchestrator {
       repurposePack: null,
       autoAccepted: false,
       articleHistory: [],
+      autopilotSource: null,
       idempotencyKey: createIdempotencyKey([id, brief.topic, "publish"]),
     };
     return this.store.save(run);
@@ -1011,7 +1013,7 @@ export class BlogPipelineOrchestrator {
         content: baseArticle.content,
         brief: run.brief,
         sources: run.sources,
-        llm: this.llm,
+        llm: createQuickEditLLM(this.llm),
       });
       const saved = await this.store.save({
         ...run,

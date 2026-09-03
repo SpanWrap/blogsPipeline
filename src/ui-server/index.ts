@@ -11,6 +11,9 @@ import { discoverTopicRecommendations } from "../services/topic-discovery";
 import { discoverTechDigest } from "../services/tech-digest";
 import { getTopicStore } from "../services/topic-store";
 import { ensureLlmSettings, getResolvedLlmConfig, publicLlmStatus, saveLlmSettings } from "../services/llm-settings";
+import { getAutopilotScheduler, maybeStartAutopilotScheduler } from "../services/scheduler";
+import { getAutopilotLogStore } from "../services/autopilot-log";
+import type { PublishTarget } from "../models";
 import {
   authenticateUser,
   clearLoginFailures,
@@ -89,10 +92,19 @@ function sendJson(
 }
 
 function isPublicAuthPath(method: string, pathname: string): boolean {
+  if (pathname === "/api/healthz" && method === "GET") return true;
+  if (pathname === "/api/cron/autopilot" && method === "GET") return true;
   if (pathname === "/api/auth/me" && method === "GET") return true;
   if (pathname === "/api/auth/login" && method === "POST") return true;
   if (pathname === "/api/auth/setup" && method === "POST") return true;
   return false;
+}
+
+function isVercelCronRequest(req: IncomingMessage): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
+  const auth = req.headers.authorization;
+  return typeof auth === "string" && auth === `Bearer ${secret}`;
 }
 
 async function serveStatic(res: ServerResponse, urlPath: string) {
@@ -150,6 +162,35 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
   const ip = clientIp(req);
 
   try {
+    if (method === "GET" && pathname === "/api/healthz") {
+      return sendJson(res, 200, {
+        ok: true,
+        vercel: Boolean(process.env.VERCEL),
+        storage: appConfig.storage.backend,
+      });
+    }
+
+    if (method === "GET" && pathname === "/api/cron/autopilot") {
+      if (!isVercelCronRequest(req)) {
+        return sendJson(res, 401, { error: "Unauthorized" });
+      }
+      if (!appConfig.autopilot.enabled) {
+        return sendJson(res, 200, { ok: true, skipped: true, reason: "AUTOPILOT_ENABLED is false" });
+      }
+      try {
+        const cycle = await getAutopilotScheduler().triggerNow();
+        return sendJson(res, 200, {
+          ok: true,
+          cycleId: cycle.id,
+          created: cycle.runsCreated.length,
+          published: cycle.runsPublished,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return sendJson(res, 409, { error: message });
+      }
+    }
+
     await ensureSeedUser();
     await ensureLlmSettings();
 
@@ -317,6 +358,60 @@ async function handleAuthedApi(
         autoAcceptEnabled: appConfig.quality.autoAcceptEnabled,
         autoAcceptMinScore: appConfig.quality.autoAcceptMinScore,
       });
+    }
+
+    // ── Autopilot API ──
+
+    if (method === "GET" && pathname === "/api/autopilot/status") {
+      const scheduler = getAutopilotScheduler();
+      const status = await scheduler.status();
+      return sendJson(res, 200, status);
+    }
+
+    if (method === "POST" && pathname === "/api/autopilot/trigger") {
+      const scheduler = getAutopilotScheduler();
+      const body = JSON.parse((await readBody(req)) || "{}");
+      try {
+        const cycle = await scheduler.triggerNow({
+          dryRun: body.dryRun,
+          platforms: body.platforms,
+          postsPerPlatform: body.postsPerPlatform,
+        });
+        await log("autopilot_triggered", {
+          cycleId: cycle.id,
+          created: cycle.runsCreated.length,
+          published: cycle.runsPublished,
+        });
+        return sendJson(res, 200, cycle);
+      } catch (error) {
+        return sendJson(res, 409, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    if (method === "POST" && pathname === "/api/autopilot/toggle") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const scheduler = getAutopilotScheduler();
+      if (body.enabled) {
+        scheduler.start();
+      } else {
+        scheduler.stop();
+      }
+      await log(body.enabled ? "autopilot_enabled" : "autopilot_disabled", {});
+      return sendJson(res, 200, await scheduler.status());
+    }
+
+    if (method === "GET" && pathname === "/api/autopilot/history") {
+      const limitRaw = url.searchParams.get("limit");
+      const limit = limitRaw ? Math.min(parseInt(limitRaw, 10), 50) : 20;
+      const logStore = getAutopilotLogStore();
+      const history = await logStore.list(limit);
+      return sendJson(res, 200, { cycles: history });
+    }
+
+    if (method === "GET" && pathname === "/api/autopilot/config") {
+      return sendJson(res, 200, appConfig.autopilot);
     }
 
     if (method === "GET" && pathname === "/api/llm") {
@@ -802,6 +897,9 @@ async function handleAuthedApi(
 export function createUiServer() {
   const host = appConfig.ui.host;
   const port = appConfig.ui.port;
+
+  // Auto-start autopilot scheduler if enabled
+  maybeStartAutopilotScheduler();
 
   return createServer((req, res) => {
     void (async () => {

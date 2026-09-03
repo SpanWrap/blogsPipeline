@@ -305,6 +305,132 @@ program
     }
   });
 
+// ── Autopilot CLI ──
+
+const autopilot = program.command("autopilot").description("Manage the weekly autopilot scheduler");
+
+autopilot
+  .command("run")
+  .description("Trigger one autopilot cycle immediately (discover → generate → publish)")
+  .option("--dry-run", "Generate drafts but skip publishing")
+  .option("--offline", "Use mock providers (testing)")
+  .option("--platforms <list>", "Comma-separated platforms to target")
+  .option("--posts <n>", "Posts per platform", "2")
+  .action(async (opts: { dryRun?: boolean; offline?: boolean; platforms?: string; posts?: string }) => {
+    try {
+      const { runAutopilotCycle } = await import("../services/autopilot.js");
+      const cycle = await runAutopilotCycle({
+        dryRun: opts.dryRun,
+        offline: opts.offline,
+        platforms: opts.platforms
+          ? (opts.platforms.split(",").map((s: string) => s.trim().toLowerCase()).filter(Boolean) as any)
+          : undefined,
+        postsPerPlatform: opts.posts ? parseInt(opts.posts, 10) : undefined,
+      });
+      console.log(`\nAutopilot cycle: ${cycle.id}`);
+      console.log(`Status:    ${cycle.status}`);
+      console.log(`Topics:    ${cycle.topicsSelected} selected (${cycle.topicsDiscovered} discovered)`);
+      console.log(`Runs:      ${cycle.runsCreated.length} created`);
+      console.log(`Published: ${cycle.runsPublished}`);
+      console.log(`Review:    ${cycle.runsNeedingReview}`);
+      if (cycle.errors.length > 0) {
+        console.log(`Errors:    ${cycle.errors.length}`);
+        for (const err of cycle.errors) console.log(`  - ${err}`);
+      }
+      console.log();
+      for (const run of cycle.runsCreated) {
+        console.log(`  ${run.runId}\t${run.platform}\t${run.status}\t${run.topic}`);
+      }
+    } catch (error) {
+      logger.error("autopilot run failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      process.exitCode = 1;
+    }
+  });
+
+autopilot
+  .command("status")
+  .description("Show autopilot scheduler status and configuration")
+  .action(async () => {
+    try {
+      const { getAutopilotScheduler } = await import("../services/scheduler.js");
+      const scheduler = getAutopilotScheduler();
+      const status = await scheduler.status();
+      console.log(`Enabled:       ${status.enabled}`);
+      console.log(`Running:       ${status.running}`);
+      console.log(`Cycle busy:    ${status.cycleBusy}`);
+      console.log(`Cron:          ${status.cronExpression}`);
+      console.log(`Next run:      ${status.nextRun ?? "—"}`);
+      console.log(`Platforms:     ${status.config.platforms.join(", ")}`);
+      console.log(`Posts/platform:${status.config.postsPerPlatform}`);
+      console.log(`Skip review:   ${status.config.skipReview}`);
+      console.log(`Dry run:       ${status.config.dryRun}`);
+      console.log(`Min quality:   ${status.config.minQualityScore}`);
+      console.log(`Dedup days:    ${status.config.deduplicationDays}`);
+      if (status.lastCycle) {
+        console.log(`\nLast cycle:    ${status.lastCycle.id} (${status.lastCycle.status})`);
+        console.log(`  Started:     ${status.lastCycle.startedAt}`);
+        console.log(`  Completed:   ${status.lastCycle.completedAt ?? "—"}`);
+        console.log(`  Published:   ${status.lastCycle.runsPublished}`);
+        console.log(`  Review:      ${status.lastCycle.runsNeedingReview}`);
+      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  });
+
+autopilot
+  .command("history")
+  .description("List past autopilot cycle logs")
+  .option("-n, --limit <n>", "Number of cycles to show", "10")
+  .action(async (opts: { limit?: string }) => {
+    try {
+      const { getAutopilotLogStore } = await import("../services/autopilot-log.js");
+      const store = getAutopilotLogStore();
+      const limit = opts.limit ? parseInt(opts.limit, 10) : 10;
+      const cycles = await store.list(limit);
+      if (cycles.length === 0) {
+        console.log("No autopilot cycles recorded yet.");
+        return;
+      }
+      for (const c of cycles) {
+        const runs = c.runsCreated.length;
+        const published = c.runsPublished;
+        const errors = c.errors.length;
+        console.log(
+          `${c.id}\t${c.status}\t${c.startedAt}\truns=${runs}\tpublished=${published}\terrors=${errors}`,
+        );
+      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  });
+
+autopilot
+  .command("enable")
+  .description("Enable the autopilot scheduler")
+  .action(async () => {
+    const { getAutopilotScheduler } = await import("../services/scheduler.js");
+    const scheduler = getAutopilotScheduler();
+    scheduler.start();
+    console.log("Autopilot scheduler enabled.");
+    const status = await scheduler.status();
+    console.log(`Next run: ${status.nextRun ?? "—"}`);
+  });
+
+autopilot
+  .command("disable")
+  .description("Disable the autopilot scheduler")
+  .action(async () => {
+    const { getAutopilotScheduler } = await import("../services/scheduler.js");
+    const scheduler = getAutopilotScheduler();
+    scheduler.stop();
+    console.log("Autopilot scheduler disabled.");
+  });
+
 program.parseAsync(process.argv).catch((error) => {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);

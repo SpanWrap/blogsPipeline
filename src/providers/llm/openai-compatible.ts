@@ -4,7 +4,7 @@ import { getResolvedLlmConfig } from "../../services/llm-settings";
 import { logger } from "../../services/logger";
 import { isTransientError, withRetry } from "../../utils/retry";
 import { formatLlmHttpError } from "./errors";
-import type { LLMProvider } from "./types";
+import type { GenerateTextOptions, LLMProvider } from "./types";
 
 export type OpenAICompatibleOptions = {
   extraHeaders?: Record<string, string>;
@@ -53,24 +53,29 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
 
   private async chat(
     messages: Array<{ role: string; content: string }>,
-    options?: { json?: boolean },
+    options?: { json?: boolean } & GenerateTextOptions,
   ): Promise<string> {
     return withRetry(
       async () => {
         const controller = new AbortController();
         const reasoningModel = /reasoner|r1/i.test(this.model);
-        const timeoutMs = reasoningModel
-          ? Math.max(appConfig.llm.requestTimeoutMs, 240_000)
-          : appConfig.llm.requestTimeoutMs;
+        const timeoutMs =
+          options?.timeoutMs ??
+          (reasoningModel
+            ? Math.max(appConfig.llm.requestTimeoutMs, 240_000)
+            : appConfig.llm.requestTimeoutMs);
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
+          const maxTokens =
+            options?.maxTokens ??
+            (reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192);
           const body: Record<string, unknown> = {
             model: this.model,
-            max_tokens: reasoningModel ? 16384 : this.name === "groq" ? 4096 : 8192,
+            max_tokens: maxTokens,
             messages,
           };
           if (!reasoningModel) {
-            body.temperature = 0.4;
+            body.temperature = options?.temperature ?? 0.4;
           }
           if (options?.json && this.jsonMode && !reasoningModel) {
             body.response_format = { type: "json_object" };
@@ -112,7 +117,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
         }
       },
       {
-        maxAttempts: appConfig.retry.maxAttempts,
+        maxAttempts: Math.min(2, appConfig.retry.maxAttempts),
         baseDelayMs: appConfig.retry.baseDelayMs,
         shouldRetry: (error) => {
           const message = error instanceof Error ? error.message : String(error);
@@ -132,8 +137,12 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     );
   }
 
-  async generateText(prompt: string): Promise<string> {
-    return this.chat([{ role: "user", content: prompt }]);
+  async generateText(prompt: string, options?: GenerateTextOptions): Promise<string> {
+    const messages = [
+      ...(options?.system ? [{ role: "system", content: options.system }] : []),
+      { role: "user", content: prompt },
+    ];
+    return this.chat(messages, options);
   }
 
   async streamText(

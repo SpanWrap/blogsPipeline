@@ -1850,9 +1850,14 @@ function bindQuickEdit(editor, root, run) {
     busy = true;
     const submitBtn = host.querySelector("[data-qe=submit]");
     if (submitBtn) submitBtn.disabled = true;
+    const started = Date.now();
+    let tick = null;
     if (status) {
       status.hidden = false;
       status.textContent = "Rewriting selection…";
+      tick = setInterval(() => {
+        status.textContent = `Rewriting selection… ${Math.round((Date.now() - started) / 1000)}s`;
+      }, 400);
     }
 
     try {
@@ -1866,16 +1871,22 @@ function bindQuickEdit(editor, root, run) {
         }),
       });
       state.run = result;
+      // Update editor in place — avoid full tab remount latency.
+      const editor = root.querySelector("#draft-content-editor");
+      if (editor && result.article?.content) {
+        editor.innerHTML = markdownToEditorHtml(result.article.content);
+        refreshQualityPreview(root, result);
+      }
       clearHost();
-      toast("Selection regenerated");
-      await loadRuns();
-      state.tab = "quality";
-      renderDetail();
+      const secs = ((Date.now() - started) / 1000).toFixed(1);
+      toast(`Selection regenerated (${secs}s)`);
+      void loadRuns().catch(() => {});
     } catch (e) {
       if (status) status.textContent = e.message || "Regenerate failed";
       toast(e.message || "Regenerate failed", true);
       if (submitBtn) submitBtn.disabled = false;
     } finally {
+      if (tick) clearInterval(tick);
       busy = false;
     }
   }
@@ -2552,6 +2563,144 @@ $("#template-form")?.querySelector('input[type="file"]')?.addEventListener("chan
   }
 });
 
+// ── Autopilot UI ──
+
+async function loadAutopilotStatus() {
+  try {
+    const res = await fetch("/api/autopilot/status");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderAutopilotStatus(data);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function loadAutopilotHistory() {
+  try {
+    const res = await fetch("/api/autopilot/history?limit=10");
+    if (!res.ok) return;
+    const data = await res.json();
+    renderAutopilotHistory(data.cycles || []);
+  } catch {
+    /* ignore */
+  }
+}
+
+function renderAutopilotStatus(data) {
+  const el = (id) => document.getElementById(id);
+
+  // Status badge
+  const enabledEl = el("ap-enabled");
+  if (enabledEl) {
+    const isOn = data.enabled;
+    enabledEl.innerHTML = `<span class="ap-badge ${isOn ? 'enabled' : 'disabled'}">${isOn ? 'Enabled' : 'Disabled'}</span>`;
+    if (data.cycleBusy) {
+      enabledEl.innerHTML += ` <span class="ap-badge running">Cycle running…</span>`;
+    }
+  }
+
+  // Next run
+  const nextEl = el("ap-next");
+  if (nextEl) {
+    nextEl.textContent = data.nextRun
+      ? new Date(data.nextRun).toLocaleString()
+      : data.enabled ? "Computing…" : "Not scheduled";
+  }
+
+  // Config fields
+  const cfg = data.config || {};
+  const setEl = (id, val) => { const e = el(id); if (e) e.textContent = val; };
+  setEl("ap-platforms", (cfg.platforms || []).join(", ") || "—");
+  setEl("ap-posts", String(cfg.postsPerPlatform ?? "—"));
+  setEl("ap-skip-review", cfg.skipReview ? "Yes" : "No");
+  setEl("ap-min-quality", String(cfg.minQualityScore ?? "—"));
+  setEl("ap-dedup", `${cfg.deduplicationDays ?? 30} days`);
+  setEl("ap-dry-run", cfg.dryRun ? "Yes (no publish)" : "No");
+
+  // Toggle button state
+  const toggleBtn = el("autopilot-toggle");
+  if (toggleBtn) {
+    if (data.enabled) {
+      toggleBtn.textContent = "Disable";
+      toggleBtn.classList.add("ap-toggle-on");
+    } else {
+      toggleBtn.textContent = "Enable";
+      toggleBtn.classList.remove("ap-toggle-on");
+    }
+  }
+}
+
+function renderAutopilotHistory(cycles) {
+  const tbody = document.getElementById("autopilot-history-body");
+  if (!tbody) return;
+
+  if (!cycles.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="empty-row">No cycles recorded yet.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = cycles.map((c) => {
+    const started = new Date(c.startedAt).toLocaleString();
+    const statusClass = c.status === "completed" ? "completed" : c.status === "failed" ? "failed" : "running";
+    return `<tr>
+      <td title="${c.id}">${c.id.slice(0, 12)}…</td>
+      <td><span class="ap-badge ${statusClass}">${c.status}</span></td>
+      <td>${c.topicsSelected}</td>
+      <td>${c.runsCreated ? c.runsCreated.length : 0}</td>
+      <td>${c.runsPublished}</td>
+      <td>${c.runsNeedingReview}</td>
+      <td>${c.errors ? c.errors.length : 0}</td>
+      <td>${started}</td>
+    </tr>`;
+  }).join("");
+}
+
+// Toggle autopilot
+document.getElementById("autopilot-toggle")?.addEventListener("click", async () => {
+  const toggleBtn = document.getElementById("autopilot-toggle");
+  const isEnabled = toggleBtn?.classList.contains("ap-toggle-on");
+  try {
+    const res = await fetch("/api/autopilot/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !isEnabled }),
+    });
+    if (!res.ok) throw new Error("Toggle failed");
+    const data = await res.json();
+    renderAutopilotStatus(data);
+    toast(data.enabled ? "Autopilot enabled" : "Autopilot disabled");
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// Trigger autopilot now
+document.getElementById("autopilot-trigger")?.addEventListener("click", async () => {
+  const btn = document.getElementById("autopilot-trigger");
+  if (!btn) return;
+  const prev = btn.textContent;
+  btn.textContent = "Running…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/autopilot/trigger", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Trigger failed");
+    toast(`Autopilot cycle complete: ${data.runsCreated?.length ?? 0} runs created, ${data.runsPublished ?? 0} published`);
+    await loadAutopilotStatus();
+    await loadAutopilotHistory();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.textContent = prev;
+    btn.disabled = false;
+  }
+});
+
 async function bootApp() {
   const ok = await ensureAuth();
   if (!ok) return;
@@ -2562,7 +2711,7 @@ async function bootApp() {
   }
   await loadHealth();
   const boot = [loadLlm(), loadTemplates()];
-  if (isSettingsPage()) boot.push(loadLogs(), loadUsers());
+  if (isSettingsPage()) boot.push(loadLogs(), loadUsers(), loadAutopilotStatus(), loadAutopilotHistory());
   else boot.push(loadRuns(), loadDigest());
   await Promise.all(boot);
 }
