@@ -671,7 +671,9 @@ export function RunDetail({
         <strong>Run to review</strong> runs research → outline → draft → quality. If a run failed, it
         resumes from the failed stage. Tabs below inspect/edit results — select text in Quality to
         Quick Edit.
-        {hasGeminiKey ? " Enable Gemini images to generate art with the draft." : ""}
+        {hasGeminiKey
+          ? " Enable Gemini images to generate art with the draft (also works when continuing an existing draft)."
+          : ""}
       </p>
       <div className="actions">
         <button className="btn primary" disabled={busy} onClick={() => onAct("run")}>
@@ -729,6 +731,16 @@ export function RunDetail({
           <button className="btn" disabled={busy} onClick={() => onAct("generate")}>
             Generate
           </button>
+          {hasGeminiKey ? (
+            <button
+              className="btn"
+              disabled={busy || !run.article}
+              title="Generate hero/section images for the current draft"
+              onClick={() => onAct("generate-images")}
+            >
+              Generate images
+            </button>
+          ) : null}
           <button className="btn" disabled={busy} onClick={() => onAct("quality-check")}>
             Quality score
           </button>

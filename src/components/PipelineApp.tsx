@@ -507,6 +507,42 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     ],
   );
 
+  const refreshPageData = useCallback(async () => {
+    try {
+      await Promise.all([loadHealth(), loadLlm(), loadTemplates()]);
+    } catch {
+      /* individual loaders toast/handle */
+    }
+    if (page === "settings") {
+      void Promise.all([
+        loadLogs(),
+        loadUsers(),
+        loadAutopilotStatus(),
+        loadAutopilotHistory(),
+      ]).catch(() => {});
+      return;
+    }
+    setDigest((prev) => (prev === null ? "loading" : prev));
+    void loadRuns().catch((e) =>
+      toast(e instanceof Error ? e.message : "Could not load runs", true),
+    );
+    void loadDigest().catch(() => {
+      setDigest((prev) => (prev === "loading" ? null : prev));
+    });
+  }, [
+    page,
+    loadHealth,
+    loadLlm,
+    loadTemplates,
+    loadLogs,
+    loadUsers,
+    loadAutopilotStatus,
+    loadAutopilotHistory,
+    loadRuns,
+    loadDigest,
+    toast,
+  ]);
+
   const bootAfterAuth = useCallback(
     async (name: string) => {
       setAuthenticated(true);
@@ -521,43 +557,14 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         } catch {
           /* ignore */
         }
-        await Promise.all([loadHealth(), loadLlm(), loadTemplates()]);
-        if (page === "settings") {
-          void Promise.all([
-            loadLogs(),
-            loadUsers(),
-            loadAutopilotStatus(),
-            loadAutopilotHistory(),
-          ]).catch(() => {});
-        } else {
-          setDigest((prev) => (prev === null ? "loading" : prev));
-          void loadRuns().catch((e) =>
-            toast(e instanceof Error ? e.message : "Could not load runs", true),
-          );
-          void loadDigest().catch(() => {
-            setDigest((prev) => (prev === "loading" ? null : prev));
-          });
-        }
+        await refreshPageData();
         persistWorkspaceBoot(name);
         setWorkspaceReady(true);
       } finally {
         if (showLoader) setBooting(false);
       }
     },
-    [
-      page,
-      workspaceReady,
-      loadHealth,
-      loadLlm,
-      loadTemplates,
-      loadLogs,
-      loadUsers,
-      loadAutopilotStatus,
-      loadAutopilotHistory,
-      loadRuns,
-      loadDigest,
-      toast,
-    ],
+    [workspaceReady, refreshPageData],
   );
 
   useEffect(() => {
@@ -569,12 +576,13 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         if (sessionStatus === "authenticated") {
           const name = session?.user?.username || session?.user?.name || "";
           if (!name) return;
-          // Already booted this user — never remount the full-page loader mid-session.
+          // Same tab session: keep UI mounted, but still hydrate data for this page.
           if (bootUserRef.current === name) {
             if (!cancelled) {
               setAuthenticated(true);
               setUsername(name);
               setSetupRequired(false);
+              void refreshPageData();
             }
             return;
           }
@@ -595,7 +603,10 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
           .catch(() => ({}));
         if (cancelled) return;
         if (me.authenticated && me.username) {
-          if (bootUserRef.current === me.username) return;
+          if (bootUserRef.current === me.username) {
+            void refreshPageData();
+            return;
+          }
           bootUserRef.current = me.username;
           await bootAfterAuth(me.username);
         } else {
@@ -608,11 +619,24 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     return () => {
       cancelled = true;
     };
-  }, [bootAfterAuth, showAuthGate, session?.user?.username, session?.user?.name, sessionStatus]);
+  }, [
+    bootAfterAuth,
+    refreshPageData,
+    showAuthGate,
+    session?.user?.username,
+    session?.user?.name,
+    sessionStatus,
+  ]);
 
   useEffect(() => {
     document.title = page === "settings" ? "Settings · Spanwrap Pipeline" : "Spanwrap Blog Pipeline";
   }, [page]);
+
+  // When navigating home ↔ settings inside the persistent shell, load that page's data.
+  useEffect(() => {
+    if (!authenticated) return;
+    void refreshPageData();
+  }, [page, authenticated, refreshPageData]);
 
   useEffect(() => {
     try {

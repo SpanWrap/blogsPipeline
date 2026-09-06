@@ -944,13 +944,20 @@ export class BlogPipelineOrchestrator {
       return next;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.warn("Image generation skipped", { error: message });
+      logger.warn("Image generation failed", { error: message, runId: run.id });
       const stages = next.stages.map((s) =>
         s.stage === "images"
-          ? { ...s, status: "skipped" as const, error: message, endedAt: new Date().toISOString() }
+          ? { ...s, status: "failed" as const, error: message, endedAt: new Date().toISOString() }
           : s,
       );
-      return { ...next, stages, error: null };
+      // Keep the draft usable; surface the image error in notes/stages without failing the run.
+      return {
+        ...next,
+        stages,
+        reviewNotes: [next.reviewNotes, `Image generation failed: ${message}`]
+          .filter(Boolean)
+          .join("\n"),
+      };
     }
   }
 
@@ -1034,8 +1041,22 @@ export class BlogPipelineOrchestrator {
         });
         if (run.status === "FAILED" || !run.article) return run;
       } else if (!run.article) {
-        run = await this.generateUnlocked(id, { snapshot: run });
+        run = await this.generateUnlocked(id, {
+          snapshot: run,
+          generateImages: options.generateImages,
+        });
         if (run.status === "FAILED" || !run.article) return run;
+      } else {
+        // Draft already exists (resume/continue). Still generate images when requested
+        // and the article has no featured art yet.
+        const wantImages =
+          options.generateImages === true ||
+          (options.generateImages !== false && run.generateImages);
+        const missingImages =
+          !run.article.featuredImage && !(run.thumbnailVariants?.length > 0);
+        if (wantImages && missingImages) {
+          run = await this.attachGeneratedImages({ ...run, generateImages: true });
+        }
       }
 
       return this.qualityCheckUnlocked(id, { article: run.article });

@@ -44,6 +44,16 @@ export const LLM_PROVIDERS = [
     ],
   },
   {
+    id: "deepseek",
+    label: "DeepSeek",
+    defaultModel: "deepseek-chat",
+    keyLabel: "DeepSeek API key",
+    models: [
+      { id: "deepseek-chat", label: "DeepSeek V3" },
+      { id: "deepseek-reasoner", label: "DeepSeek R1" },
+    ],
+  },
+  {
     id: "mock",
     label: "Mock (no API)",
     defaultModel: "mock-1",
