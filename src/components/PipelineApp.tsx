@@ -36,18 +36,56 @@ type PipelineAppProps = {
   initialPage?: AppPage;
 };
 
+const WORKSPACE_READY_KEY = "pipeline.workspaceReady";
+const WORKSPACE_USER_KEY = "pipeline.username";
+
+function readWorkspaceBoot(): { ready: boolean; username: string } {
+  if (typeof window === "undefined") return { ready: false, username: "" };
+  try {
+    if (sessionStorage.getItem(WORKSPACE_READY_KEY) === "1") {
+      return {
+        ready: true,
+        username: sessionStorage.getItem(WORKSPACE_USER_KEY) || "",
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { ready: false, username: "" };
+}
+
+function persistWorkspaceBoot(username: string) {
+  try {
+    sessionStorage.setItem(WORKSPACE_READY_KEY, "1");
+    sessionStorage.setItem(WORKSPACE_USER_KEY, username);
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearWorkspaceBoot() {
+  try {
+    sessionStorage.removeItem(WORKSPACE_READY_KEY);
+    sessionStorage.removeItem(WORKSPACE_USER_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   const page: AppPage = initialPage === "settings" ? "settings" : "home";
   const { data: session, status: sessionStatus } = useSession();
-  const [authChecked, setAuthChecked] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
+  const boot0 = readWorkspaceBoot();
+  const [authChecked, setAuthChecked] = useState(boot0.ready);
+  const [authenticated, setAuthenticated] = useState(boot0.ready);
   const [setupRequired, setSetupRequired] = useState(false);
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState(boot0.username);
   const [booting, setBooting] = useState(false);
+  const [workspaceReady, setWorkspaceReady] = useState(boot0.ready);
   const [homeView, setHomeView] = useState<HomeView>("runs");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const bootUserRef = useRef<string | null>(null);
+  const bootUserRef = useRef<string | null>(boot0.ready ? boot0.username || null : null);
   const bootInFlightRef = useRef(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastError, setToastError] = useState(false);
@@ -87,6 +125,9 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   const [autopilotCycles, setAutopilotCycles] = useState<AutopilotCycle[]>([]);
 
   const showAuthGate = useCallback((setup = false) => {
+    clearWorkspaceBoot();
+    bootUserRef.current = null;
+    setWorkspaceReady(false);
     setAuthenticated(false);
     setSetupRequired(setup);
     setUsername("");
@@ -471,14 +512,15 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
       setAuthenticated(true);
       setUsername(name);
       setSetupRequired(false);
-      setBooting(true);
+      // Only show the full-page loader on the first boot in this tab session.
+      const showLoader = !workspaceReady;
+      if (showLoader) setBooting(true);
       try {
         try {
           setGenerateImages(localStorage.getItem("pipeline.generateImages") === "1");
         } catch {
           /* ignore */
         }
-        // Critical path only — digest / settings extras load after the shell is usable.
         await Promise.all([loadHealth(), loadLlm(), loadTemplates()]);
         if (page === "settings") {
           void Promise.all([
@@ -496,12 +538,15 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
             setDigest((prev) => (prev === "loading" ? null : prev));
           });
         }
+        persistWorkspaceBoot(name);
+        setWorkspaceReady(true);
       } finally {
-        setBooting(false);
+        if (showLoader) setBooting(false);
       }
     },
     [
       page,
+      workspaceReady,
       loadHealth,
       loadLlm,
       loadTemplates,
@@ -693,12 +738,12 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     }
   }
 
-  if (booting) {
+  if (booting && !workspaceReady) {
     return <LoadingScreen label="Preparing your workspace…" />;
   }
 
-  // Never tear down the app on session refetch — only block before first auth resolution.
-  if (!authenticated) {
+  // Never tear down the app on tab-focus / session refetch once this tab has booted.
+  if (!authenticated && !workspaceReady) {
     if (sessionStatus === "loading" || !authChecked) {
       return <LoadingScreen label="Loading Spanwrap Pipeline…" />;
     }
@@ -731,6 +776,8 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
               className="btn ghost"
               onClick={async () => {
                 bootUserRef.current = null;
+                clearWorkspaceBoot();
+                setWorkspaceReady(false);
                 await signOut({ redirect: false });
                 showAuthGate(false);
               }}

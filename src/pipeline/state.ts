@@ -42,8 +42,66 @@ export function completeStage(
       error: null,
     };
   });
-  return { ...run, stages, updatedAt: nowIso() };
+  const version = (run.checkpointVersion ?? 0) + 1;
+  const note =
+    typeof meta.title === "string"
+      ? meta.title
+      : typeof meta.score === "number"
+        ? `score ${meta.score}`
+        : typeof meta.sourcesFound === "number"
+          ? `${meta.sourcesFound} sources`
+          : undefined;
+  const checkpoints = [
+    ...(run.checkpoints ?? []),
+    { version, stage, at: nowIso(), note },
+  ].slice(-40);
+  return {
+    ...run,
+    stages,
+    checkpointVersion: version,
+    lastCheckpoint: stage,
+    checkpoints,
+    updatedAt: nowIso(),
+    error: null,
+    failedStage: null,
+    errorCode: null,
+    retryable: false,
+  };
 }
+
+/** True when another worker still holds a non-expired lease on this run. */
+export function hasActiveLease(run: PipelineRun, now = Date.now()): boolean {
+  if (!run.leaseUntil) return false;
+  const until = Date.parse(run.leaseUntil);
+  return Number.isFinite(until) && until > now;
+}
+
+/**
+ * Mark a run that died mid-stage (process restart, aborted request, etc.) as FAILED
+ * so the UI can show Retry instead of a permanent GENERATING badge.
+ * Preserves research/outline/article so Continue can resume from the failed stage.
+ */
+export function markInterrupted(
+  run: PipelineRun,
+  message =
+    "Pipeline was interrupted before this stage finished (server restart or aborted request). Safe to retry.",
+): PipelineRun {
+  const stage = inferInterruptedStage(run);
+  let next = run;
+  if (!findRunningStage(run) || findRunningStage(run)?.stage !== stage) {
+    next = startStage(run, stage);
+  }
+  const failed = failStage(next, stage, message, {
+    errorCode: "INTERRUPTED",
+    retryable: true,
+  });
+  return {
+    ...failed,
+    leaseId: null,
+    leaseUntil: null,
+  };
+}
+
 
 export function failStage(
   run: PipelineRun,
@@ -78,13 +136,14 @@ export function failStage(
 /** Derive a machine-readable error code from an error message. */
 function classifyErrorCode(message: string): string {
   const m = message.toLowerCase();
+  if (m.includes("interrupted")) return "INTERRUPTED";
   if (m.includes("timed out") || m.includes("timeout")) return "LLM_TIMEOUT";
   if (m.includes("rate limit") || m.includes("429") || m.includes("tpm")) return "RATE_LIMIT";
   if (m.includes("prompt too large") || m.includes("413")) return "PROMPT_TOO_LARGE";
   if (m.includes("no usable sources")) return "RESEARCH_EMPTY";
   if (m.includes("model") && (m.includes("not found") || m.includes("unavailable"))) return "MODEL_NOT_FOUND";
   if (m.includes("api key")) return "AUTH_ERROR";
-  if (m.includes("empty llm response")) return "EMPTY_RESPONSE";
+  if (m.includes("empty llm response") || m.includes("did not contain valid json")) return "EMPTY_RESPONSE";
   if (/5\d\d/.test(message)) return "SERVER_ERROR";
   return "UNKNOWN";
 }
@@ -92,7 +151,9 @@ function classifyErrorCode(message: string): string {
 /** Determine if the error is transient and worth retrying. */
 function isRetryableError(message: string): boolean {
   const code = classifyErrorCode(message);
-  return ["LLM_TIMEOUT", "RATE_LIMIT", "SERVER_ERROR", "EMPTY_RESPONSE"].includes(code);
+  return ["LLM_TIMEOUT", "RATE_LIMIT", "SERVER_ERROR", "EMPTY_RESPONSE", "INTERRUPTED"].includes(
+    code,
+  );
 }
 
 export function setStatus(run: PipelineRun, status: PipelineStatus): PipelineRun {
@@ -141,25 +202,5 @@ export function inFlightAgeMs(run: PipelineRun, now = Date.now()): number {
   const start = Date.parse(startedAt);
   if (!Number.isFinite(start)) return 0;
   return Math.max(0, now - start);
-}
-
-/**
- * Mark a run that died mid-stage (process restart, aborted request, etc.) as FAILED
- * so the UI can show Retry instead of a permanent GENERATING badge.
- */
-export function markInterrupted(
-  run: PipelineRun,
-  message =
-    "Pipeline was interrupted before this stage finished (server restart or aborted request). Safe to retry.",
-): PipelineRun {
-  const stage = inferInterruptedStage(run);
-  let next = run;
-  if (!findRunningStage(run) || findRunningStage(run)?.stage !== stage) {
-    next = startStage(run, stage);
-  }
-  return failStage(next, stage, message, {
-    errorCode: "INTERRUPTED",
-    retryable: true,
-  });
 }
 

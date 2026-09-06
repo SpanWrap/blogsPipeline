@@ -78,7 +78,7 @@ export function ensureBoot(): void {
   bootStarted = true;
   maybeStartAutopilotScheduler();
 
-  // Local restarts leave runs stuck in GENERATING/RESEARCHING; mark them failed so Retry works.
+  // Local restarts leave runs stuck mid-stage. Force age skip, but never steal an active lease.
   if (!process.env.VERCEL) {
     void createOrchestrator()
       .recoverInterruptedRuns({ force: true })

@@ -572,4 +572,47 @@ describe("end-to-end pipeline", () => {
     await orch.runUntilReview(created.id);
     await expect(orch.publish(created.id)).rejects.toThrow(/APPROVED/);
   });
+
+  it("resumes FAILED quality from draft without re-research", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    const ready = await orch.runUntilReview(created.id);
+    expect(ready.article).toBeTruthy();
+    expect(ready.checkpointVersion).toBeGreaterThan(0);
+
+    const { markInterrupted, startStage, setStatus } = await import("../src/pipeline/state");
+    const interrupted = markInterrupted(
+      setStatus(startStage({ ...ready, quality: null }, "quality"), "QUALITY_CHECK"),
+    );
+    await store.save(interrupted);
+
+    const resumed = await orch.runUntilReview(created.id);
+    expect(resumed.status).toBe("REVIEW_REQUIRED");
+    expect(resumed.article?.title).toBe(ready.article?.title);
+    expect(resumed.quality).toBeTruthy();
+  });
+
+  it("keeps previousArticle when regenerating a draft", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    const first = await orch.runUntilReview(created.id);
+    expect(first.article).toBeTruthy();
+    const firstTitle = first.article!.title;
+
+    const second = await orch.generate(created.id);
+    expect(second.previousArticle?.title).toBe(firstTitle);
+    expect(second.article).toBeTruthy();
+  });
 });

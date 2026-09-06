@@ -322,6 +322,27 @@ export const PipelineRunSchema = z.object({
       }),
     )
     .default([]),
+  /**
+   * Monotonic checkpoint version — increments whenever a stage completes with
+   * durable artifacts (research/outline/draft/quality). Used for resume/continue.
+   */
+  checkpointVersion: z.number().int().nonnegative().default(0),
+  /** Last successfully completed pipeline stage name. */
+  lastCheckpoint: z.string().nullable().default(null),
+  /** Stage checkpoint log (newest last). */
+  checkpoints: z
+    .array(
+      z.object({
+        version: z.number().int().nonnegative(),
+        stage: z.string(),
+        at: z.string(),
+        note: z.string().optional(),
+      }),
+    )
+    .default([]),
+  /** Soft lease so other requests don't mark a live worker as INTERRUPTED. */
+  leaseId: z.string().nullable().default(null),
+  leaseUntil: z.string().nullable().default(null),
   /** Tracks runs created by the autopilot scheduler. Null for manually created runs. */
   autopilotSource: z
     .object({

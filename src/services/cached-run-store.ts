@@ -24,7 +24,13 @@ export class CachedRunStore implements RunStore {
 
   async get(id: string): Promise<PipelineRun | null> {
     const hit = this.byId.get(id);
-    if (hit && Date.now() - hit.at < this.getTtlMs) return hit.run;
+    if (hit && Date.now() - hit.at < this.getTtlMs) {
+      // Always revalidate in-flight runs so leases/heartbeats stay visible to pollers.
+      const status = hit.run.status;
+      if (status !== "RESEARCHING" && status !== "GENERATING" && status !== "QUALITY_CHECK") {
+        return hit.run;
+      }
+    }
     const run = await this.inner.get(id);
     if (run) this.byId.set(id, { run, at: Date.now() });
     else this.byId.delete(id);

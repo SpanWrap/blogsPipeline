@@ -34,9 +34,11 @@ import {
 import {
   completeStage,
   failStage,
+  hasActiveLease,
   inFlightAgeMs,
   isInFlightRun,
   markInterrupted,
+  nowIso,
   setStatus,
   startStage,
 } from "./state";
@@ -65,8 +67,16 @@ import { createQuickEditLLM } from "../providers/llm/quick-edit";
 /** Process-wide lock so two "Run to review" clicks cannot wipe each other's outline/article. */
 const runLocks = new Map<string, Promise<void>>();
 
+/** Soft lease TTL — renewed by heartbeats during long LLM stages. */
+const LEASE_TTL_MS = 3 * 60_000;
+const HEARTBEAT_MS = 25_000;
+
 function isRunLockedLocally(id: string): boolean {
   return runLocks.has(id);
+}
+
+function leaseExpiryIso(ttlMs = LEASE_TTL_MS): string {
+  return new Date(Date.now() + ttlMs).toISOString();
 }
 
 async function withRunLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
@@ -84,6 +94,59 @@ async function withRunLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
     release();
     if (runLocks.get(id) === chained) runLocks.delete(id);
   }
+}
+
+/**
+ * Decide which stage to resume from based on failedStage + durable artifacts.
+ * Returns null when the full pipeline should run from research.
+ */
+function resolveResumeStage(run: PipelineRun): string | null {
+  if (run.status === "FAILED" && run.failedStage) {
+    if (
+      run.failedStage === "quality" ||
+      run.failedStage === "images" ||
+      run.failedStage === "generation" ||
+      run.failedStage === "outline" ||
+      run.failedStage === "research" ||
+      run.failedStage === "analysis"
+    ) {
+      return run.failedStage === "analysis" ? "outline" : run.failedStage;
+    }
+  }
+
+  if (run.article) {
+    // Draft already saved — only quality (or images) remains for Continue / Run to review.
+    if (
+      run.status === "DRAFT_READY" ||
+      run.status === "REVIEW_REQUIRED" ||
+      run.status === "APPROVED" ||
+      run.status === "FAILED" ||
+      run.status === "QUALITY_CHECK" ||
+      run.lastCheckpoint === "generation" ||
+      run.lastCheckpoint === "images" ||
+      run.lastCheckpoint === "quality"
+    ) {
+      return "quality";
+    }
+  }
+
+  if (run.outline && run.analysis) {
+    if (
+      run.status === "OUTLINE_READY" ||
+      run.status === "FAILED" ||
+      run.lastCheckpoint === "outline"
+    ) {
+      return "generation";
+    }
+  }
+
+  if (run.analysis && run.sources.length > 0) {
+    if (run.status === "RESEARCH_COMPLETE" || run.status === "FAILED" || run.lastCheckpoint === "analysis") {
+      return "outline";
+    }
+  }
+
+  return null;
 }
 
 export type OrchestratorDeps = {
@@ -199,6 +262,11 @@ export class BlogPipelineOrchestrator {
       repurposePack: null,
       autoAccepted: false,
       articleHistory: [],
+      checkpointVersion: 0,
+      lastCheckpoint: null,
+      checkpoints: [],
+      leaseId: null,
+      leaseUntil: null,
       autopilotSource: null,
       idempotencyKey: createIdempotencyKey([id, brief.topic, "publish"]),
     };
@@ -274,17 +342,17 @@ export class BlogPipelineOrchestrator {
 
   /**
    * Mark abandoned in-flight runs as FAILED (retryable).
-   * Local boot: recover immediately (this process is the only worker).
-   * Otherwise: only recover runs older than the LLM timeout (+ grace).
+   * Never interrupt runs that still hold a fresh lease or an in-process lock.
    */
   async recoverInterruptedRuns(options: { force?: boolean } = {}): Promise<number> {
     const force = Boolean(options.force);
-    const maxAgeMs = appConfig.llm.requestTimeoutMs + 60_000;
+    const maxAgeMs = appConfig.llm.requestTimeoutMs + 90_000;
     const runs = await this.store.list();
     let recovered = 0;
     for (const run of runs) {
       if (!isInFlightRun(run)) continue;
       if (isRunLockedLocally(run.id)) continue;
+      if (hasActiveLease(run)) continue;
       if (!force && inFlightAgeMs(run) < maxAgeMs) continue;
       await this.store.save(markInterrupted(run));
       recovered += 1;
@@ -292,6 +360,7 @@ export class BlogPipelineOrchestrator {
         runId: run.id,
         status: run.status,
         force,
+        ageMs: inFlightAgeMs(run),
       });
     }
     return recovered;
@@ -300,23 +369,66 @@ export class BlogPipelineOrchestrator {
   private async maybeRecoverInterrupted(run: PipelineRun): Promise<PipelineRun> {
     if (!isInFlightRun(run)) return run;
     if (isRunLockedLocally(run.id)) return run;
-    const maxAgeMs = appConfig.llm.requestTimeoutMs + 60_000;
-    // After a local process restart, in-memory locks are gone — recover anything
-    // that has been sitting mid-stage longer than a short grace (covers refresh races).
-    const graceMs = process.env.VERCEL ? maxAgeMs : 15_000;
-    if (inFlightAgeMs(run) < graceMs) return run;
+    if (hasActiveLease(run)) return run;
+    // Use the full LLM timeout window everywhere — a 15s local grace falsely
+    // marked live quality/generation work as INTERRUPTED while the worker was alive.
+    const maxAgeMs = appConfig.llm.requestTimeoutMs + 90_000;
+    if (inFlightAgeMs(run) < maxAgeMs) return run;
     const recovered = markInterrupted(run);
     await this.store.save(recovered);
     logger.warn("Recovered interrupted pipeline run on read", {
       runId: run.id,
       previousStatus: run.status,
       failedStage: recovered.failedStage,
+      ageMs: inFlightAgeMs(run),
     });
     return recovered;
   }
 
+  /** Acquire or renew a durable lease so pollers won't mark this run interrupted. */
+  private async touchLease(id: string, leaseId?: string | null): Promise<string> {
+    const run = await this.store.require(id);
+    const nextLeaseId = leaseId && run.leaseId === leaseId ? leaseId : createId("lease");
+    await this.store.save({
+      ...run,
+      leaseId: nextLeaseId,
+      leaseUntil: leaseExpiryIso(),
+      updatedAt: nowIso(),
+    });
+    return nextLeaseId;
+  }
+
+  private async clearLease(id: string, leaseId: string | null): Promise<void> {
+    try {
+      const run = await this.store.require(id);
+      if (leaseId && run.leaseId && run.leaseId !== leaseId) return;
+      await this.store.save({
+        ...run,
+        leaseId: null,
+        leaseUntil: null,
+        updatedAt: nowIso(),
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** Keep lease fresh while awaiting a long LLM/network call. */
+  private async withHeartbeat<T>(id: string, work: () => Promise<T>): Promise<T> {
+    const leaseId = await this.touchLease(id);
+    const timer = setInterval(() => {
+      void this.touchLease(id, leaseId).catch(() => {});
+    }, HEARTBEAT_MS);
+    try {
+      return await work();
+    } finally {
+      clearInterval(timer);
+      await this.clearLease(id, leaseId);
+    }
+  }
+
   async research(id: string): Promise<PipelineRun> {
-    return withRunLock(id, () => this.researchUnlocked(id));
+    return withRunLock(id, () => this.withHeartbeat(id, () => this.researchUnlocked(id)));
   }
 
   private async researchUnlocked(id: string): Promise<PipelineRun> {
@@ -333,6 +445,8 @@ export class BlogPipelineOrchestrator {
         sources,
         analysis: null,
         outline: null,
+        // Keep the last draft for Diff when research is re-run.
+        previousArticle: run.article ?? run.previousArticle,
         article: null,
         quality: null,
       };
@@ -371,7 +485,7 @@ export class BlogPipelineOrchestrator {
   }
 
   async outline(id: string): Promise<PipelineRun> {
-    return withRunLock(id, () => this.outlineUnlocked(id));
+    return withRunLock(id, () => this.withHeartbeat(id, () => this.outlineUnlocked(id)));
   }
 
   private async outlineUnlocked(id: string): Promise<PipelineRun> {
@@ -399,6 +513,7 @@ export class BlogPipelineOrchestrator {
       let next: PipelineRun = {
         ...run,
         outline,
+        previousArticle: run.article ?? run.previousArticle,
         article: null,
         quality: null,
       };
@@ -425,13 +540,14 @@ export class BlogPipelineOrchestrator {
       ...run,
       outline,
       status: "OUTLINE_READY",
+      previousArticle: run.article ?? run.previousArticle,
       article: null,
       quality: null,
     });
   }
 
   async generate(id: string, options: { generateImages?: boolean } = {}): Promise<PipelineRun> {
-    return withRunLock(id, () => this.generateUnlocked(id, options));
+    return withRunLock(id, () => this.withHeartbeat(id, () => this.generateUnlocked(id, options)));
   }
 
   private async generateUnlocked(
@@ -491,7 +607,21 @@ export class BlogPipelineOrchestrator {
         });
       }
 
-      let next: PipelineRun = { ...run, article, quality: null };
+      let next: PipelineRun = {
+        ...run,
+        previousArticle: run.article ?? run.previousArticle ?? null,
+        article,
+        quality: null,
+        articleHistory: [
+          ...(run.articleHistory ?? []),
+          {
+            at: new Date().toISOString(),
+            note: run.article
+              ? `Regenerated draft (v${(run.checkpointVersion ?? 0) + 1})`
+              : `Draft checkpoint v${(run.checkpointVersion ?? 0) + 1}`,
+          },
+        ].slice(-20),
+      };
       next = completeStage(next, "generation", {
         title: article.title,
         provider: this.llm.name,
@@ -512,7 +642,7 @@ export class BlogPipelineOrchestrator {
   }
 
   async qualityCheck(id: string): Promise<PipelineRun> {
-    return withRunLock(id, () => this.qualityCheckUnlocked(id));
+    return withRunLock(id, () => this.withHeartbeat(id, () => this.qualityCheckUnlocked(id)));
   }
 
   private async qualityCheckUnlocked(
@@ -826,8 +956,8 @@ export class BlogPipelineOrchestrator {
 
   /**
    * Primary UI/CLI action.
-   * - Fresh or completed runs: full pipeline (research → outline → draft → quality)
-   * - FAILED runs: resume from failedStage, keeping earlier artifacts
+   * - Fresh runs: full pipeline (research → outline → draft → quality)
+   * - FAILED / partial runs: resume from failedStage or last durable artifacts
    * - stopAfter: "outline" stops after outline (batch / advanced flows)
    */
   async runUntilReview(
@@ -838,15 +968,15 @@ export class BlogPipelineOrchestrator {
       forceFull?: boolean;
     } = {},
   ): Promise<PipelineRun> {
-    return withRunLock(id, async () => {
+    return withRunLock(id, () =>
+      this.withHeartbeat(id, async () => {
       if (typeof options.generateImages === "boolean") {
         const current = await this.store.require(id);
         await this.store.save({ ...current, generateImages: options.generateImages });
       }
 
       let run = await this.store.require(id);
-      const resumeFrom =
-        !options.forceFull && run.status === "FAILED" ? run.failedStage : null;
+      const resumeFrom = options.forceFull ? null : resolveResumeStage(run);
 
       const skipResearch =
         resumeFrom === "outline" ||
@@ -909,7 +1039,8 @@ export class BlogPipelineOrchestrator {
       }
 
       return this.qualityCheckUnlocked(id, { article: run.article });
-    });
+      }),
+    );
   }
 
   /** Mark generation as running and stream a Markdown draft to the caller (SSE). */

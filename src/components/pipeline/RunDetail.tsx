@@ -133,8 +133,17 @@ export function RunDetail({
   const retryStageLabel = run.failedStage
     ? run.failedStage.charAt(0).toUpperCase() + run.failedStage.slice(1)
     : null;
-  const retryAction =
-    run.failedStage === "research"
+  // INTERRUPTED / failed mid-pipeline: always continue via runUntilReview so earlier
+  // artifacts (research/outline/draft) are reused instead of restarting from scratch.
+  const continueViaRun =
+    run.errorCode === "INTERRUPTED" ||
+    (run.retryable &&
+      run.failedStage &&
+      ["quality", "generation", "images", "outline"].includes(run.failedStage) &&
+      Boolean(run.article || run.outline || run.analysis));
+  const retryAction = continueViaRun
+    ? "run"
+    : run.failedStage === "research"
       ? "research"
       : run.failedStage === "outline"
         ? "outline"
@@ -143,9 +152,16 @@ export function RunDetail({
           : run.failedStage === "quality"
             ? "quality-check"
             : "run";
+  const retryLabel = continueViaRun
+    ? `Continue from ${retryStageLabel || run.lastCheckpoint || "last checkpoint"}`
+    : `Retry ${retryStageLabel}`;
   const stalledInFlight =
     !progress.active && ["RESEARCHING", "GENERATING", "QUALITY_CHECK"].includes(run.status);
   const runningStage = (run.stages || []).find((s: any) => s.status === "running");
+  const checkpointHint =
+    run.checkpointVersion > 0
+      ? ` · checkpoint v${run.checkpointVersion}${run.lastCheckpoint ? ` (${run.lastCheckpoint})` : ""}`
+      : "";
 
   function renderTab() {
     if (tab === "quality") {
@@ -375,8 +391,8 @@ export function RunDetail({
       if (!run!.previousArticle) {
         return (
           <p className="empty">
-            No previous version yet. Diff appears after you change the draft (Save, Readability pass,
-            section regenerate, or Quick Edit).
+            No previous version yet. Diff appears after you generate a new draft over an existing
+            one (Generate), or after Save / Readability pass / section regenerate / Quick Edit.
           </p>
         );
       }
@@ -552,7 +568,20 @@ export function RunDetail({
       return <pre className="pre">{JSON.stringify(run!.analysis, null, 2)}</pre>;
     }
     if (tab === "stages") {
-      return <pre className="pre">{JSON.stringify(run!.stages || [], null, 2)}</pre>;
+      return (
+        <pre className="pre">
+          {JSON.stringify(
+            {
+              checkpointVersion: run!.checkpointVersion ?? 0,
+              lastCheckpoint: run!.lastCheckpoint ?? null,
+              checkpoints: run!.checkpoints ?? [],
+              stages: run!.stages || [],
+            },
+            null,
+            2,
+          )}
+        </pre>
+      );
     }
     return <pre className="pre">{JSON.stringify(run, null, 2)}</pre>;
   }
@@ -566,6 +595,7 @@ export function RunDetail({
           <p className="meta-line">
             <span className={`status ${statusClass(run.status)}`}>{run.status}</span>
             {run.templateName ? ` · template: ${run.templateName}` : " · no template"}
+            {checkpointHint}
             {run.quality
               ? ` · quality ${run.quality.score} (${run.quality.passed ? "pass" : "flag"})`
               : ""}
@@ -592,7 +622,7 @@ export function RunDetail({
               ) : null}
               {run.retryable && run.failedStage ? (
                 <button className="btn" disabled={busy} onClick={() => onAct(retryAction)}>
-                  ⟳ Retry {retryStageLabel}
+                  ⟳ {retryLabel}
                 </button>
               ) : null}
             </div>
