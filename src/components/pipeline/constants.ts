@@ -69,7 +69,6 @@ export const PUBLISH_SITES = [
 ] as const;
 
 export const TAB_LABELS: Record<string, string> = {
-  quality: "Quality",
   article: "Preview",
   publish: "Publish",
   seo: "SEO pack",
@@ -85,7 +84,6 @@ export const TAB_LABELS: Record<string, string> = {
 };
 
 export const DETAIL_TABS = [
-  "quality",
   "article",
   "seo",
   "facts",

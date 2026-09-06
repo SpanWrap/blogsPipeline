@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
-import { PUBLISH_SITES } from "./constants";
 import { featuredImageFor, htmlToMarkdown, markdownToEditorHtml } from "./markdown";
+import {
+  applyContentHighlights,
+  anchorQualityIssues,
+  type AnchoredQualityIssue,
+} from "./quality-highlights";
 import { RunRecord } from "./types";
 import { escapeHtml } from "./utils";
 
@@ -15,6 +19,8 @@ type QualityEditorProps = {
   onReject: (notes?: string) => void;
   onRunUpdated: (run: RunRecord) => void;
   toast: (message: string, isError?: boolean) => void;
+  /** Optional extras from the old Preview tab (thumbnails / section regen). */
+  extras?: ReactNode;
 };
 
 function selectedTargets(run: RunRecord): string[] {
@@ -31,15 +37,19 @@ export function QualityEditor({
   onReject,
   onRunUpdated,
   toast,
+  extras,
 }: QualityEditorProps) {
   const a = run.article;
   const editorRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const excerptRef = useRef<HTMLTextAreaElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const [title, setTitle] = useState(a?.title || "");
   const [excerpt, setExcerpt] = useState(a?.excerpt || "");
   const [featured, setFeatured] = useState(a?.featuredImage || "");
-  const [targets, setTargets] = useState(selectedTargets(run));
-  const [previewHtml, setPreviewHtml] = useState("");
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [activeIssueId, setActiveIssueId] = useState<string | null>(null);
   const runId = run.id;
   const contentKey = a?.content || "";
   const heroSrc = featuredImageFor(run, {
@@ -47,53 +57,119 @@ export function QualityEditor({
     featuredImage: featured.trim() || a?.featuredImage,
   });
 
+  const anchored = useMemo(
+    () =>
+      anchorQualityIssues(run.quality?.issues, {
+        title: a?.title || title,
+        excerpt: a?.excerpt || excerpt,
+        content: a?.content || "",
+        keywords: a?.keywords || [],
+      }),
+    [run.quality?.issues, a?.title, a?.excerpt, a?.content, a?.keywords, title, excerpt],
+  );
+
+  const applyHighlights = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    applyContentHighlights(
+      editor,
+      anchored.filter((i) => i.field === "content"),
+    );
+
+    // Field-level flags on title / excerpt inputs
+    const titleEl = titleRef.current;
+    const excerptEl = excerptRef.current;
+    titleEl?.classList.remove("qi-field-error", "qi-field-warning", "qi-field-info");
+    excerptEl?.classList.remove("qi-field-error", "qi-field-warning", "qi-field-info");
+    for (const issue of anchored) {
+      if (issue.field === "title" && titleEl) {
+        titleEl.classList.add(`qi-field-${issue.severity}`);
+        titleEl.dataset.qiId = issue.id;
+        titleEl.title = issue.message;
+      }
+      if (issue.field === "excerpt" && excerptEl) {
+        excerptEl.classList.add(`qi-field-${issue.severity}`);
+        excerptEl.dataset.qiId = issue.id;
+        excerptEl.title = issue.message;
+      }
+    }
+  }, [anchored]);
+
   useEffect(() => {
     setTitle(a?.title || "");
     setExcerpt(a?.excerpt || "");
     setFeatured(a?.featuredImage || "");
-    setTargets(selectedTargets(run));
     if (editorRef.current) {
       editorRef.current.innerHTML = markdownToEditorHtml(a?.content || "");
+      // Apply after paint so contentEditable is ready.
+      requestAnimationFrame(() => applyHighlights());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, contentKey, a?.featuredImage]);
+  }, [runId, contentKey, a?.featuredImage, run.quality?.score]);
+
+  useEffect(() => {
+    applyHighlights();
+  }, [applyHighlights]);
 
   function getContent() {
     if (editorRef.current) return htmlToMarkdown(editorRef.current.innerHTML);
     return a?.content || "";
   }
 
-  function refreshPreview() {
-    const live = {
-      ...a,
-      title,
-      excerpt,
-      content: getContent() || a?.content,
-      featuredImage: featured.trim() || a?.featuredImage,
-    };
-    const hero = featuredImageFor(run, live);
-    const sources = (live.sources || [])
-      .map(
-        (s: any) =>
-          `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title || s.url)}</a></li>`,
-      )
-      .join("");
-    setPreviewHtml(`
-      <article class="post-preview">
-        <p class="post-kicker">${escapeHtml(live.slug || "")} · ${escapeHtml((live.tags || []).join(" · "))}</p>
-        ${hero ? `<img class="post-hero" src="${escapeHtml(hero)}" alt="" loading="lazy" referrerpolicy="no-referrer" />` : ""}
-        <h1>${escapeHtml(live.title)}</h1>
-        ${live.subtitle ? `<p class="post-dek">${escapeHtml(live.subtitle)}</p>` : ""}
-        <p class="post-excerpt">${escapeHtml(live.excerpt || "")}</p>
-        <div class="post-body">${markdownToEditorHtml(live.content)}</div>
-        ${(live.sources || []).length ? `<aside class="post-sources"><h3>Sources</h3><ul>${sources}</ul></aside>` : ""}
-      </article>`);
+  function showTooltip(target: HTMLElement, message: string) {
+    const tip = tooltipRef.current;
+    if (!tip) return;
+    tip.hidden = false;
+    tip.textContent = message;
+    const rect = target.getBoundingClientRect();
+    const pad = 8;
+    tip.style.visibility = "hidden";
+    const h = tip.offsetHeight || 40;
+    const w = tip.offsetWidth || 220;
+    let top = rect.top - h - pad;
+    if (top < pad) top = Math.min(window.innerHeight - h - pad, rect.bottom + pad);
+    let left = rect.left + rect.width / 2 - w / 2;
+    left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
+    tip.style.top = `${top}px`;
+    tip.style.left = `${left}px`;
+    tip.style.visibility = "visible";
   }
 
-  useEffect(() => {
-    refreshPreview();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [title, excerpt, featured, runId, contentKey]);
+  function hideTooltip() {
+    const tip = tooltipRef.current;
+    if (!tip) return;
+    tip.hidden = true;
+  }
+
+  function scrollToIssue(issue: AnchoredQualityIssue) {
+    setActiveIssueId(issue.id);
+    setPanelOpen(true);
+    if (issue.field === "title") {
+      titleRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      titleRef.current?.focus();
+      return;
+    }
+    if (issue.field === "excerpt") {
+      excerptRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      excerptRef.current?.focus();
+      return;
+    }
+    if (issue.field === "content") {
+      const mark = editorRef.current?.querySelector(
+        `mark.qi-mark[data-qi-id="${issue.id.replace(/"/g, "")}"]`,
+      ) as HTMLElement | null;
+      if (mark) {
+        mark.scrollIntoView({ behavior: "smooth", block: "center" });
+        mark.classList.add("qi-flash");
+        showTooltip(mark, `${issue.severity}: ${issue.message}`);
+        window.setTimeout(() => mark.classList.remove("qi-flash"), 1600);
+        return;
+      }
+      editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -103,7 +179,6 @@ export function QualityEditor({
     function execCmd(cmd: string, value?: string) {
       editor!.focus();
       document.execCommand(cmd, false, value || undefined);
-      refreshPreview();
     }
 
     const onToolbarClick = (e: Event) => {
@@ -114,7 +189,6 @@ export function QualityEditor({
       if (btn.dataset.block) {
         editor!.focus();
         document.execCommand("formatBlock", false, `<${btn.dataset.block}>`);
-        refreshPreview();
       }
       if (btn.dataset.action === "link") {
         const url = prompt("Link URL:");
@@ -138,7 +212,6 @@ export function QualityEditor({
       if (btn.dataset.action === "hr") execCmd("insertHorizontalRule");
     };
 
-    const onInput = () => refreshPreview();
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "b") {
         e.preventDefault();
@@ -149,9 +222,24 @@ export function QualityEditor({
       }
     };
 
+    const onEditorOver = (e: Event) => {
+      const mark = (e.target as HTMLElement).closest?.("mark.qi-mark") as HTMLElement | null;
+      if (!mark || !editor!.contains(mark)) return;
+      const msg = mark.dataset.qiMessage || "";
+      if (msg) showTooltip(mark, msg);
+      setActiveIssueId(mark.dataset.qiId || null);
+    };
+    const onEditorOut = (e: Event) => {
+      const related = (e as MouseEvent).relatedTarget as Node | null;
+      const mark = (e.target as HTMLElement).closest?.("mark.qi-mark");
+      if (mark && related && (mark as HTMLElement).contains(related)) return;
+      hideTooltip();
+    };
+
     toolbar.addEventListener("click", onToolbarClick);
-    editor.addEventListener("input", onInput);
     editor.addEventListener("keydown", onKeyDown);
+    editor.addEventListener("mouseover", onEditorOver);
+    editor.addEventListener("mouseout", onEditorOut);
 
     // Quick edit chip
     let host = document.getElementById("quick-edit-host");
@@ -282,7 +370,7 @@ export function QualityEditor({
         onRunUpdated(result);
         if (editorRef.current && result.article?.content) {
           editorRef.current.innerHTML = markdownToEditorHtml(result.article.content);
-          refreshPreview();
+          requestAnimationFrame(() => applyHighlights());
         }
         clearHost();
         toast(`Selection regenerated (${((Date.now() - started) / 1000).toFixed(1)}s)`);
@@ -325,13 +413,15 @@ export function QualityEditor({
 
     return () => {
       toolbar.removeEventListener("click", onToolbarClick);
-      editor.removeEventListener("input", onInput);
       editor.removeEventListener("keydown", onKeyDown);
+      editor.removeEventListener("mouseover", onEditorOver);
+      editor.removeEventListener("mouseout", onEditorOut);
       editor.removeEventListener("mouseup", onMouseUp);
       clearHost();
+      hideTooltip();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, contentKey]);
+  }, [runId, contentKey, applyHighlights]);
 
   function collectPayload() {
     if (!a) throw new Error("No article to save");
@@ -339,7 +429,6 @@ export function QualityEditor({
     if (!title.trim()) throw new Error("Title is required");
     if (!excerpt.trim()) throw new Error("Excerpt is required");
     if (!content) throw new Error("Body is required");
-    if (!targets.length) throw new Error("Select at least one publishing site");
     return {
       article: {
         ...a,
@@ -350,7 +439,8 @@ export function QualityEditor({
         seoTitle: a.seoTitle || title.trim(),
         seoDescription: a.seoDescription || excerpt.trim(),
       },
-      publishTargets: targets,
+      // Destinations are chosen on the Publish tab; keep existing selection.
+      publishTargets: selectedTargets(run),
     };
   }
 
@@ -359,37 +449,110 @@ export function QualityEditor({
   }
 
   const q = run.quality;
+  const issueCount = anchored.length;
+  const errorCount = anchored.filter((i) => i.severity === "error").length;
+  const warningCount = anchored.filter((i) => i.severity === "warning").length;
 
   return (
-    <div ref={rootRef}>
-      {q ? (
-        <div className="quality-score">
-          Score <strong>{q.score}</strong> · {q.passed ? "pass" : "flag"}
-          <ul className="issues">
-            {(q.issues || []).map((i: any, idx: number) => (
-              <li key={idx}>
-                <strong>{i.severity}</strong> {i.type} — {i.message}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      <p className="hint">
-        Tip: select any passage in the editor to open <strong>Regenerate</strong> (Quick Edit).
-      </p>
+    <div ref={rootRef} className="preview-quality-root">
+      {extras}
+
+      <div className="qi-dock">
+        <button
+          type="button"
+          className={`qi-fab${panelOpen ? " is-open" : ""}${errorCount ? " has-error" : ""}${!issueCount ? " is-empty" : ""}`}
+          aria-expanded={panelOpen}
+          aria-controls="qi-issues-panel"
+          title={issueCount ? "Quality warnings" : q ? "No quality issues" : "No quality report yet"}
+          onClick={() => setPanelOpen((v) => !v)}
+        >
+          <span className="qi-fab-icon" aria-hidden>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M12 3l9 16H3L12 3z" />
+              <path d="M12 10v4" />
+              <circle cx="12" cy="17" r="0.8" fill="currentColor" stroke="none" />
+            </svg>
+          </span>
+          <span className="qi-fab-count">{issueCount}</span>
+        </button>
+        {panelOpen ? (
+          <aside id="qi-issues-panel" className="qi-panel" role="dialog" aria-label="Quality issues">
+            <div className="qi-panel-head">
+              <div>
+                <strong>Quality</strong>
+                {q ? <span className="qi-panel-score"> · {q.score}</span> : null}
+              </div>
+              <button type="button" className="qi-panel-close" onClick={() => setPanelOpen(false)} aria-label="Close">
+                ×
+              </button>
+            </div>
+            {issueCount ? (
+              <ul className="qi-panel-list">
+                {anchored.map((issue) => (
+                  <li key={issue.id}>
+                    <button
+                      type="button"
+                      className={`qi-panel-item qi-${issue.severity}${activeIssueId === issue.id ? " is-active" : ""}`}
+                      onClick={() => scrollToIssue(issue)}
+                    >
+                      <span className="qi-panel-sev">{issue.severity}</span>
+                      <span className="qi-panel-msg">{issue.message}</span>
+                      <span className="qi-panel-type">{issue.type}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="qi-panel-empty">
+                {q
+                  ? "No issues flagged for this draft."
+                  : "No quality report yet. Use Run to review or Quality check."}
+              </p>
+            )}
+          </aside>
+        ) : null}
+      </div>
+
       <div className="quality-single-layout">
         <div className="quality-editor doc-style-editor">
+          {q ? (
+            <div className="quality-score-bar">
+              <span>
+                Quality <strong>{q.score}</strong> · {q.passed ? "pass" : "flag"}
+              </span>
+              <span className="quality-score-meta">
+                {errorCount ? `${errorCount} errors` : null}
+                {errorCount && warningCount ? " · " : null}
+                {warningCount ? `${warningCount} warnings` : null}
+                {!errorCount && !warningCount && issueCount ? `${issueCount} notes` : null}
+                {!issueCount ? "No issues" : null}
+              </span>
+            </div>
+          ) : null}
+
           <input
+            ref={titleRef}
             className="doc-title-input"
             placeholder="Document Title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
+            onMouseEnter={(e) => {
+              const msg = (e.currentTarget as HTMLInputElement).title;
+              if (msg) showTooltip(e.currentTarget, msg);
+            }}
+            onMouseLeave={() => hideTooltip()}
           />
           <textarea
+            ref={excerptRef}
             className="doc-excerpt-input"
             placeholder="Subtitle / Excerpt"
             value={excerpt}
             onChange={(e) => setExcerpt(e.target.value)}
+            onMouseEnter={(e) => {
+              const msg = (e.currentTarget as HTMLTextAreaElement).title;
+              if (msg) showTooltip(e.currentTarget, msg);
+            }}
+            onMouseLeave={() => hideTooltip()}
           />
           {heroSrc ? (
             <figure className="draft-featured-figure">
@@ -449,29 +612,11 @@ export function QualityEditor({
               suppressContentEditableWarning
             />
           </div>
-          <div className="doc-meta-panel" style={{ marginTop: "1rem" }}>
-            <fieldset className="destinations">
-              <legend>Publish to</legend>
-              {PUBLISH_SITES.map((site) => (
-                <label key={site.id} className="check">
-                  <input
-                    type="checkbox"
-                    checked={targets.includes(site.id)}
-                    onChange={(e) => {
-                      setTargets((prev) =>
-                        e.target.checked
-                          ? [...prev, site.id]
-                          : prev.filter((id) => id !== site.id),
-                      );
-                    }}
-                  />
-                  <span>
-                    <strong>{site.label}</strong> · {site.note}
-                  </span>
-                </label>
-              ))}
-            </fieldset>
-          </div>
+          <p className="hint">
+            Hover underlined text for quality tips. Select a passage to{" "}
+            <strong>Regenerate</strong> (Quick Edit). Choose destinations on the{" "}
+            <strong>Publish</strong> tab.
+          </p>
           <div className="form-actions" style={{ marginTop: "1.5rem" }}>
             <button
               type="button"
@@ -515,13 +660,8 @@ export function QualityEditor({
           </div>
         </div>
       </div>
-      {previewHtml ? (
-        <div
-          id="quality-preview-mount"
-          style={{ display: "none" }}
-          dangerouslySetInnerHTML={{ __html: previewHtml }}
-        />
-      ) : null}
+
+      <div ref={tooltipRef} className="qi-tooltip" hidden role="tooltip" />
     </div>
   );
 }

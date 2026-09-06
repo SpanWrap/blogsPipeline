@@ -94,7 +94,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [run, setRun] = useState<RunRecord | null>(null);
-  const [tab, setTab] = useState("quality");
+  const [tab, setTab] = useState("article");
   const [templates, setTemplates] = useState<TemplateRecord[]>([]);
   const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
   const [lastStylePresetId, setLastStylePresetId] = useState("");
@@ -395,7 +395,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
               )
             ) {
               if (["generate", "quality-check", "accept-stream-draft", "run"].includes(action)) {
-                setTab("quality");
+                setTab("article");
               }
             }
             if (action === "approve") setTab("publish");
@@ -752,7 +752,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         await watchBackgroundRun(targetId, "run");
       } else {
         toastRunResult(next, locked ? `Wrote new draft ${next.id}` : "Write blog finished");
-        if (next?.article) setTab("quality");
+        if (next?.article) setTab("article");
         await loadRuns();
       }
     } catch (e) {

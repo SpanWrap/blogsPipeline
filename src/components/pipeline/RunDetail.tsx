@@ -114,13 +114,21 @@ export function RunDetail({
 }: RunDetailProps) {
   const [assignTemplateId, setAssignTemplateId] = useState(run?.templateId || "");
   const [outlineJson, setOutlineJson] = useState("");
-  const [articleJson, setArticleJson] = useState("");
+  const [publishTargets, setPublishTargets] = useState<string[]>(
+    Array.isArray(run?.publishTargets) && run.publishTargets.length
+      ? run.publishTargets
+      : ["spanwrap"],
+  );
 
   useEffect(() => {
     setAssignTemplateId(run?.templateId || "");
     setOutlineJson(run?.outline ? JSON.stringify(run.outline, null, 2) : "");
-    setArticleJson(run?.article ? JSON.stringify(run.article, null, 2) : "");
-  }, [run?.id, run?.templateId, run?.outline, run?.article]);
+    setPublishTargets(
+      Array.isArray(run?.publishTargets) && run.publishTargets.length
+        ? run.publishTargets
+        : ["spanwrap"],
+    );
+  }, [run?.id, run?.templateId, run?.outline, run?.publishTargets]);
 
   if (!run) {
     return (
@@ -164,31 +172,14 @@ export function RunDetail({
       : "";
 
   function renderTab() {
-    if (tab === "quality") {
-      return (
-        <QualityEditor
-          run={run!}
-          busy={busy}
-          toast={toast}
-          onRunUpdated={onRunUpdated}
-          onSaveReview={(payload) => onAct("save-review", payload)}
-          onApprove={async (payload) => {
-            const saved = await onAct("save-review", payload);
-            if (!saved) return;
-            const notes = prompt("Approve notes (optional)") ?? undefined;
-            await onAct("approve", notes ? { notes } : {});
-          }}
-          onReject={(notes) => onAct("reject", notes ? { notes } : {})}
-        />
-      );
-    }
-    if (tab === "article") {
+    // Quality review merged into Preview (editable draft + Grammarly-style highlights).
+    if (tab === "article" || tab === "quality") {
       const a = run!.article;
       if (!a) return <p className="empty">No article yet. Run generate or Write blog from Runs.</p>;
       const sections = (String(a.content).match(/^##\s+(.+)$/gm) || []).map((h: string) =>
         h.replace(/^##\s+/, ""),
       );
-      return (
+      const extras = (
         <>
           {run!.thumbnailVariants?.length ? (
             <div className="thumb-ab">
@@ -224,27 +215,24 @@ export function RunDetail({
               ))}
             </div>
           ) : null}
-          <PostArticle run={run!} article={a} />
-          <details style={{ marginTop: "1rem" }}>
-            <summary>Edit article JSON</summary>
-            <textarea value={articleJson} onChange={(e) => setArticleJson(e.target.value)} />
-            <div className="form-actions" style={{ marginTop: "0.6rem" }}>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => {
-                  try {
-                    onAct("article-update", { article: JSON.parse(articleJson) });
-                  } catch (e) {
-                    toast(e instanceof Error ? e.message : "Invalid JSON", true);
-                  }
-                }}
-              >
-                Save article
-              </button>
-            </div>
-          </details>
         </>
+      );
+      return (
+        <QualityEditor
+          run={run!}
+          busy={busy}
+          toast={toast}
+          onRunUpdated={onRunUpdated}
+          extras={extras}
+          onSaveReview={(payload) => onAct("save-review", payload)}
+          onApprove={async (payload) => {
+            const saved = await onAct("save-review", payload);
+            if (!saved) return;
+            const notes = prompt("Approve notes (optional)") ?? undefined;
+            await onAct("approve", notes ? { notes } : {});
+          }}
+          onReject={(notes) => onAct("reject", notes ? { notes } : {})}
+        />
       );
     }
     if (tab === "seo") {
@@ -437,11 +425,7 @@ export function RunDetail({
           <p className="empty">No draft yet. Assign a template, then Run to review or Generate.</p>
         );
       }
-      const targets =
-        Array.isArray(run!.publishTargets) && run!.publishTargets.length
-          ? run!.publishTargets
-          : ["spanwrap"];
-      const destLabels = targets
+      const destLabels = publishTargets
         .map((id: string) => PUBLISH_SITES.find((s) => s.id === id)?.label || id)
         .join(", ");
       const canPublish = ["APPROVED", "PUBLISH_FAILED"].includes(run!.status);
@@ -454,8 +438,9 @@ export function RunDetail({
       return (
         <>
           <p className="hint">
-            Approved draft for <strong>{destLabels || "no sites selected"}</strong>. Spanwrap
-            publishes now. Medium and Substack are planned connectors.
+            {canPublish
+              ? `Ready to publish to ${destLabels || "selected sites"}. Spanwrap publishes now; Medium and Substack are planned connectors.`
+              : `Approve the draft on the Preview tab first (current status: ${run!.status}). Destinations: ${destLabels || "none"}.`}
           </p>
           <PostArticle run={run!} article={a} />
           {results.length ? (
@@ -488,21 +473,58 @@ export function RunDetail({
               })}
             </ul>
           ) : null}
-          <div className="form-actions" style={{ marginTop: "1rem" }}>
+          <fieldset className="destinations" style={{ marginTop: "1.25rem" }}>
+            <legend>Publish to</legend>
+            {PUBLISH_SITES.map((site) => (
+              <label key={site.id} className="check">
+                <input
+                  type="checkbox"
+                  checked={publishTargets.includes(site.id)}
+                  onChange={(e) => {
+                    setPublishTargets((prev) =>
+                      e.target.checked
+                        ? [...prev, site.id]
+                        : prev.filter((id) => id !== site.id),
+                    );
+                  }}
+                />
+                <span>
+                  <strong>{site.label}</strong> · {site.note}
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          <div className="form-actions publish-actions" style={{ marginTop: "0.85rem" }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || !publishTargets.length}
+              onClick={() => {
+                if (!publishTargets.length) {
+                  toast("Select at least one publishing site", true);
+                  return;
+                }
+                onAct("save-review", { publishTargets });
+              }}
+            >
+              Save destinations
+            </button>
             <button
               type="button"
               className="btn primary"
-              disabled={!canPublish || busy}
-              onClick={() => onAct("publish")}
+              disabled={!canPublish || busy || !publishTargets.length}
+              onClick={async () => {
+                if (!publishTargets.length) {
+                  toast("Select at least one publishing site", true);
+                  return;
+                }
+                await onAct("save-review", { publishTargets });
+                await onAct("publish");
+              }}
             >
               Publish to selected sites
             </button>
           </div>
-          {!canPublish ? (
-            <p className="hint">
-              Approve this draft in the Quality tab first (current status: {run!.status}).
-            </p>
-          ) : null}
         </>
       );
     }
@@ -674,15 +696,20 @@ export function RunDetail({
         fails or has no key).
       </p>
       <div className="actions">
-        <button className="btn primary" disabled={busy} onClick={() => onAct("run")}>
+        <button
+          className="btn primary"
+          disabled={busy}
+          title="Run research → outline → draft → quality. Resumes from a failed stage if needed."
+          onClick={() => onAct("run")}
+        >
           Run to review
         </button>
         <label
           className="check-inline"
           title={
             hasGeminiKey
-              ? "Generate hero/section images with Gemini; falls back to web search if Gemini fails"
-              : "Search the web for relevant images (set GEMINI_API_KEY for AI-generated art)"
+              ? "When enabled, Run to review also generates hero/section images (Gemini, with web search fallback)."
+              : "When enabled, Run to review finds relevant web images for the draft (set GEMINI_API_KEY for AI art)."
           }
         >
           <input
@@ -692,22 +719,37 @@ export function RunDetail({
           />
           Generate images
         </label>
-        <button className="btn" disabled={busy} onClick={() => onTab("publish")}>
+        <button
+          className="btn"
+          disabled={busy}
+          title="Open the Publish tab to choose destinations and publish the approved draft."
+          onClick={() => onTab("publish")}
+        >
           Open publish
         </button>
         <button
           className="btn"
           disabled={busy}
-          title="Approve + publish + build social/newsletter pack"
+          title="Approve + publish to selected sites + build social/newsletter pack in one step."
           onClick={() => onAct("distribute")}
         >
           One-click distribute
         </button>
-        <button className="btn" disabled={busy} onClick={() => onAct("readability-pass")}>
+        <button
+          className="btn"
+          disabled={busy}
+          title="Rewrite the draft for clearer, shorter sentences and easier reading."
+          onClick={() => onAct("readability-pass")}
+        >
           Readability pass
         </button>
         {run.status === "PUBLISHED" || run.status === "APPROVED" ? (
-          <button className="btn" disabled={busy} onClick={() => onAct("refresh")}>
+          <button
+            className="btn"
+            disabled={busy}
+            title="Re-push the current draft to update the live published post."
+            onClick={() => onAct("refresh")}
+          >
             Refresh post
           </button>
         ) : null}

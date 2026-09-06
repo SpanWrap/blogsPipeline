@@ -99,6 +99,9 @@ export function htmlToMarkdown(html: string): string {
       }
       case "figcaption":
         return "";
+      case "mark":
+        // Quality highlights must not leak into saved markdown.
+        return children();
       case "ul": {
         const items = Array.from(el.querySelectorAll(":scope > li"));
         return "\n" + items.map((li) => `- ${walk(li).trim()}`).join("\n") + "\n\n";
