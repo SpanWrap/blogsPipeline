@@ -1,8 +1,7 @@
 import { createImageProvider, type GeneratedImage } from "../../providers/images";
 import { logger } from "../../services/logger";
 import type { GeneratedBlog } from "../../models";
-import { appConfig } from "../../config";
-import { mkdir, writeFile } from "node:fs/promises";
+import { getDataFs } from "../../services/data-fs";
 import path from "node:path";
 
 export type ImageStageResult = {
@@ -16,13 +15,15 @@ async function saveBase64Image(
   base64: string,
   mimeType: string,
   filename: string,
-  outputDir: string,
+  runId: string,
 ): Promise<string> {
-  await mkdir(outputDir, { recursive: true });
   const ext = mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
-  const filePath = path.join(/*turbopackIgnore: true*/ outputDir, `${filename}.${ext}`);
-  await writeFile(filePath, Buffer.from(base64, "base64"));
-  return filePath;
+  const name = `${filename}.${ext}`;
+  const key = `images/${runId}/${name}`;
+  const contentType =
+    ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+  await getDataFs().writeBytes(key, Buffer.from(base64, "base64"), contentType);
+  return key;
 }
 
 export async function imageStage(
@@ -30,7 +31,6 @@ export async function imageStage(
   runId: string,
 ): Promise<ImageStageResult> {
   const provider = createImageProvider();
-  const outputDir = path.join(appConfig.images.outputDir, runId);
 
   logger.info("Generating blog images", { provider: provider.name, runId });
 
@@ -46,12 +46,7 @@ export async function imageStage(
   for (let i = 0; i < allImages.length; i++) {
     const img = allImages[i]!;
     if (img.base64) {
-      const saved = await saveBase64Image(
-        img.base64,
-        img.mimeType,
-        `${img.type}-${i}`,
-        outputDir,
-      );
+      const saved = await saveBase64Image(img.base64, img.mimeType, `${img.type}-${i}`, runId);
       savedPaths.push(saved);
     }
   }

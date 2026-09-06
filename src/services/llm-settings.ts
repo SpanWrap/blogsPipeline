@@ -1,6 +1,4 @@
 import type { Collection, Document } from "mongodb";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
 import { appConfig } from "../config";
 import {
   LLM_CATALOG,
@@ -9,6 +7,7 @@ import {
   remapRetiredModel,
   type LlmProviderId,
 } from "../config/llm-catalog";
+import { getDataFs } from "./data-fs";
 import { connectMongo, formatMongoError } from "./mongo-connection";
 import { logger } from "./logger";
 
@@ -45,8 +44,20 @@ async function llmSettingsCollection(): Promise<Collection<Document> | null> {
   return mongoCol;
 }
 
-function settingsFilePath() {
-  return path.join(appConfig.dataDir, "llm-settings.json");
+const SETTINGS_KEY = "llm-settings.json";
+
+async function loadFileSettings(): Promise<StoredLlmSettings | null> {
+  try {
+    const raw = await getDataFs().readText(SETTINGS_KEY);
+    if (!raw) return null;
+    return parseStored(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+async function writeFileSettings(settings: StoredLlmSettings) {
+  await getDataFs().writeText(SETTINGS_KEY, JSON.stringify(settings, null, 2));
 }
 
 function envKeyFor(provider: LlmProviderId): string | undefined {
@@ -103,15 +114,6 @@ function parseStored(raw: unknown): StoredLlmSettings | null {
   };
 }
 
-function loadFileSync(): StoredLlmSettings | null {
-  try {
-    const raw = JSON.parse(readFileSync(settingsFilePath(), "utf8"));
-    return parseStored(raw);
-  } catch {
-    return null;
-  }
-}
-
 async function loadMongo(): Promise<StoredLlmSettings | null> {
   try {
     const col = await llmSettingsCollection();
@@ -126,11 +128,6 @@ async function loadMongo(): Promise<StoredLlmSettings | null> {
     });
     return null;
   }
-}
-
-function writeFileSettings(settings: StoredLlmSettings) {
-  mkdirSync(appConfig.dataDir, { recursive: true });
-  writeFileSync(settingsFilePath(), JSON.stringify(settings, null, 2), "utf8");
 }
 
 async function writeMongoSettings(settings: StoredLlmSettings) {
@@ -172,14 +169,11 @@ function normalizeResolved(cfg: ResolvedLlmConfig): ResolvedLlmConfig {
 export async function ensureLlmSettings(): Promise<void> {
   if (loaded) return;
   const fromMongo = await loadMongo();
-  cache = fromMongo ?? loadFileSync();
+  cache = fromMongo ?? (await loadFileSettings());
   loaded = true;
 }
 
 export function getResolvedLlmConfig(): ResolvedLlmConfig {
-  if (!loaded && cache === null) {
-    cache = loadFileSync();
-  }
   return normalizeResolved(resolveLlmConfig(cache));
 }
 
@@ -219,7 +213,7 @@ export async function saveLlmSettings(input: {
     typeof input.model === "string" && input.model.trim() ? input.model.trim() : info.defaultModel;
   const { model } = remapRetiredModel(requested);
   const incomingKey = typeof input.apiKey === "string" ? sanitizeApiKey(input.apiKey) : "";
-  const previous = cache ?? loadFileSync();
+  const previous = cache ?? (await loadFileSettings());
   const apiKey =
     input.provider === "mock"
       ? undefined
@@ -239,9 +233,9 @@ export async function saveLlmSettings(input: {
   cache = stored;
   loaded = true;
   try {
-    writeFileSettings(stored);
+    await writeFileSettings(stored);
   } catch (error) {
-    logger.warn("Could not persist LLM settings to disk", {
+    logger.warn("Could not persist LLM settings", {
       error: error instanceof Error ? error.message : String(error),
     });
   }

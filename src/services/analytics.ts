@@ -1,6 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
-import { appConfig } from "../config";
+import { getDataFs } from "./data-fs";
 import { logger } from "./logger";
 import { withRetry } from "../utils/retry";
 
@@ -19,56 +17,45 @@ export type PostAnalytics = {
   updatedAt: string;
 };
 
-function analyticsDir(): string {
-  const dir = appConfig.analytics.dataDir;
-  return path.isAbsolute(dir) ? dir : path.join(/*turbopackIgnore: true*/ process.cwd(), dir);
+function analyticsKey(runId: string): string {
+  return `analytics/${runId}.json`;
 }
 
-function filePath(runId: string): string {
-  return path.join(analyticsDir(), `${runId}.json`);
-}
-
-function ensureDir(): void {
-  const dir = analyticsDir();
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-function readRecord(runId: string): PostAnalytics | null {
-  const fp = filePath(runId);
-  if (!fs.existsSync(fp)) return null;
+async function readRecord(runId: string): Promise<PostAnalytics | null> {
   try {
-    return JSON.parse(fs.readFileSync(fp, "utf-8")) as PostAnalytics;
+    const raw = await getDataFs().readText(analyticsKey(runId));
+    if (!raw) return null;
+    return JSON.parse(raw) as PostAnalytics;
   } catch {
     return null;
   }
 }
 
-function writeRecord(record: PostAnalytics): void {
-  ensureDir();
-  fs.writeFileSync(filePath(record.runId), JSON.stringify(record, null, 2));
+async function writeRecord(record: PostAnalytics): Promise<void> {
+  await getDataFs().writeText(analyticsKey(record.runId), JSON.stringify(record, null, 2));
 }
 
-function listAllRecords(): PostAnalytics[] {
-  const dir = analyticsDir();
-  if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => {
-      try {
-        return JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8")) as PostAnalytics;
-      } catch {
-        return null;
-      }
-    })
-    .filter((r): r is PostAnalytics => r !== null);
+async function listAllRecords(): Promise<PostAnalytics[]> {
+  const names = await getDataFs().listNames("analytics");
+  const out: PostAnalytics[] = [];
+  for (const f of names) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const raw = await getDataFs().readText(`analytics/${f}`);
+      if (!raw) continue;
+      out.push(JSON.parse(raw) as PostAnalytics);
+    } catch {
+      // skip
+    }
+  }
+  return out;
 }
 
-export function recordPublish(
+export async function recordPublish(
   runId: string,
   platform: string,
   externalId?: string,
-): PostAnalytics {
+): Promise<PostAnalytics> {
   const record: PostAnalytics = {
     runId,
     publishedAt: new Date().toISOString(),
@@ -83,12 +70,12 @@ export function recordPublish(
     externalId,
     updatedAt: new Date().toISOString(),
   };
-  writeRecord(record);
+  await writeRecord(record);
   logger.info("Recorded publish", { runId, platform });
   return record;
 }
 
-export function fetchAnalytics(runId: string): PostAnalytics | null {
+export async function fetchAnalytics(runId: string): Promise<PostAnalytics | null> {
   return readRecord(runId);
 }
 
@@ -153,29 +140,29 @@ async function updateRecord(record: PostAnalytics): Promise<PostAnalytics> {
 
   if (stats) {
     Object.assign(record, stats, { updatedAt: new Date().toISOString() });
-    writeRecord(record);
+    await writeRecord(record);
   }
   return record;
 }
 
 export async function updateAllAnalytics(): Promise<PostAnalytics[]> {
-  const records = listAllRecords();
+  const records = await listAllRecords();
   logger.info("Updating analytics for all published posts", { count: records.length });
   const updated = await Promise.all(records.map(updateRecord));
   return updated;
 }
 
-export function getTopPerformers(limit = 10): PostAnalytics[] {
-  return listAllRecords()
+export async function getTopPerformers(limit = 10): Promise<PostAnalytics[]> {
+  return (await listAllRecords())
     .sort((a, b) => b.views - a.views)
     .slice(0, limit);
 }
 
-export function getRevenueReport(dateRange?: {
+export async function getRevenueReport(dateRange?: {
   from: string;
   to: string;
-}): { totalRevenue: number; posts: PostAnalytics[] } {
-  let records = listAllRecords();
+}): Promise<{ totalRevenue: number; posts: PostAnalytics[] }> {
+  let records = await listAllRecords();
   if (dateRange) {
     const from = new Date(dateRange.from).getTime();
     const to = new Date(dateRange.to).getTime();
@@ -188,8 +175,8 @@ export function getRevenueReport(dateRange?: {
   return { totalRevenue, posts: records };
 }
 
-export function feedbackSignal(runId: string): number {
-  const record = readRecord(runId);
+export async function feedbackSignal(runId: string): Promise<number> {
+  const record = await readRecord(runId);
   if (!record) return 0;
 
   const daysSincePublish = Math.max(
@@ -202,7 +189,6 @@ export function feedbackSignal(runId: string): number {
     record.likes * 2 + record.comments * 3 + record.shares * 5 + record.reads * 0.5;
   const engagementPerDay = engagement / daysSincePublish;
 
-  // Normalize to 0-100 with diminishing returns
   const viewScore = Math.min(50, viewsPerDay * 2);
   const engagementScore = Math.min(50, engagementPerDay);
 

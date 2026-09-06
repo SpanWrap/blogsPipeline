@@ -62,12 +62,28 @@ export async function researchStage(
 
   const sources: ResearchSource[] = [];
   const concurrency = Math.max(1, appConfig.maxFetchConcurrency);
+  const referenceKeys = new Set(
+    (brief.referenceUrls ?? []).map((u) => {
+      try {
+        return normalizeUrl(u);
+      } catch {
+        return u;
+      }
+    }),
+  );
 
   for (let i = 0; i < discovered.length; i += concurrency) {
     const batch = discovered.slice(i, i + concurrency);
     const results = await Promise.all(
       batch.map(async (item) => {
         const id = createId("source");
+        const isReference = (() => {
+          try {
+            return referenceKeys.has(normalizeUrl(item.url));
+          } catch {
+            return false;
+          }
+        })();
         if (options.offlineExtract || primary.name.includes("mock")) {
           const synthetic = [
             item.title ?? brief.topic,
@@ -84,12 +100,13 @@ export async function researchStage(
             sourceName: sourceNameFromUrl(item.url),
             content: synthetic,
             publishedAt: null,
-            relevanceScore: scoreRelevance(brief, item, synthetic),
+            relevanceScore: isReference ? 0.99 : scoreRelevance(brief, item, synthetic),
           } satisfies ResearchSource;
         }
 
         try {
           const page = await fetchAndExtract(item.url);
+          const scored = scoreRelevance(brief, item, page.content);
           return {
             id,
             url: page.url,
@@ -97,7 +114,7 @@ export async function researchStage(
             sourceName: page.sourceName,
             content: page.content,
             publishedAt: page.publishedAt,
-            relevanceScore: scoreRelevance(brief, item, page.content),
+            relevanceScore: isReference ? Math.max(0.99, scored) : scored,
           } satisfies ResearchSource;
         } catch (error) {
           logger.warn("Source extraction failed", {
@@ -111,7 +128,7 @@ export async function researchStage(
             sourceName: sourceNameFromUrl(item.url),
             content: item.snippet ?? "",
             publishedAt: null,
-            relevanceScore: item.relevanceScore ?? 0.3,
+            relevanceScore: isReference ? 0.9 : (item.relevanceScore ?? 0.3),
             fetchError: error instanceof Error ? error.message : String(error),
           } satisfies ResearchSource;
         }
@@ -120,10 +137,15 @@ export async function researchStage(
     sources.push(...results);
   }
 
-  // Prefer successful, high-relevance, non-empty sources
+  // Prefer successful, high-relevance, non-empty sources (reference URLs first)
   const ranked = sources
     .filter((s) => s.content.trim().length > 0)
-    .sort((a, b) => b.relevanceScore - a.relevanceScore);
+    .sort((a, b) => {
+      const aRef = referenceKeys.has(normalizeUrl(a.url)) ? 1 : 0;
+      const bRef = referenceKeys.has(normalizeUrl(b.url)) ? 1 : 0;
+      if (aRef !== bRef) return bRef - aRef;
+      return b.relevanceScore - a.relevanceScore;
+    });
 
   // Second-pass dedupe by normalized URL
   const final: ResearchSource[] = [];

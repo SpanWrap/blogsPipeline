@@ -1,8 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { Collection, Document } from "mongodb";
-import path from "node:path";
 import { appConfig } from "../config";
 import { createId } from "../utils/idempotency";
+import { getDataFs, LocalDataFs, type DataFs } from "./data-fs";
 import { connectMongo } from "./mongo-connection";
 
 export type ActivityEntry = {
@@ -45,15 +44,21 @@ function parseEntry(raw: unknown): ActivityEntry | null {
 }
 
 export class FileActivityLogStore implements ActivityLogStore {
-  constructor(private readonly rootDir = appConfig.dataDir) {}
+  private readonly fs: DataFs;
 
-  private filePath() {
-    return path.join(this.rootDir, "activity-log.json");
+  constructor(fsOrRoot: DataFs | string = getDataFs()) {
+    this.fs = typeof fsOrRoot === "string" ? new LocalDataFs(fsOrRoot) : fsOrRoot;
   }
 
-  private readAll(): ActivityEntry[] {
+  private key() {
+    return "activity-log.json";
+  }
+
+  private async readAll(): Promise<ActivityEntry[]> {
     try {
-      const raw = JSON.parse(readFileSync(this.filePath(), "utf8")) as { entries?: unknown };
+      const text = await this.fs.readText(this.key());
+      if (!text) return [];
+      const raw = JSON.parse(text) as { entries?: unknown };
       if (!Array.isArray(raw.entries)) return [];
       return raw.entries.map(parseEntry).filter((e): e is ActivityEntry => Boolean(e));
     } catch {
@@ -72,14 +77,13 @@ export class FileActivityLogStore implements ActivityLogStore {
       details: input.details,
       ip: input.ip,
     };
-    const entries = [entry, ...this.readAll()].slice(0, MAX_FILE_ENTRIES);
-    mkdirSync(this.rootDir, { recursive: true });
-    writeFileSync(this.filePath(), JSON.stringify({ entries }, null, 2), "utf8");
+    const entries = [entry, ...(await this.readAll())].slice(0, MAX_FILE_ENTRIES);
+    await this.fs.writeText(this.key(), JSON.stringify({ entries }, null, 2));
     return entry;
   }
 
   async list(limit = 100): Promise<ActivityEntry[]> {
-    return this.readAll().slice(0, Math.min(Math.max(limit, 1), 500));
+    return (await this.readAll()).slice(0, Math.min(Math.max(limit, 1), 500));
   }
 }
 
@@ -123,9 +127,11 @@ export class MongoActivityLogStore implements ActivityLogStore {
       .sort({ at: -1 })
       .limit(Math.min(Math.max(limit, 1), 500))
       .toArray();
-    return docs.map((d) => parseEntry({ ...d, id: String((d as { id?: string; _id?: unknown }).id ?? d._id) })).filter(
-      (e): e is ActivityEntry => Boolean(e),
-    );
+    return docs
+      .map((d) =>
+        parseEntry({ ...d, id: String((d as { id?: string; _id?: unknown }).id ?? d._id) }),
+      )
+      .filter((e): e is ActivityEntry => Boolean(e));
   }
 }
 
@@ -137,7 +143,7 @@ export function createActivityLogStore(): ActivityLogStore {
     if (!uri) throw new Error("STORAGE_BACKEND=mongodb requires MONGODB_URI");
     return new MongoActivityLogStore(uri, appConfig.storage.mongoDb);
   }
-  return new FileActivityLogStore(appConfig.dataDir);
+  return new FileActivityLogStore();
 }
 
 export function getActivityLogStore(): ActivityLogStore {

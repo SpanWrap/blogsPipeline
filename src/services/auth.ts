@@ -11,6 +11,7 @@ import type { IncomingMessage } from "node:http";
 import type { Collection, Document } from "mongodb";
 import path from "node:path";
 import { appConfig } from "../config";
+import { getDataFs, LocalDataFs, type DataFs, usesS3Storage } from "./data-fs";
 import { connectMongo, formatMongoError } from "./mongo-connection";
 import { logger } from "./logger";
 
@@ -81,13 +82,13 @@ export function getAuthSecret(): string {
   if (appConfig.auth.secret && appConfig.auth.secret.length >= 16) {
     return appConfig.auth.secret;
   }
-  if (process.env.VERCEL) {
+  if (usesS3Storage() || process.env.VERCEL) {
     const seed = process.env.MONGODB_URI || process.env.VERCEL_PROJECT_ID || "";
-    if (seed.length >= 8) {
+    if (process.env.VERCEL && seed.length >= 8) {
       return createHash("sha256").update(`spanwrap-pipeline-auth:${seed}`).digest("hex");
     }
     throw new Error(
-      "AUTH_SECRET is required on Vercel (32+ random characters). Add it in Project → Environment Variables.",
+      "AUTH_SECRET is required when using S3 (or Vercel). Set a 32+ character secret in the environment.",
     );
   }
   const filePath = path.join(appConfig.dataDir, "auth-secret");
@@ -206,15 +207,21 @@ export function clearLoginFailures(key: string) {
 }
 
 export class FileUserStore implements UserStore {
-  constructor(private readonly rootDir = appConfig.dataDir) {}
+  private readonly fs: DataFs;
 
-  private filePath() {
-    return path.join(this.rootDir, "users.json");
+  constructor(fsOrRoot: DataFs | string = getDataFs()) {
+    this.fs = typeof fsOrRoot === "string" ? new LocalDataFs(fsOrRoot) : fsOrRoot;
   }
 
-  private readAll(): AuthUser[] {
+  private key() {
+    return "users.json";
+  }
+
+  private async readAll(): Promise<AuthUser[]> {
     try {
-      const raw = JSON.parse(readFileSync(this.filePath(), "utf8")) as { users?: unknown };
+      const text = await this.fs.readText(this.key());
+      if (!text) return [];
+      const raw = JSON.parse(text) as { users?: unknown };
       if (!Array.isArray(raw.users)) return [];
       return raw.users.filter(isAuthUser);
     } catch {
@@ -222,28 +229,27 @@ export class FileUserStore implements UserStore {
     }
   }
 
-  private writeAll(users: AuthUser[]) {
-    mkdirSync(this.rootDir, { recursive: true });
-    writeFileSync(this.filePath(), JSON.stringify({ users }, null, 2), "utf8");
+  private async writeAll(users: AuthUser[]) {
+    await this.fs.writeText(this.key(), JSON.stringify({ users }, null, 2));
   }
 
   async count() {
-    return this.readAll().length;
+    return (await this.readAll()).length;
   }
 
   async get(username: string) {
     const id = normalizeUsername(username);
-    return this.readAll().find((u) => u.username === id) ?? null;
+    return (await this.readAll()).find((u) => u.username === id) ?? null;
   }
 
   async list() {
-    return this.readAll().map(({ passwordHash: _h, ...rest }) => rest);
+    return (await this.readAll()).map(({ passwordHash: _h, ...rest }) => rest);
   }
 
   async upsert(user: AuthUser) {
-    const users = this.readAll().filter((u) => u.username !== user.username);
+    const users = (await this.readAll()).filter((u) => u.username !== user.username);
     users.push(user);
-    this.writeAll(users);
+    await this.writeAll(users);
     return user;
   }
 }
@@ -316,7 +322,7 @@ export function createUserStore(): UserStore {
     if (!uri) throw new Error("STORAGE_BACKEND=mongodb requires MONGODB_URI");
     return new MongoUserStore(uri, appConfig.storage.mongoDb);
   }
-  return new FileUserStore(appConfig.dataDir);
+  return new FileUserStore();
 }
 
 export function getUserStore(): UserStore {

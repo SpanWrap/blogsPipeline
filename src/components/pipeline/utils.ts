@@ -20,6 +20,16 @@ export function statusClass(status: string): string {
   return "";
 }
 
+const IN_FLIGHT = new Set(["RESEARCHING", "GENERATING", "QUALITY_CHECK"]);
+
+/** True while the server is still working on a run (survives refresh via polling). */
+export function isInFlightRun(run: unknown): boolean {
+  if (!run || typeof run !== "object") return false;
+  const r = run as { status?: string; stages?: { status?: string }[] };
+  if (IN_FLIGHT.has(String(r.status || ""))) return true;
+  return Boolean(r.stages?.some((s) => s.status === "running"));
+}
+
 export function activityLabel(action: unknown): string {
   return String(action || "").replace(/_/g, " ");
 }

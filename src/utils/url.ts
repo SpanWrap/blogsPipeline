@@ -7,6 +7,59 @@ export function isValidHttpUrl(value: string): boolean {
   }
 }
 
+/** Turn a blog/article URL into a readable topic (slug → Title Case). */
+export function topicFromBlogUrl(value: string): string {
+  try {
+    const url = new URL(value.trim());
+    const parts = url.pathname.split("/").filter(Boolean);
+    const slug = parts[parts.length - 1] || url.hostname.replace(/^www\./, "");
+    const cleaned = decodeURIComponent(slug)
+      .replace(/\.(html?|md|php|aspx?)$/i, "")
+      .replace(/[-_+]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (cleaned.length < 3) return url.hostname.replace(/^www\./, "");
+    return cleaned.replace(/\b\w/g, (c) => c.toUpperCase()).slice(0, 140);
+  } catch {
+    return value.trim().slice(0, 140);
+  }
+}
+
+/**
+ * Normalize New-run input where the user may paste a blog URL as the topic
+ * and/or in a dedicated source URL field.
+ */
+export function normalizeBriefUrls(input: {
+  topic?: string | null;
+  sourceUrl?: string | null;
+  referenceUrls?: string[] | null;
+}): { topic: string; referenceUrls: string[] } {
+  const referenceUrls: string[] = [];
+  const pushUrl = (raw: string) => {
+    const value = raw.trim();
+    if (!isValidHttpUrl(value)) return;
+    try {
+      const normalized = normalizeUrl(value);
+      if (!referenceUrls.includes(normalized)) referenceUrls.push(normalized);
+    } catch {
+      /* skip */
+    }
+  };
+
+  for (const u of input.referenceUrls ?? []) pushUrl(String(u));
+  if (input.sourceUrl) pushUrl(String(input.sourceUrl));
+
+  let topic = String(input.topic ?? "").trim();
+  if (topic && isValidHttpUrl(topic)) {
+    pushUrl(topic);
+    topic = topicFromBlogUrl(topic);
+  }
+  if (topic.length < 3 && referenceUrls[0]) {
+    topic = topicFromBlogUrl(referenceUrls[0]);
+  }
+  return { topic, referenceUrls };
+}
+
 export function normalizeUrl(value: string): string {
   const url = new URL(value);
   url.hash = "";

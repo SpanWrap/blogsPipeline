@@ -54,7 +54,7 @@ import {
 } from "../services/section-regenerate";
 import { buildRepurposePack } from "../services/repurpose";
 import { buildSeoPack, applySeoChoice } from "../services/enrichment";
-import { saveTemplateMemory, loadTemplateMemory } from "../services/template-memory";
+import { saveTemplateMemory, ensureTemplateMemory } from "../services/template-memory";
 import { buildResumeDashboard } from "../services/resume-dashboard";
 import { planCrossPost } from "../services/canonical-rules";
 import { diffSummary } from "../services/diff-review";
@@ -134,7 +134,9 @@ export class BlogPipelineOrchestrator {
     const id = createId("run");
     const now = new Date().toISOString();
     let templateId: string | null =
-      options.templateId !== undefined ? options.templateId : loadTemplateMemory().lastTemplateId;
+      options.templateId !== undefined
+        ? options.templateId
+        : (await ensureTemplateMemory()).lastTemplateId;
     let templateName: string | null = null;
     let templateMarkdown: string | null = null;
 
@@ -143,7 +145,11 @@ export class BlogPipelineOrchestrator {
         const tpl = await this.templateStore.require(templateId);
         templateName = tpl.name;
         templateMarkdown = tpl.markdown;
-        saveTemplateMemory({ lastTemplateId: templateId });
+        try {
+          await saveTemplateMemory({ lastTemplateId: templateId });
+        } catch {
+          // memory is best-effort
+        }
       } catch {
         templateId = null;
         templateName = null;
@@ -151,11 +157,15 @@ export class BlogPipelineOrchestrator {
       }
     }
 
-    const stylePresetId = brief.stylePresetId ?? loadTemplateMemory().lastStylePresetId;
+    const stylePresetId = brief.stylePresetId ?? (await ensureTemplateMemory()).lastStylePresetId;
     if (stylePresetId) {
       const locked = applyStyleLockToBrief(brief, stylePresetId);
       brief = { ...brief, tone: locked.tone, stylePresetId };
-      saveTemplateMemory({ lastStylePresetId: stylePresetId });
+      try {
+        await saveTemplateMemory({ lastStylePresetId: stylePresetId });
+      } catch {
+        // memory is best-effort
+      }
     }
 
     const run: PipelineRun = {
@@ -226,6 +236,31 @@ export class BlogPipelineOrchestrator {
   async get(id: string): Promise<PipelineRun> {
     const run = await this.store.require(id);
     return this.maybeRecoverInterrupted(run);
+  }
+
+  /**
+   * Soft-claim a run as RESEARCHING before background work starts so the UI
+   * can show progress immediately after a 202 Accepted response.
+   */
+  async claimRunStart(id: string): Promise<PipelineRun> {
+    return withRunLock(id, async () => {
+      const run = await this.store.require(id);
+      if (isInFlightRun(run)) return run;
+      // Resuming a later failed stage — don't pretend research is running.
+      if (
+        run.status === "FAILED" &&
+        run.failedStage &&
+        run.failedStage !== "research" &&
+        run.failedStage !== "analysis" &&
+        run.failedStage !== "pipeline"
+      ) {
+        return run;
+      }
+      if (!["CREATED", "FAILED", "CANCELLED", "RESEARCH_COMPLETE"].includes(run.status)) {
+        return run;
+      }
+      return this.store.save(setStatus(startStage(run, "research"), "RESEARCHING"));
+    });
   }
 
   async list(): Promise<PipelineRun[]> {
@@ -680,7 +715,7 @@ export class BlogPipelineOrchestrator {
         // Record analytics and auto-promote after successful publish
         for (const r of results.filter((r) => r.success)) {
           try {
-            recordPublish(id, r.target!, r.externalId ?? id);
+            await recordPublish(id, r.target!, r.externalId ?? id);
           } catch (e) {
             logger.warn("Analytics record failed", { target: r.target, error: e instanceof Error ? e.message : String(e) });
           }

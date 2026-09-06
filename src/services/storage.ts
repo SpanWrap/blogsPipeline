@@ -15,7 +15,7 @@ export function createRunStore(backend = appConfig.storage.backend): RunStore {
     if (!uri) {
       throw new Error(
         process.env.VERCEL
-          ? "Vercel deploys need MONGODB_URI (Atlas). File storage is ephemeral on serverless."
+          ? "Vercel deploys need MONGODB_URI (Atlas) or STORAGE_BACKEND=s3."
           : "STORAGE_BACKEND=mongodb requires MONGODB_URI (e.g. mongodb://127.0.0.1:27017)",
       );
     }
@@ -25,7 +25,8 @@ export function createRunStore(backend = appConfig.storage.backend): RunStore {
       appConfig.storage.mongoCollection,
     );
   }
-  return new FileRunStore(appConfig.dataDir);
+  // file + s3 share FileRunStore via DataFs
+  return new FileRunStore();
 }
 
 /** Shared store for CLI and UI (lazily created). */

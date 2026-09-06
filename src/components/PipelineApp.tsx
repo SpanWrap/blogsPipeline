@@ -29,6 +29,8 @@ import type {
   TemplateRecord,
   UserRecord,
 } from "./pipeline/types";
+import { normalizeBriefUrls } from "@/utils/url";
+import { isInFlightRun } from "./pipeline/utils";
 
 type PipelineAppProps = {
   initialPage?: AppPage;
@@ -58,6 +60,8 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   const [lastStylePresetId, setLastStylePresetId] = useState("");
   const [digest, setDigest] = useState<DigestData | null | "loading">(null);
   const [digestFilter, setDigestFilter] = useState("all");
+  const [digestRefreshing, setDigestRefreshing] = useState(false);
+  const digestRefreshSeq = useRef(0);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [generateImages, setGenerateImages] = useState(false);
@@ -178,22 +182,45 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     }
   }, [callApi]);
 
-  const loadDigest = useCallback(
-    async (opts: { refresh?: boolean } = {}) => {
-      setDigest("loading");
-      try {
-        const data = await callApi<DigestData>("/api/digest", {
-          method: "POST",
-          body: JSON.stringify({ refresh: Boolean(opts.refresh) }),
-        });
-        setDigest(data);
-      } catch (e) {
-        setDigest(null);
-        throw e;
-      }
-    },
-    [callApi],
-  );
+  const loadDigest = useCallback(async () => {
+    setDigest("loading");
+    try {
+      const data = await callApi<DigestData>("/api/digest", {
+        method: "POST",
+        body: JSON.stringify({ refresh: false }),
+      });
+      setDigest(data);
+      return data;
+    } catch (e) {
+      setDigest(null);
+      throw e;
+    }
+  }, [callApi]);
+
+  const refreshDigestInBackground = useCallback(async () => {
+    if (digestRefreshing) return;
+    const seq = ++digestRefreshSeq.current;
+    setDigestRefreshing(true);
+    toast("Refreshing hot topics in the background…");
+    try {
+      const data = await callApi<DigestData>("/api/digest", {
+        method: "POST",
+        body: JSON.stringify({ refresh: true }),
+      });
+      if (seq !== digestRefreshSeq.current) return;
+      setDigest(data);
+      const rotated = (data.notes || []).find((n) => /rotated|cycled/i.test(n));
+      toast(
+        rotated ||
+          `Digest: ${data.github?.length ?? 0} GitHub · ${data.reddit?.length ?? 0} Reddit · ${data.x?.length ?? 0} X`,
+      );
+    } catch (e) {
+      if (seq !== digestRefreshSeq.current) return;
+      toast(e instanceof Error ? e.message : "Digest failed", true);
+    } finally {
+      if (seq === digestRefreshSeq.current) setDigestRefreshing(false);
+    }
+  }, [callApi, digestRefreshing, toast]);
 
   const loadHealth = useCallback(async () => {
     try {
@@ -265,71 +292,146 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     }
   }, []);
 
+  const applyProgressFromRun = useCallback(
+    (latest: RunRecord) => {
+      const running = (latest.stages || []).find((s: { status?: string }) => s.status === "running");
+      if (running) {
+        pushProgress(
+          (
+            {
+              research: "Gathering resources...",
+              analysis: "Analyzing sources...",
+              outline: "Drafting the outline...",
+              generation: "Writing the article...",
+              images: "Generating images with Gemini...",
+              quality: "Scoring quality...",
+              publish: "Publishing...",
+            } as Record<string, string>
+          )[String((running as { stage?: string }).stage)] ||
+            `${(running as { stage?: string }).stage || "pipeline"}...`,
+        );
+      } else if (latest.error) {
+        pushProgress(latest.error);
+      }
+    },
+    [pushProgress],
+  );
+
+  const watchBackgroundRun = useCallback(
+    async (runId: string, action: string) => {
+      startProgress(action);
+      setBusy(true);
+      const startedAt = Date.now();
+      const maxMs = 6 * 60 * 1000;
+      let lastKey = "";
+      try {
+        while (Date.now() - startedAt < maxMs) {
+          await new Promise((r) => setTimeout(r, 1200));
+          const latest = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(runId)}`);
+          setRun(latest);
+          setSelectedId((current) => current || runId);
+          const running = (latest.stages || []).find((s: { status?: string }) => s.status === "running");
+          const key = running
+            ? `run:${(running as { stage?: string }).stage}`
+            : `status:${latest.status}:${latest.error || ""}`;
+          if (key !== lastKey) {
+            lastKey = key;
+            applyProgressFromRun(latest);
+          }
+          if (!isInFlightRun(latest) && Date.now() - startedAt > 1500) {
+            stopProgress(
+              !["FAILED", "PUBLISH_FAILED", "CANCELLED"].includes(latest.status),
+              latest.error
+                ? `${action} failed: ${latest.error}`
+                : `${action} completed → ${latest.status}`,
+            );
+            toastRunResult(latest, `${action} complete`);
+            if (
+              latest?.article &&
+              ["generate", "quality-check", "accept-stream-draft", "run", "save-review"].includes(
+                action,
+              )
+            ) {
+              if (["generate", "quality-check", "accept-stream-draft", "run"].includes(action)) {
+                setTab("quality");
+              }
+            }
+            if (action === "approve") setTab("publish");
+            if (action === "regenerate-section") setTab("article");
+            await loadRuns();
+            return latest;
+          }
+        }
+        stopProgress(false, "Still running on the server — reopen this run to follow progress.");
+        toast("Pipeline is still running in the background. Reopen the run to follow progress.", true);
+        await loadRuns();
+        return null;
+      } catch (e) {
+        stopProgress(false, e instanceof Error ? e.message : "Action failed.");
+        toast(e instanceof Error ? e.message : "Action failed", true);
+        return null;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [
+      startProgress,
+      stopProgress,
+      applyProgressFromRun,
+      callApi,
+      toastRunResult,
+      toast,
+      loadRuns,
+    ],
+  );
+
   const selectRun = useCallback(
     async (id: string) => {
       setSelectedId(id);
       setHomeView("runs");
       const next = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(id)}`);
       setRun(next);
+      if (isInFlightRun(next)) {
+        void watchBackgroundRun(id, "run");
+      }
     },
-    [callApi],
+    [callApi, watchBackgroundRun],
   );
 
   const act = useCallback(
     async (action: string, body?: Record<string, unknown>) => {
       if (!selectedId || busy) return null;
       const payload = { ...(body || {}), generateImages: Boolean(generateImages && hasGeminiKey) };
-      setBusy(true);
-      startProgress(action);
-      let lastKey = "";
-      const poller = setInterval(async () => {
-        if (!selectedId) return;
-        try {
-          const latest = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(selectedId)}`);
-          const running = (latest.stages || []).find((s: any) => s.status === "running");
-          const key = running
-            ? `run:${running.stage}`
-            : `status:${latest.status}:${latest.error || ""}`;
-          if (key === lastKey) return;
-          lastKey = key;
-          if (running) {
-            pushProgress(
-              (
-                {
-                  research: "Gathering resources...",
-                  analysis: "Analyzing sources...",
-                  outline: "Drafting the outline...",
-                  generation: "Writing the article...",
-                  images: "Generating images with Gemini...",
-                  quality: "Scoring quality...",
-                  publish: "Publishing...",
-                } as Record<string, string>
-              )[running.stage] || `${running.stage}...`,
-            );
-          } else if (latest.error) pushProgress(latest.error);
-        } catch {
-          /* ignore */
-        }
-      }, 1200);
+      const backgroundActions = new Set([
+        "run",
+        "research",
+        "outline",
+        "generate",
+        "quality-check",
+        "publish",
+        "generate-images",
+        "readability-pass",
+        "regenerate-section",
+        "regenerate-selection",
+        "accept-stream-draft",
+        "refresh",
+        "distribute",
+      ]);
       try {
-        const next = await callApi<RunRecord>(
+        const next = await callApi<RunRecord & { accepted?: boolean }>(
           `/api/runs/${encodeURIComponent(selectedId)}/${action}`,
           { method: "POST", body: JSON.stringify(payload) },
         );
         setRun(next);
+        if (next.accepted || backgroundActions.has(action) || isInFlightRun(next)) {
+          return watchBackgroundRun(selectedId, action);
+        }
+        startProgress(action);
         stopProgress(
           !["FAILED", "PUBLISH_FAILED"].includes(next.status),
           next.error ? `${action} failed: ${next.error}` : `${action} completed → ${next.status}`,
         );
         toastRunResult(next, `${action} complete`);
-        if (
-          next?.article &&
-          ["generate", "quality-check", "accept-stream-draft", "run", "save-review"].includes(action)
-        ) {
-          if (["generate", "quality-check", "accept-stream-draft", "run"].includes(action)) {
-            setTab("quality");
-          }
-        }
         if (action === "approve") setTab("publish");
         if (action === "regenerate-section") setTab("article");
         await loadRuns();
@@ -346,9 +448,6 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
           /* keep */
         }
         return null;
-      } finally {
-        clearInterval(poller);
-        setBusy(false);
       }
     },
     [
@@ -356,10 +455,10 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
       busy,
       generateImages,
       hasGeminiKey,
-      startProgress,
-      pushProgress,
-      stopProgress,
       callApi,
+      watchBackgroundRun,
+      startProgress,
+      stopProgress,
       toastRunResult,
       toast,
       loadRuns,
@@ -456,19 +555,44 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     });
   }, []);
 
-  async function createRun(brief: Record<string, string | null>, andRun: boolean) {
+  async function createRun(brief: Record<string, string | string[] | null>, andRun: boolean) {
     if (busy) return;
-    if (!brief.topic || String(brief.topic).length < 3) {
-      toast("Topic is required (at least 3 characters)", true);
+    const sourceUrl =
+      typeof brief.sourceUrl === "string"
+        ? brief.sourceUrl
+        : Array.isArray(brief.referenceUrls)
+          ? String(brief.referenceUrls[0] || "")
+          : "";
+    const normalized = normalizeBriefUrls({
+      topic: typeof brief.topic === "string" ? brief.topic : "",
+      sourceUrl,
+      referenceUrls: Array.isArray(brief.referenceUrls)
+        ? brief.referenceUrls.map(String)
+        : sourceUrl
+          ? [sourceUrl]
+          : [],
+    });
+    if (normalized.topic.length < 3 && !normalized.referenceUrls.length) {
+      toast("Topic or source blog URL is required", true);
       return;
     }
     setBusy(true);
     try {
+      const payload = {
+        ...brief,
+        topic: normalized.topic,
+        referenceUrls: normalized.referenceUrls,
+        sourceUrl: undefined,
+      };
       const created = await callApi<RunRecord>("/api/runs", {
         method: "POST",
-        body: JSON.stringify(brief),
+        body: JSON.stringify(payload),
       });
-      toast(`Created ${created.id}`);
+      toast(
+        normalized.referenceUrls.length
+          ? `Created ${created.id} (source URL will be fetched during research)`
+          : `Created ${created.id}`,
+      );
       await loadRuns();
       setSelectedId(created.id);
       setRun(created);
@@ -685,24 +809,10 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                   digest={digest}
                   digestFilter={digestFilter}
                   busy={busy}
+                  refreshing={digestRefreshing}
                   onFilter={setDigestFilter}
-                  onRefresh={async () => {
-                    setBusy(true);
-                    try {
-                      const data = await callApi<DigestData>("/api/digest", {
-                        method: "POST",
-                        body: JSON.stringify({ refresh: true }),
-                      });
-                      setDigest(data);
-                      toast(
-                        `Digest: ${data.github?.length ?? 0} GitHub · ${data.reddit?.length ?? 0} Reddit · ${data.x?.length ?? 0} X`,
-                      );
-                    } catch (e) {
-                      setDigest(null);
-                      toast(e instanceof Error ? e.message : "Digest failed", true);
-                    } finally {
-                      setBusy(false);
-                    }
+                  onRefresh={() => {
+                    void refreshDigestInBackground();
                   }}
                   onWrite={async (item: DigestItem) => {
                     setBusy(true);

@@ -9,6 +9,10 @@ export default defineConfig({
     environment: "node",
     include: ["tests/**/*.test.ts"],
     testTimeout: 30_000,
+    // Keep tests on local disk even when developer .env uses s3/mongodb.
+    env: {
+      STORAGE_BACKEND: "file",
+    },
   },
   resolve: {
     alias: {

@@ -1,43 +1,31 @@
-import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { appConfig } from "../config";
 import { ArticleTemplate, ArticleTemplateSchema } from "../models";
+import { getDataFs, LocalDataFs, type DataFs } from "./data-fs";
 import type { TemplateStore } from "./template-store";
 
 export class FileTemplateStore implements TemplateStore {
-  constructor(private readonly rootDir = appConfig.dataDir) {}
+  private readonly fs: DataFs;
 
-  private dir() {
-    return path.join(this.rootDir, "templates");
+  constructor(fsOrRoot: DataFs | string = getDataFs()) {
+    this.fs = typeof fsOrRoot === "string" ? new LocalDataFs(fsOrRoot) : fsOrRoot;
   }
 
-  private filePath(id: string) {
-    return path.join(this.dir(), `${id}.json`);
-  }
-
-  async ensureReady(): Promise<void> {
-    await mkdir(this.dir(), { recursive: true });
+  private key(id: string) {
+    return `templates/${id}.json`;
   }
 
   async save(template: ArticleTemplate): Promise<ArticleTemplate> {
-    await this.ensureReady();
     const parsed = ArticleTemplateSchema.parse({
       ...template,
       updatedAt: new Date().toISOString(),
     });
-    await writeFile(this.filePath(parsed.id), JSON.stringify(parsed, null, 2), "utf8");
+    await this.fs.writeText(this.key(parsed.id), JSON.stringify(parsed, null, 2));
     return parsed;
   }
 
   async get(id: string): Promise<ArticleTemplate | null> {
-    try {
-      const raw = await readFile(this.filePath(id), "utf8");
-      return ArticleTemplateSchema.parse(JSON.parse(raw));
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return null;
-      throw error;
-    }
+    const raw = await this.fs.readText(this.key(id));
+    if (!raw) return null;
+    return ArticleTemplateSchema.parse(JSON.parse(raw));
   }
 
   async require(id: string): Promise<ArticleTemplate> {
@@ -47,25 +35,18 @@ export class FileTemplateStore implements TemplateStore {
   }
 
   async list(): Promise<ArticleTemplate[]> {
-    await this.ensureReady();
-    const files = await readdir(this.dir());
+    const names = await this.fs.listNames("templates");
     const out: ArticleTemplate[] = [];
-    for (const file of files) {
+    for (const file of names) {
       if (!file.endsWith(".json")) continue;
-      const raw = await readFile(path.join(this.dir(), file), "utf8");
+      const raw = await this.fs.readText(`templates/${file}`);
+      if (!raw) continue;
       out.push(ArticleTemplateSchema.parse(JSON.parse(raw)));
     }
     return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async delete(id: string): Promise<boolean> {
-    try {
-      await unlink(this.filePath(id));
-      return true;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return false;
-      throw error;
-    }
+    return this.fs.delete(this.key(id));
   }
 }

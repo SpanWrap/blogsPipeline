@@ -1,9 +1,8 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { type Collection, type Document } from "mongodb";
 import { appConfig } from "../config";
 import { connectMongo, formatMongoError } from "./mongo-connection";
 import { createId } from "../utils/idempotency";
+import { getDataFs, type DataFs } from "./data-fs";
 import { logger } from "./logger";
 
 /**
@@ -44,23 +43,14 @@ export interface AutopilotLogStore {
 // ── File-based store ──
 
 export class FileAutopilotLogStore implements AutopilotLogStore {
-  constructor(private readonly rootDir = appConfig.dataDir) {}
+  constructor(private readonly fs: DataFs = getDataFs()) {}
 
-  private dir() {
-    return path.join(this.rootDir, "autopilot");
-  }
-
-  private filePath(id: string) {
-    return path.join(this.dir(), `${id}.json`);
-  }
-
-  private async ensureReady() {
-    await mkdir(this.dir(), { recursive: true });
+  private key(id: string) {
+    return `autopilot/${id}.json`;
   }
 
   async create(log: AutopilotCycleLog): Promise<AutopilotCycleLog> {
-    await this.ensureReady();
-    await writeFile(this.filePath(log.id), JSON.stringify(log, null, 2), "utf8");
+    await this.fs.writeText(this.key(log.id), JSON.stringify(log, null, 2));
     return log;
   }
 
@@ -69,13 +59,13 @@ export class FileAutopilotLogStore implements AutopilotLogStore {
   }
 
   async list(limit = 20): Promise<AutopilotCycleLog[]> {
-    await this.ensureReady();
-    const files = await readdir(this.dir());
+    const names = await this.fs.listNames("autopilot");
     const logs: AutopilotCycleLog[] = [];
-    for (const file of files) {
+    for (const file of names) {
       if (!file.endsWith(".json")) continue;
       try {
-        const raw = await readFile(path.join(this.dir(), file), "utf8");
+        const raw = await this.fs.readText(`autopilot/${file}`);
+        if (!raw) continue;
         logs.push(JSON.parse(raw) as AutopilotCycleLog);
       } catch {
         // skip corrupted files
@@ -177,7 +167,7 @@ export function createAutopilotLogStore(backend = appConfig.storage.backend): Au
     if (!uri) throw new Error("MONGODB_URI required for autopilot log store");
     return new MongoAutopilotLogStore(uri);
   }
-  return new FileAutopilotLogStore(appConfig.dataDir);
+  return new FileAutopilotLogStore();
 }
 
 export function getAutopilotLogStore(): AutopilotLogStore {

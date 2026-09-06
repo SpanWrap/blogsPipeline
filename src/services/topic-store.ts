@@ -1,8 +1,7 @@
-import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { type Collection, type Document } from "mongodb";
 import { appConfig } from "../config";
 import { TopicRecommendation, TopicRecommendationSchema } from "../models";
+import { getDataFs, LocalDataFs, type DataFs } from "./data-fs";
 import { connectMongo, formatMongoError } from "./mongo-connection";
 
 export interface TopicStore {
@@ -15,52 +14,43 @@ export interface TopicStore {
 }
 
 export class FileTopicStore implements TopicStore {
-  constructor(private readonly rootDir = appConfig.dataDir) {}
+  private readonly fs: DataFs;
 
-  private dir() {
-    return path.join(this.rootDir, "topics");
+  constructor(fsOrRoot: DataFs | string = getDataFs()) {
+    this.fs = typeof fsOrRoot === "string" ? new LocalDataFs(fsOrRoot) : fsOrRoot;
   }
 
-  private filePath(id: string) {
-    return path.join(this.dir(), `${id}.json`);
-  }
-
-  private async ensureReady() {
-    await mkdir(this.dir(), { recursive: true });
+  private key(id: string) {
+    return `topics/${id}.json`;
   }
 
   async saveMany(topics: TopicRecommendation[]): Promise<TopicRecommendation[]> {
-    await this.ensureReady();
     await this.clear();
     const saved: TopicRecommendation[] = [];
     for (const t of topics) {
       const parsed = TopicRecommendationSchema.parse(t);
-      await writeFile(this.filePath(parsed.id), JSON.stringify(parsed, null, 2), "utf8");
+      await this.fs.writeText(this.key(parsed.id), JSON.stringify(parsed, null, 2));
       saved.push(parsed);
     }
     return saved;
   }
 
   async list(): Promise<TopicRecommendation[]> {
-    await this.ensureReady();
-    const files = await readdir(this.dir());
+    const names = await this.fs.listNames("topics");
     const out: TopicRecommendation[] = [];
-    for (const file of files) {
+    for (const file of names) {
       if (!file.endsWith(".json")) continue;
-      const raw = await readFile(path.join(this.dir(), file), "utf8");
+      const raw = await this.fs.readText(`topics/${file}`);
+      if (!raw) continue;
       out.push(TopicRecommendationSchema.parse(JSON.parse(raw)));
     }
     return out.sort((a, b) => b.heatScore - a.heatScore);
   }
 
   async get(id: string): Promise<TopicRecommendation | null> {
-    try {
-      const raw = await readFile(this.filePath(id), "utf8");
-      return TopicRecommendationSchema.parse(JSON.parse(raw));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
+    const raw = await this.fs.readText(this.key(id));
+    if (!raw) return null;
+    return TopicRecommendationSchema.parse(JSON.parse(raw));
   }
 
   async require(id: string): Promise<TopicRecommendation> {
@@ -70,12 +60,11 @@ export class FileTopicStore implements TopicStore {
   }
 
   async clear(): Promise<void> {
-    await this.ensureReady();
-    const files = await readdir(this.dir());
+    const names = await this.fs.listNames("topics");
     await Promise.all(
-      files
+      names
         .filter((f) => f.endsWith(".json"))
-        .map((f) => unlink(path.join(this.dir(), f)).catch(() => undefined)),
+        .map((f) => this.fs.delete(`topics/${f}`).catch(() => false)),
     );
   }
 }
@@ -177,7 +166,7 @@ export function createTopicStore(backend = appConfig.storage.backend): TopicStor
     if (!uri) throw new Error("MONGODB_URI required for topic store");
     return new MongoTopicStore(uri);
   }
-  return new FileTopicStore(appConfig.dataDir);
+  return new FileTopicStore();
 }
 
 export function getTopicStore(): TopicStore {

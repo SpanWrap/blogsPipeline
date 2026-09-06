@@ -30,6 +30,7 @@ Length & depth (required):
 
 Rules:
 - grounded in sources only; no invented stats/citations
+- when a source is marked as a primary/reference blog URL, treat it as the main grounding document and rewrite the ideas originally (do not copy prose)
 - clear structure; no filler/keyword stuffing or padded repetition
 - follow template headings/instructions when provided
 - featuredImage: https URL from sources when available

@@ -18,6 +18,13 @@ import {
 import type { TrendDiscoveryContext, TrendProvider } from "../providers/trends";
 import type { TrendSignal } from "../models";
 import { TtlCache } from "../utils/ttl-cache";
+import {
+  dropShownUrlsInPool,
+  getShownDigestUrls,
+  pickRotatedItems,
+  rememberShownDigestUrls,
+  replaceShownDigestUrls,
+} from "./digest-rotation";
 
 export type DiscoverTechDigestOptions = {
   limit?: number;
@@ -168,6 +175,15 @@ async function collect(
   }
 }
 
+function rotateList(
+  items: TechDigestItem[],
+  shown: string[],
+  limit: number,
+): { items: TechDigestItem[]; exhausted: boolean } {
+  const { picked, exhausted } = pickRotatedItems(items, shown, limit);
+  return { items: picked, exhausted };
+}
+
 /**
  * GitHub trending, Reddit /top, X, plus HN, Dev.to, arXiv, Hugging Face papers,
  * Lobsters, and AI RSS from TechCrunch / The Verge / MIT TR / Ars / IEEE Spectrum.
@@ -182,26 +198,35 @@ export async function discoverTechDigest(
   if (!options.refresh) {
     const cached = digestCache.get(cacheKey);
     if (cached) return cached;
+  } else {
+    digestCache.clear();
   }
 
-  const ctx: TrendDiscoveryContext = trendContext(limit);
-  const extraLimit = Math.max(4, Math.min(limit, 8));
+  // On refresh, pull a wider pool so we can rotate past recently shown URLs.
+  const fetchLimit = options.refresh
+    ? Math.min(Math.max(limit * 3, 18), 36)
+    : Math.max(limit, Math.min(limit + 4, 16));
+  const displayGithub = Math.max(1, Math.min(limit, 10));
+  const displayExtra = Math.max(4, Math.min(limit, 8));
+
+  const ctx: TrendDiscoveryContext = trendContext(fetchLimit);
+  const extraFetch = Math.max(displayExtra, Math.min(fetchLimit, 20));
 
   const [github, reddit, x, hn, devto, arxiv, hf, lobsters, news] = await Promise.all([
-    collect(new GitHubTrendProvider(), ctx, "github", Math.max(1, Math.min(limit, 10))),
-    collect(new RedditTrendProvider(), ctx, "reddit", limit),
-    collect(new XTrendProvider(), ctx, "x", limit),
+    collect(new GitHubTrendProvider(), ctx, "github", fetchLimit),
+    collect(new RedditTrendProvider(), ctx, "reddit", fetchLimit),
+    collect(new XTrendProvider(), ctx, "x", fetchLimit),
     collect(
       new HackerNewsTrendProvider(),
-      { ...ctx, limit: extraLimit, hnQuery: 'AI OR LLM OR "machine learning"' },
+      { ...ctx, limit: extraFetch, hnQuery: 'AI OR LLM OR "machine learning"' },
       "hackernews",
-      extraLimit,
+      extraFetch,
     ),
-    collect(new DevToTrendProvider(), { ...ctx, limit: extraLimit }, "devto", extraLimit),
-    collect(new ArxivTrendProvider(), { ...ctx, limit: extraLimit }, "arxiv", extraLimit),
-    collect(new HuggingFacePapersProvider(), { ...ctx, limit: extraLimit }, "huggingface", extraLimit),
-    collect(new LobstersTrendProvider(), { ...ctx, limit: extraLimit }, "lobsters", extraLimit),
-    collect(new NewsRssTrendProvider(), { ...ctx, limit: extraLimit }, "news", extraLimit),
+    collect(new DevToTrendProvider(), { ...ctx, limit: extraFetch }, "devto", extraFetch),
+    collect(new ArxivTrendProvider(), { ...ctx, limit: extraFetch }, "arxiv", extraFetch),
+    collect(new HuggingFacePapersProvider(), { ...ctx, limit: extraFetch }, "huggingface", extraFetch),
+    collect(new LobstersTrendProvider(), { ...ctx, limit: extraFetch }, "lobsters", extraFetch),
+    collect(new NewsRssTrendProvider(), { ...ctx, limit: extraFetch }, "news", extraFetch),
   ]);
 
   const notes: string[] = [];
@@ -225,24 +250,79 @@ export async function discoverTechDigest(
     notes.push("Reddit /top is limited without REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET.");
   }
 
+  let shown = await getShownDigestUrls();
+  const allCandidates = [
+    ...github.items,
+    ...reddit.items,
+    ...x.items,
+    ...hn.items,
+    ...devto.items,
+    ...arxiv.items,
+    ...hf.items,
+    ...lobsters.items,
+    ...news.items,
+  ];
+  const candidateUrls = allCandidates.map((item) => item.url).filter(Boolean);
+
+  // If this refresh has already shown the whole candidate pool, clear those URLs so we can cycle.
+  if (options.refresh) {
+    const unseen = candidateUrls.filter((url) => !shown.includes(url));
+    if (!unseen.length && candidateUrls.length) {
+      shown = dropShownUrlsInPool(shown, candidateUrls);
+      await replaceShownDigestUrls(shown);
+      notes.push("Cycled back through trending feeds — previously shown topics were cleared.");
+    }
+  }
+
+  const githubRotated = rotateList(github.items, shown, displayGithub);
+  const redditRotated = rotateList(reddit.items, shown, limit);
+  const xRotated = rotateList(x.items, shown, limit);
+
   const seen = new Set<string>();
-  const more: TechDigestItem[] = [];
-  for (const item of [...hn.items, ...devto.items, ...arxiv.items, ...hf.items, ...lobsters.items, ...news.items]) {
+  const morePool: TechDigestItem[] = [];
+  for (const item of [
+    ...hn.items,
+    ...devto.items,
+    ...arxiv.items,
+    ...hf.items,
+    ...lobsters.items,
+    ...news.items,
+  ]) {
     if (seen.has(item.url)) continue;
     seen.add(item.url);
-    more.push(item);
+    morePool.push(item);
   }
-  more.sort((a, b) => b.score - a.score);
+  morePool.sort((a, b) => b.score - a.score);
+  const moreRotated = rotateList(morePool, shown, Math.max(displayExtra * 2, limit));
+
+  if (options.refresh) {
+    const freshCount =
+      githubRotated.items.filter((i) => !shown.includes(i.url)).length +
+      redditRotated.items.filter((i) => !shown.includes(i.url)).length +
+      xRotated.items.filter((i) => !shown.includes(i.url)).length +
+      moreRotated.items.filter((i) => !shown.includes(i.url)).length;
+    if (freshCount > 0) {
+      notes.push(`Rotated in ${freshCount} topics you have not seen recently.`);
+    } else if (!notes.some((n) => n.startsWith("Cycled back"))) {
+      notes.push("Feeds refreshed; trending sources still returned the same top items.");
+    }
+  }
 
   const digest = TechDigestSchema.parse({
     generatedAt: new Date().toISOString(),
     theme: "AI/ML technology",
-    github: github.items,
-    reddit: reddit.items,
-    x: x.items,
-    more,
+    github: githubRotated.items,
+    reddit: redditRotated.items,
+    x: xRotated.items,
+    more: moreRotated.items,
     notes,
   });
+
+  const shownNow = [...digest.github, ...digest.reddit, ...digest.x, ...digest.more].map(
+    (item) => item.url,
+  );
+  await rememberShownDigestUrls(shownNow);
+
   digestCache.set(cacheKey, digest);
   return digest;
 }

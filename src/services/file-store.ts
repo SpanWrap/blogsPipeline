@@ -1,43 +1,31 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { appConfig } from "../config";
 import { PipelineRun, PipelineRunSchema } from "../models";
+import { getDataFs, LocalDataFs, type DataFs } from "./data-fs";
 import type { RunStore } from "./store";
 
 export class FileRunStore implements RunStore {
-  constructor(private readonly rootDir = appConfig.dataDir) {}
+  private readonly fs: DataFs;
 
-  private runsDir() {
-    return path.join(this.rootDir, "runs");
+  constructor(fsOrRoot: DataFs | string = getDataFs()) {
+    this.fs = typeof fsOrRoot === "string" ? new LocalDataFs(fsOrRoot) : fsOrRoot;
   }
 
-  private runPath(id: string) {
-    return path.join(this.runsDir(), `${id}.json`);
-  }
-
-  async ensureReady(): Promise<void> {
-    await mkdir(this.runsDir(), { recursive: true });
+  private key(id: string) {
+    return `runs/${id}.json`;
   }
 
   async save(run: PipelineRun): Promise<PipelineRun> {
-    await this.ensureReady();
     const parsed = PipelineRunSchema.parse({
       ...run,
       updatedAt: new Date().toISOString(),
     });
-    await writeFile(this.runPath(parsed.id), JSON.stringify(parsed, null, 2), "utf8");
+    await this.fs.writeText(this.key(parsed.id), JSON.stringify(parsed, null, 2));
     return parsed;
   }
 
   async get(id: string): Promise<PipelineRun | null> {
-    try {
-      const raw = await readFile(this.runPath(id), "utf8");
-      return PipelineRunSchema.parse(JSON.parse(raw));
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return null;
-      throw error;
-    }
+    const raw = await this.fs.readText(this.key(id));
+    if (!raw) return null;
+    return PipelineRunSchema.parse(JSON.parse(raw));
   }
 
   async require(id: string): Promise<PipelineRun> {
@@ -47,24 +35,16 @@ export class FileRunStore implements RunStore {
   }
 
   async delete(id: string): Promise<boolean> {
-    try {
-      const { rm } = await import("node:fs/promises");
-      await rm(this.runPath(id));
-      return true;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return false;
-      throw error;
-    }
+    return this.fs.delete(this.key(id));
   }
 
   async list(): Promise<PipelineRun[]> {
-    await this.ensureReady();
-    const files = await readdir(this.runsDir());
+    const names = await this.fs.listNames("runs");
     const runs: PipelineRun[] = [];
-    for (const file of files) {
+    for (const file of names) {
       if (!file.endsWith(".json")) continue;
-      const raw = await readFile(path.join(this.runsDir(), file), "utf8");
+      const raw = await this.fs.readText(`runs/${file}`);
+      if (!raw) continue;
       runs.push(PipelineRunSchema.parse(JSON.parse(raw)));
     }
     return runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));

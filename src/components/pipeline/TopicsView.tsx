@@ -60,6 +60,7 @@ type TopicsViewProps = {
   digest: DigestData | null | "loading";
   digestFilter: string;
   busy: boolean;
+  refreshing?: boolean;
   onFilter: (id: string) => void;
   onRefresh: () => void;
   onWrite: (item: DigestItem) => void;
@@ -69,6 +70,7 @@ export function TopicsView({
   digest,
   digestFilter,
   busy,
+  refreshing = false,
   onFilter,
   onRefresh,
   onWrite,
@@ -99,6 +101,7 @@ export function TopicsView({
 
   let updated = "Not loaded";
   if (digest === "loading") updated = "Loading feeds…";
+  else if (refreshing) updated = "Refreshing in background…";
   else if (digest?.generatedAt) updated = `Updated ${formatWhen(digest.generatedAt)}`;
   else if (digest) updated = "Ready";
 
@@ -109,8 +112,13 @@ export function TopicsView({
           <h2>Hot topics</h2>
           <p className="digest-updated">{updated}</p>
         </div>
-        <button type="button" className="btn primary" disabled={busy} onClick={onRefresh}>
-          Refresh
+        <button
+          type="button"
+          className="btn primary"
+          disabled={refreshing || digest === "loading"}
+          onClick={onRefresh}
+        >
+          {refreshing ? "Refreshing…" : "Refresh"}
         </button>
       </div>
       <p className="hint">

@@ -8,7 +8,7 @@ type CreateRunViewProps = {
   stylePresets: StylePreset[];
   lastStylePresetId?: string;
   busy: boolean;
-  onCreate: (brief: Record<string, string | null>, andRun: boolean) => void;
+  onCreate: (brief: Record<string, string | string[] | null>, andRun: boolean) => void;
   onBatch: (topics: string[], templateId: string | null, stylePresetId: string | null) => void;
 };
 
@@ -27,6 +27,7 @@ export function CreateRunView({
 
   function formBrief(form: HTMLFormElement) {
     const fd = new FormData(form);
+    const sourceUrl = String(fd.get("sourceUrl") || "").trim();
     return {
       topic: String(fd.get("topic") || "").trim(),
       targetAudience: String(fd.get("targetAudience") || "").trim(),
@@ -34,6 +35,8 @@ export function CreateRunView({
       keywords: String(fd.get("keywords") || ""),
       templateId: String(fd.get("templateId") || "") || null,
       stylePresetId: String(fd.get("stylePresetId") || "") || null,
+      sourceUrl: sourceUrl || null,
+      referenceUrls: sourceUrl ? [sourceUrl] : [],
     };
   }
 
@@ -46,9 +49,24 @@ export function CreateRunView({
     <section className="home-pane">
       <h2>New run</h2>
       <form ref={formRef} className="form-grid" onSubmit={onSubmit}>
+        <label className="full">
+          Source blog URL (optional)
+          <input
+            name="sourceUrl"
+            type="url"
+            placeholder="https://www.educative.io/courses/.../how-the-domain-name-system-works"
+          />
+        </label>
+        <p className="hint full">
+          Paste another article URL to ground the run. We fetch that page, use it as a primary
+          source with your template, and generate a new post. You can also paste the URL in Topic.
+        </p>
         <label>
           Topic
-          <input name="topic" required placeholder="AI agents in customer support" />
+          <input
+            name="topic"
+            placeholder="AI agents in customer support — or paste a blog URL"
+          />
         </label>
         <label>
           Audience
@@ -110,7 +128,9 @@ export function CreateRunView({
       </form>
       <div className="batch-box">
         <h3>Batch Run to review</h3>
-        <p className="hint">One topic per line (max 8). Creates runs through outline for live draft later.</p>
+        <p className="hint">
+          One topic per line (max 8). Creates runs through outline for live draft later.
+        </p>
         <textarea
           rows={4}
           placeholder={"AI agents in support\nLLM eval harnesses\nRAG failure modes"}

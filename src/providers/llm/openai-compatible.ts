@@ -2,6 +2,7 @@ import type { z } from "zod";
 import { appConfig } from "../../config";
 import { getResolvedLlmConfig } from "../../services/llm-settings";
 import { logger } from "../../services/logger";
+import { extractJson } from "../../utils/llm-json";
 import { isTransientError, withRetry } from "../../utils/retry";
 import { formatLlmHttpError } from "./errors";
 import type { GenerateTextOptions, LLMProvider } from "./types";
@@ -14,21 +15,6 @@ export type OpenAICompatibleOptions = {
 function sanitizeHeaderValue(value: string | undefined): string {
   // Remove invisible copy/paste artifacts that break fetch ByteString conversion.
   return (value ?? "").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").trim();
-}
-
-function extractJson(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced?.[1]?.trim() ?? text.trim();
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      return JSON.parse(candidate.slice(start, end + 1));
-    }
-    throw new Error("LLM response did not contain valid JSON");
-  }
 }
 
 export class OpenAICompatibleLLMProvider implements LLMProvider {
@@ -77,6 +63,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
           if (!reasoningModel) {
             body.temperature = options?.temperature ?? 0.4;
           }
+          // Prefer JSON mode whenever the provider supports it (helps avoid prose wrappers).
           if (options?.json && this.jsonMode && !reasoningModel) {
             body.response_format = { type: "json_object" };
           }
@@ -100,11 +87,27 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
             throw error;
           }
           const data = (await response.json()) as {
-            choices?: Array<{ message?: { content?: string } }>;
+            choices?: Array<{
+              message?: {
+                content?: string | null;
+                reasoning_content?: string | null;
+              };
+              finish_reason?: string;
+            }>;
           };
-          const content = data.choices?.[0]?.message?.content;
-          if (!content) throw new Error("Empty LLM response");
-          return content;
+          const message = data.choices?.[0]?.message;
+          const content = String(message?.content ?? "").trim();
+          const reasoning = String(message?.reasoning_content ?? "").trim();
+          // Reasoners sometimes put the final answer only in content, sometimes leak JSON into reasoning.
+          const combined = content || reasoning;
+          if (!combined) throw new Error("Empty LLM response");
+          if (!content && reasoning) {
+            logger.warn("LLM content empty; using reasoning_content", {
+              provider: this.name,
+              model: this.model,
+            });
+          }
+          return combined;
         } catch (error) {
           if (error instanceof Error && error.name === "AbortError") {
             throw new Error(
@@ -247,18 +250,54 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     const system =
       options?.system ??
       "You are a careful research assistant. Respond with valid JSON only matching the requested schema. Never invent source IDs or URLs.";
+    const userContent = `${prompt}\n\nReturn ONLY valid JSON (a single JSON object). No markdown fences, no commentary.`;
+
+    const parseOrThrow = (text: string): T => {
+      const parsed = extractJson(text);
+      return schema.parse(parsed);
+    };
+
     const text = await this.chat(
       [
         { role: "system", content: system },
-        {
-          role: "user",
-          content: `${prompt}\n\nReturn ONLY valid JSON (a single JSON object).`,
-        },
+        { role: "user", content: userContent },
       ],
       { json: true },
     );
-    const parsed = extractJson(text);
-    return schema.parse(parsed);
+
+    try {
+      return parseOrThrow(text);
+    } catch (firstError) {
+      logger.warn("Structured LLM parse failed; requesting JSON repair", {
+        provider: this.name,
+        model: this.model,
+        error: firstError instanceof Error ? firstError.message : String(firstError),
+        preview: text.slice(0, 240),
+      });
+      const repair = await this.chat(
+        [
+          {
+            role: "system",
+            content:
+              "You fix malformed JSON. Return ONLY one valid JSON object. No markdown, no explanation.",
+          },
+          {
+            role: "user",
+            content: `Convert the following model output into valid JSON that matches the required article schema (title, subtitle, slug, excerpt, content, tags, keywords, seoTitle, seoDescription, featuredImage, sources, sourceMap).\n\nOutput to fix:\n${text.slice(0, 14000)}`,
+          },
+        ],
+        { json: true, maxTokens: /reasoner|r1/i.test(this.model) ? 16384 : 12288 },
+      );
+      try {
+        return parseOrThrow(repair);
+      } catch (secondError) {
+        const detail =
+          secondError instanceof Error ? secondError.message : String(secondError);
+        throw new Error(
+          `LLM response did not contain valid JSON (${detail}). Try deepseek-chat instead of a reasoner model, or shorten the template/sources.`,
+        );
+      }
+    }
   }
 }
 

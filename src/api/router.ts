@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { auth } from "../auth";
 import { appConfig } from "../config";
@@ -15,7 +14,11 @@ import { getAutopilotLogStore } from "../services/autopilot-log";
 import { createUser, ensureSeedUser, getUserStore, type SessionUser } from "../services/auth";
 import { getActivityLogStore, recordActivity } from "../services/activity-log";
 import { enrichRunView } from "../services/enrichment";
+import { fetchAndExtract } from "../services/extraction";
 import { clientIpFromHeaders } from "./session";
+import { normalizeBriefUrls } from "../utils/url";
+import { BACKGROUND_RUN_ACTIONS, runAfterResponse } from "./background";
+import { isInFlightRun } from "../pipeline/state";
 
 function runView(run: PipelineRun) {
   return { ...run, ...enrichRunView(run) };
@@ -456,8 +459,8 @@ async function handleAuthedApi(
 
     if (method === "GET" && pathname === "/api/style-presets") {
       const { STYLE_PRESETS } = await import("../services/style-presets");
-      const { loadTemplateMemory } = await import("../services/template-memory");
-      return jsonResponse(200, { presets: STYLE_PRESETS, memory: loadTemplateMemory() });
+      const { ensureTemplateMemory } = await import("../services/template-memory");
+      return jsonResponse(200, { presets: STYLE_PRESETS, memory: await ensureTemplateMemory() });
     }
 
     if (method === "POST" && pathname === "/api/runs/batch") {
@@ -485,8 +488,43 @@ async function handleAuthedApi(
 
     if (method === "POST" && pathname === "/api/runs") {
       const raw = (await readJsonBody(request)) as Record<string, unknown>;
+      const sourceUrl =
+        typeof raw.sourceUrl === "string"
+          ? raw.sourceUrl
+          : Array.isArray(raw.referenceUrls) && typeof raw.referenceUrls[0] === "string"
+            ? raw.referenceUrls[0]
+            : "";
+      let { topic, referenceUrls } = normalizeBriefUrls({
+        topic: typeof raw.topic === "string" ? raw.topic : "",
+        sourceUrl,
+        referenceUrls: Array.isArray(raw.referenceUrls)
+          ? raw.referenceUrls.map(String)
+          : sourceUrl
+            ? [sourceUrl]
+            : [],
+      });
+
+      // Prefer the live page title when the user grounded the run in a blog URL.
+      if (referenceUrls[0] && (topic.length < 8 || /^https?:\/\//i.test(String(raw.topic ?? "")))) {
+        try {
+          const page = await fetchAndExtract(referenceUrls[0]);
+          if (page.title && page.title.trim().length >= 3) {
+            topic = page.title.trim().slice(0, 140);
+          }
+        } catch (error) {
+          logger.warn("Could not prefetch source blog title", {
+            url: referenceUrls[0],
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      if (topic.length < 3) {
+        return jsonResponse(400, { error: "Topic or a valid source blog URL is required" });
+      }
+
       const brief = ContentBriefSchema.parse({
-        topic: raw.topic,
+        topic,
         targetAudience: raw.targetAudience ?? "general readers",
         tone: raw.tone ?? "clear and professional",
         contentType: raw.contentType ?? "educational",
@@ -498,14 +536,18 @@ async function handleAuthedApi(
                 .map((k: string) => k.trim())
                 .filter(Boolean)
             : [],
-        referenceUrls: Array.isArray(raw.referenceUrls) ? raw.referenceUrls : [],
+        referenceUrls,
         stylePresetId: raw.stylePresetId ?? null,
         competitorUrls: Array.isArray(raw.competitorUrls) ? raw.competitorUrls : [],
       });
       const run = await orch().create(brief, {
         templateId: (raw.templateId as string) || null,
       });
-      await log("run_created", { runId: run.id, topic: run.brief.topic });
+      await log("run_created", {
+        runId: run.id,
+        topic: run.brief.topic,
+        referenceUrls: referenceUrls.length,
+      });
       return jsonResponse(201, runView(run));
     }
 
@@ -567,9 +609,11 @@ async function handleAuthedApi(
       if (!/^[\w.-]+$/.test(filename)) {
         return jsonResponse(400, { error: "Invalid image filename" });
       }
-      const filePath = path.join(appConfig.images.outputDir, runId, filename);
+      const fileKey = `images/${runId}/${filename}`;
       try {
-        const buf = await readFile(filePath);
+        const { getDataFs } = await import("../services/data-fs");
+        const buf = await getDataFs().readBytes(fileKey);
+        if (!buf) return jsonResponse(404, { error: "Image not found" });
         const ext = path.extname(filename).toLowerCase();
         const mime =
           ext === ".png"
@@ -579,7 +623,7 @@ async function handleAuthedApi(
               : ext === ".gif"
                 ? "image/gif"
                 : "image/jpeg";
-        return new Response(buf, {
+        return new Response(new Uint8Array(buf), {
           status: 200,
           headers: {
             "Content-Type": mime,
@@ -669,32 +713,97 @@ async function handleAuthedApi(
           });
         }
 
+        if (BACKGROUND_RUN_ACTIONS.has(action)) {
+          const current = await o.get(id);
+          if (action === "run" && isInFlightRun(current)) {
+            await log("run_started", { runId: id, status: current.status, resumed: true });
+            return jsonResponse(202, { ...runView(current), accepted: true });
+          }
+
+          let accepted = current;
+          if (action === "run" && !isInFlightRun(current)) {
+            accepted = await o.claimRunStart(id);
+          }
+
+          const generateImages = body.generateImages;
+          const stopAfter = body.stopAfter === "outline" ? ("outline" as const) : null;
+          const forceFull = body.forceFull === true;
+
+          runAfterResponse(`${action}:${id}`, async () => {
+            switch (action) {
+              case "research":
+                await o.research(id);
+                break;
+              case "outline":
+                await o.outline(id);
+                break;
+              case "generate":
+                await o.generate(id, { generateImages });
+                break;
+              case "quality-check":
+                await o.qualityCheck(id);
+                break;
+              case "run":
+                await o.runUntilReview(id, { generateImages, stopAfter, forceFull });
+                break;
+              case "accept-stream-draft":
+                await o.acceptStreamDraft(id, String(body.markdown ?? ""), { generateImages });
+                break;
+              case "publish":
+                await o.publish(id);
+                break;
+              case "generate-images":
+                await o.generateImages(id);
+                break;
+              case "readability-pass":
+                await o.readabilityPass(id);
+                break;
+              case "regenerate-section":
+                await o.regenerateSection(id, String(body.heading ?? ""));
+                break;
+              case "regenerate-selection":
+                await o.regenerateSelection(id, {
+                  selectedText: String(body.selectedText ?? ""),
+                  instruction: String(body.instruction ?? ""),
+                  content: body.content != null ? String(body.content) : undefined,
+                });
+                break;
+              case "refresh":
+                await o.refreshPublished(id);
+                break;
+              case "distribute":
+                await o.distribute(id);
+                break;
+              default:
+                break;
+            }
+          });
+
+          const bgNames: Record<string, string> = {
+            research: "run_research",
+            outline: "run_outline",
+            generate: "run_generate",
+            "quality-check": "run_quality",
+            run: "run_started",
+            "accept-stream-draft": "run_accept_stream_draft",
+            publish: "run_published",
+            "generate-images": "run_generate_images",
+            "readability-pass": "run_readability",
+            "regenerate-section": "run_regen_section",
+            "regenerate-selection": "run_regen_selection",
+            refresh: "run_refresh",
+            distribute: "run_distribute",
+          };
+          await log(bgNames[action] ?? `run_${action}`, {
+            runId: id,
+            status: accepted.status,
+            accepted: true,
+          });
+          return jsonResponse(202, { ...runView(accepted), accepted: true });
+        }
+
         let run;
         switch (action) {
-          case "research":
-            run = await o.research(id);
-            break;
-          case "outline":
-            run = await o.outline(id);
-            break;
-          case "generate":
-            run = await o.generate(id, { generateImages: body.generateImages });
-            break;
-          case "quality-check":
-            run = await o.qualityCheck(id);
-            break;
-          case "run":
-            run = await o.runUntilReview(id, {
-              generateImages: body.generateImages,
-              stopAfter: body.stopAfter === "outline" ? "outline" : null,
-              forceFull: body.forceFull === true,
-            });
-            break;
-          case "accept-stream-draft":
-            run = await o.acceptStreamDraft(id, String(body.markdown ?? ""), {
-              generateImages: body.generateImages,
-            });
-            break;
           case "reject-stream-draft":
             run = await o.rejectStreamDraft(id, body.reason ? String(body.reason) : undefined);
             break;
@@ -703,9 +812,6 @@ async function handleAuthedApi(
             break;
           case "reject":
             run = await o.reject(id, body.notes);
-            break;
-          case "publish":
-            run = await o.publish(id);
             break;
           case "cancel":
             run = await o.cancel(id);
@@ -725,22 +831,6 @@ async function handleAuthedApi(
           case "assign-template":
             run = await o.assignTemplate(id, body.templateId ?? null);
             break;
-          case "generate-images":
-            run = await o.generateImages(id);
-            break;
-          case "readability-pass":
-            run = await o.readabilityPass(id);
-            break;
-          case "regenerate-section":
-            run = await o.regenerateSection(id, String(body.heading ?? ""));
-            break;
-          case "regenerate-selection":
-            run = await o.regenerateSelection(id, {
-              selectedText: String(body.selectedText ?? ""),
-              instruction: String(body.instruction ?? ""),
-              content: body.content != null ? String(body.content) : undefined,
-            });
-            break;
           case "apply-seo":
             run = await o.applySeoPack(id, {
               title: body.title,
@@ -751,12 +841,6 @@ async function handleAuthedApi(
           case "select-thumbnail":
             run = await o.selectThumbnail(id, String(body.variantId ?? ""));
             break;
-          case "refresh":
-            run = await o.refreshPublished(id);
-            break;
-          case "distribute":
-            run = await o.distribute(id);
-            break;
           case "diff":
             return jsonResponse(200, await o.getDiff(id));
           case "sections":
@@ -765,23 +849,11 @@ async function handleAuthedApi(
             return jsonResponse(404, { error: `Unknown action: ${action}` });
         }
         const actionNames: Record<string, string> = {
-          research: "run_research",
-          outline: "run_outline",
-          generate: "run_generate",
-          "quality-check": "run_quality",
-          run: "run_started",
-          "accept-stream-draft": "run_accept_stream_draft",
           "reject-stream-draft": "run_reject_stream_draft",
-          "readability-pass": "run_readability",
-          "regenerate-section": "run_regen_section",
-          "regenerate-selection": "run_regen_selection",
           "apply-seo": "run_apply_seo",
           "select-thumbnail": "run_select_thumbnail",
-          refresh: "run_refresh",
-          distribute: "run_distribute",
           approve: "run_approved",
           reject: "run_rejected",
-          publish: "run_published",
           cancel: "run_cancelled",
           "outline-update": "outline_edited",
           "article-update": "article_edited",

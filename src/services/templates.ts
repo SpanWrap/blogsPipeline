@@ -19,7 +19,7 @@ export function createTemplateStore(backend = appConfig.storage.backend): Templa
     }
     return new MongoTemplateStore(uri, appConfig.storage.mongoDb, "article_templates");
   }
-  return new FileTemplateStore(appConfig.dataDir);
+  return new FileTemplateStore();
 }
 
 export function getTemplateStore(): TemplateStore {

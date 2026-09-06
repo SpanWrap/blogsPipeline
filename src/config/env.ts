@@ -57,9 +57,20 @@ function normalizeMongoUri(uri: string): string {
 const rawMongoUri = env("MONGODB_URI");
 const onVercel = Boolean(process.env.VERCEL);
 
-function resolveStorageBackend(): "file" | "mongodb" {
-  if (onVercel) return "mongodb";
-  return env("STORAGE_BACKEND", "file") === "mongodb" ? "mongodb" : "file";
+function resolveStorageBackend(): "file" | "mongodb" | "s3" {
+  const raw = (env("STORAGE_BACKEND", onVercel ? "mongodb" : "file") || "file").toLowerCase();
+  if (raw === "s3") return "s3";
+  if (raw === "mongodb") return "mongodb";
+  if (onVercel && raw === "file") {
+    // Ephemeral disk on Vercel — prefer mongodb unless S3 was requested above.
+    return "mongodb";
+  }
+  return "file";
+}
+
+function resolveS3Region(): string {
+  const raw = (env("AWS_REGION") ?? env("AWS_S3_REGION") ?? "eu-north-1")!.trim();
+  return raw.replace(/\.$/, "") || "eu-north-1";
 }
 
 export const appConfig = {
@@ -74,11 +85,21 @@ export const appConfig = {
     )!,
   respectRobotsTxt: envBool("RESPECT_ROBOTS_TXT", true),
   storage: {
-    /** file (default locally) or mongodb. Vercel always uses mongodb (ephemeral disk). */
+    /** file (default locally), mongodb, or s3. On Vercel, `file` is coerced to mongodb. */
     backend: resolveStorageBackend(),
     mongoUri: rawMongoUri ? normalizeMongoUri(rawMongoUri) : undefined,
     mongoDb: env("MONGODB_DB", "spanwrap_pipeline")!,
     mongoCollection: env("MONGODB_COLLECTION", "pipeline_runs")!,
+    s3: {
+      bucket: env("AWS_S3_BUCKET") ?? env("S3_BUCKET"),
+      region: resolveS3Region(),
+      accessKeyId: env("AWS_ACCESS_KEY_ID") ?? env("AWS_ACCESS_KEY"),
+      secretAccessKey: env("AWS_SECRET_ACCESS_KEY") ?? env("AWS_SECRET_KEY") ?? env("AWS_SECRET"),
+      /** Optional key prefix inside the bucket (no leading/trailing slash). */
+      prefix: (env("AWS_S3_PREFIX", "pipeline") || "pipeline").replace(/^\/+|\/+$/g, ""),
+      /** Optional custom endpoint (MinIO, LocalStack). */
+      endpoint: env("AWS_S3_ENDPOINT"),
+    },
   },
   ui: {
     host: env("UI_HOST", process.env.VERCEL ? "0.0.0.0" : "127.0.0.1")!,

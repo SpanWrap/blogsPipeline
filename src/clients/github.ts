@@ -163,7 +163,7 @@ function searchHeaders(opts: GitHubClientOptions): Record<string, string> {
 }
 
 async function searchRepositories(opts: GitHubClientOptions, capturedAt: string): Promise<TrendSignal[]> {
-  const limit = Math.min(opts.limit ?? 10, 25);
+  const limit = Math.min(opts.limit ?? 10, 40);
   const queries = buildGitHubSearchQueries({
     days: opts.days,
     language: opts.language,
@@ -198,8 +198,11 @@ async function searchRepositories(opts: GitHubClientOptions, capturedAt: string)
 }
 
 async function scrapeTrendingPages(opts: GitHubClientOptions, capturedAt: string): Promise<TrendSignal[]> {
-  const limit = Math.min(opts.limit ?? 10, 25);
-  const pages = ["https://github.com/trending?since=daily"];
+  const limit = Math.min(opts.limit ?? 10, 40);
+  const pages = [
+    "https://github.com/trending?since=daily",
+    "https://github.com/trending?since=weekly",
+  ];
   const parsed: TrendSignal[] = [];
   const results = await Promise.allSettled(
     pages.map((page) =>
@@ -225,7 +228,7 @@ async function scrapeTrendingPages(opts: GitHubClientOptions, capturedAt: string
  */
 export async function getTrendingRepos(opts: GitHubClientOptions): Promise<TrendSignal[]> {
   const source = opts.source ?? "trending";
-  const limit = Math.min(opts.limit ?? 10, 25);
+  const limit = Math.min(opts.limit ?? 10, 40);
   const now = new Date().toISOString();
 
   let fromTrending: TrendSignal[] = [];

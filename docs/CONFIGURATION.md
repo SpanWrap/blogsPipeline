@@ -6,11 +6,16 @@ Environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STORAGE_BACKEND` | `file` | `file` or `mongodb`. **On Vercel this is always `mongodb`.** |
-| `PIPELINE_DATA_DIR` | `.data` | JSON run storage root (file backend) |
+| `STORAGE_BACKEND` | `file` | `file`, `mongodb`, or `s3`. On Vercel, `file` is coerced to `mongodb`. |
+| `PIPELINE_DATA_DIR` | `.data` | Local JSON root when `STORAGE_BACKEND=file` |
 | `MONGODB_URI` | — | Required when `STORAGE_BACKEND=mongodb` |
 | `MONGODB_DB` | `spanwrap_pipeline` | Mongo database name |
 | `MONGODB_COLLECTION` | `pipeline_runs` | Mongo collection |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | Required when `STORAGE_BACKEND=s3` |
+| `AWS_S3_BUCKET` | — | S3 bucket name |
+| `AWS_REGION` | `eu-north-1` | S3 region |
+| `AWS_S3_PREFIX` | `pipeline` | Key prefix inside the bucket |
+| `AUTH_SECRET` | — | Required with S3 (and Vercel); HMAC / Auth.js secret |
 | `UI_HOST` | `127.0.0.1` | Review UI bind host |
 | `UI_PORT` | `8787` | Review UI port |
 | `TRENDS_SOURCES` | `hackernews,reddit` | Comma list: `hackernews`, `reddit`, `devto`, `github`, `x`, `arxiv`, `huggingface`, `lobsters`, `news`, `mock` |

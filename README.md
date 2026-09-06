@@ -50,7 +50,8 @@ Framework preset: **Next.js**. Root directory: this folder.
 
 1. Push the repo and import at [vercel.com/new](https://vercel.com/new).
 2. In **Settings → Environment Variables** (Production + Preview), paste values from [`.env.vercel.example`](.env.vercel.example). Required:
-   - `MONGODB_URI` — Atlas connection string (serverless disk is ephemeral; file storage will not persist)
+   - `STORAGE_BACKEND=s3` with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`, `AWS_REGION`, and `AUTH_SECRET`
+   - or `MONGODB_URI` with `STORAGE_BACKEND=mongodb` (serverless disk is ephemeral; local file storage will not persist)
    - `GROQ_API_KEY` — or another LLM key
    - `AUTH_SECRET` — `openssl rand -hex 32`
    - `AUTH_USERNAME` / `AUTH_PASSWORD` — first admin (or create the account on first visit)
@@ -60,7 +61,7 @@ Framework preset: **Next.js**. Root directory: this folder.
 
 Hobby plans cap function time (~60s). Research + generate may need **Pro** (`maxDuration` up to 300s on the API catch-all).
 
-`STORAGE_BACKEND` is forced to MongoDB on Vercel even if you leave it as `file` locally.
+`STORAGE_BACKEND=file` is coerced to MongoDB on Vercel. Prefer `s3` or `mongodb` for production.
 
 Weekly autopilot uses **Vercel Cron** (`GET /api/cron/autopilot`, Monday 08:00 UTC). Set `AUTOPILOT_ENABLED=true`; Vercel injects `CRON_SECRET`.
 

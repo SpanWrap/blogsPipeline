@@ -1,6 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
-import { appConfig } from "../config";
+import { getDataFs, usesS3Storage } from "./data-fs";
 
 export type TemplateMemory = {
   lastTemplateId: string | null;
@@ -8,32 +6,56 @@ export type TemplateMemory = {
   updatedAt: string;
 };
 
-function memoryPath(): string {
-  return path.join(appConfig.dataDir, "template-memory.json");
+const KEY = "template-memory.json";
+
+let cache: TemplateMemory | null = null;
+
+function emptyMemory(): TemplateMemory {
+  return { lastTemplateId: null, lastStylePresetId: null, updatedAt: new Date().toISOString() };
 }
 
+function parseMemory(raw: string): TemplateMemory {
+  const data = JSON.parse(raw) as Partial<TemplateMemory>;
+  return {
+    lastTemplateId: data.lastTemplateId ?? null,
+    lastStylePresetId: data.lastStylePresetId ?? null,
+    updatedAt: data.updatedAt ?? new Date().toISOString(),
+  };
+}
+
+/** Sync read — uses in-memory cache; call ensureTemplateMemory() first when using S3. */
 export function loadTemplateMemory(): TemplateMemory {
-  try {
-    const raw = JSON.parse(fs.readFileSync(memoryPath(), "utf8"));
-    return {
-      lastTemplateId: raw.lastTemplateId ?? null,
-      lastStylePresetId: raw.lastStylePresetId ?? null,
-      updatedAt: raw.updatedAt ?? new Date().toISOString(),
-    };
-  } catch {
-    return { lastTemplateId: null, lastStylePresetId: null, updatedAt: new Date().toISOString() };
-  }
+  if (cache) return cache;
+  if (usesS3Storage()) return emptyMemory();
+  // Local fallback for sync callers before ensureTemplateMemory.
+  return emptyMemory();
 }
 
-export function saveTemplateMemory(partial: Partial<TemplateMemory>): TemplateMemory {
-  const prev = loadTemplateMemory();
+export async function ensureTemplateMemory(): Promise<TemplateMemory> {
+  if (cache) return cache;
+  try {
+    const raw = await getDataFs().readText(KEY);
+    cache = raw ? parseMemory(raw) : emptyMemory();
+  } catch {
+    cache = emptyMemory();
+  }
+  return cache;
+}
+
+export async function saveTemplateMemory(partial: Partial<TemplateMemory>): Promise<TemplateMemory> {
+  const prev = await ensureTemplateMemory();
   const next: TemplateMemory = {
     lastTemplateId: partial.lastTemplateId !== undefined ? partial.lastTemplateId : prev.lastTemplateId,
     lastStylePresetId:
       partial.lastStylePresetId !== undefined ? partial.lastStylePresetId : prev.lastStylePresetId,
     updatedAt: new Date().toISOString(),
   };
-  fs.mkdirSync(path.dirname(memoryPath()), { recursive: true });
-  fs.writeFileSync(memoryPath(), JSON.stringify(next, null, 2), "utf8");
+  cache = next;
+  await getDataFs().writeText(KEY, JSON.stringify(next, null, 2));
   return next;
+}
+
+/** Test helper */
+export function resetTemplateMemoryCache(): void {
+  cache = null;
 }
