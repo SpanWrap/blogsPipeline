@@ -1,0 +1,964 @@
+"use client";
+
+import Link from "next/link";
+import { signOut, useSession } from "next-auth/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "./pipeline/api";
+import { AuthGate } from "./pipeline/AuthGate";
+import { LLM_PROVIDERS } from "./pipeline/constants";
+import type { AppPage, HomeView } from "./pipeline/constants";
+import { CreateRunView } from "./pipeline/CreateRunView";
+import { LoadingScreen } from "./pipeline/LoadingScreen";
+import { RunsView } from "./pipeline/RunsView";
+import { SettingsView } from "./pipeline/SettingsView";
+import { SidebarToggleIcon } from "./pipeline/SidebarToggleIcon";
+import { Toast } from "./pipeline/Toast";
+import { TopicsView } from "./pipeline/TopicsView";
+import type {
+  AutopilotCycle,
+  AutopilotStatus,
+  DashboardData,
+  DigestData,
+  DigestItem,
+  HealthData,
+  LlmConfig,
+  LogEntry,
+  ProgressLine,
+  RunRecord,
+  StylePreset,
+  TemplateRecord,
+  UserRecord,
+} from "./pipeline/types";
+
+type PipelineAppProps = {
+  initialPage?: AppPage;
+};
+
+export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
+  const page: AppPage = initialPage === "settings" ? "settings" : "home";
+  const { data: session, status: sessionStatus } = useSession();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [setupRequired, setSetupRequired] = useState(false);
+  const [username, setUsername] = useState("");
+  const [booting, setBooting] = useState(false);
+  const [homeView, setHomeView] = useState<HomeView>("runs");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [toastError, setToastError] = useState(false);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [run, setRun] = useState<RunRecord | null>(null);
+  const [tab, setTab] = useState("quality");
+  const [templates, setTemplates] = useState<TemplateRecord[]>([]);
+  const [stylePresets, setStylePresets] = useState<StylePreset[]>([]);
+  const [lastStylePresetId, setLastStylePresetId] = useState("");
+  const [digest, setDigest] = useState<DigestData | null | "loading">(null);
+  const [digestFilter, setDigestFilter] = useState("all");
+  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [hasGeminiKey, setHasGeminiKey] = useState(false);
+  const [generateImages, setGenerateImages] = useState(false);
+  const [progress, setProgress] = useState<{
+    active: boolean;
+    action: string;
+    lines: ProgressLine[];
+  }>({ active: false, action: "", lines: [] });
+
+  const [health, setHealth] = useState<HealthData | null>(null);
+  const [healthError, setHealthError] = useState<string | undefined>();
+  const [llm, setLlm] = useState<LlmConfig>({
+    provider: "groq",
+    model: "openai/gpt-oss-20b",
+    providers: LLM_PROVIDERS as unknown as LlmConfig["providers"],
+    hasKey: false,
+  });
+  const [users, setUsers] = useState<UserRecord[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [autopilot, setAutopilot] = useState<AutopilotStatus | null>(null);
+  const [autopilotCycles, setAutopilotCycles] = useState<AutopilotCycle[]>([]);
+
+  const showAuthGate = useCallback((setup = false) => {
+    setAuthenticated(false);
+    setSetupRequired(setup);
+    setUsername("");
+  }, []);
+
+  const toast = useCallback((message: string, isError = false) => {
+    setToastMsg(message);
+    setToastError(isError);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToastMsg(null), isError ? 14000 : 4000);
+  }, []);
+
+  const callApi = useCallback(
+    <T,>(path: string, options?: RequestInit) =>
+      api<T>(path, options, () => showAuthGate(false)),
+    [showAuthGate],
+  );
+
+  const toastRunResult = useCallback(
+    (next: RunRecord, okPrefix: string) => {
+      if (next?.status === "FAILED" || next?.status === "PUBLISH_FAILED") {
+        toast(next.error || "Run failed", true);
+      } else {
+        toast(`${okPrefix} → ${next.status}`);
+      }
+    },
+    [toast],
+  );
+
+  const pushProgress = useCallback((text: string) => {
+    setProgress((prev) => {
+      const last = prev.lines[prev.lines.length - 1];
+      if (last?.text === text) return prev;
+      return {
+        ...prev,
+        lines: [...prev.lines, { at: new Date().toLocaleTimeString(), text }].slice(-12),
+      };
+    });
+  }, []);
+
+  const startProgress = useCallback(
+    (action: string) => {
+      setProgress({ active: true, action, lines: [] });
+      pushProgress(
+        {
+          run: "Starting full pipeline (research → outline → draft → quality)...",
+          research: "Starting research...",
+          outline: "Starting outline...",
+          generate: "Starting article draft...",
+          "quality-check": "Starting quality checks...",
+          publish: "Starting publish...",
+          "generate-images": "Starting image generation...",
+        }[action] || "Processing request...",
+      );
+    },
+    [pushProgress],
+  );
+
+  const stopProgress = useCallback(
+    (success: boolean, message?: string) => {
+      pushProgress(message || (success ? "Completed." : "Failed."));
+      setProgress((prev) => ({ ...prev, active: false }));
+    },
+    [pushProgress],
+  );
+
+  const loadRuns = useCallback(async () => {
+    const list = await callApi<RunRecord[]>("/api/runs");
+    setRuns(list);
+    try {
+      setDashboard(await callApi<DashboardData>("/api/dashboard"));
+    } catch {
+      setDashboard(null);
+    }
+    setSelectedId((current) => {
+      if (current && !list.find((r) => r.id === current)) {
+        setRun(null);
+        return null;
+      }
+      return current;
+    });
+  }, [callApi]);
+
+  const loadTemplates = useCallback(async () => {
+    const list = await callApi<TemplateRecord[]>("/api/templates");
+    setTemplates(list);
+    try {
+      const data = await callApi<{ presets?: StylePreset[]; memory?: { lastStylePresetId?: string } }>(
+        "/api/style-presets",
+      );
+      setStylePresets(data.presets || []);
+      setLastStylePresetId(data.memory?.lastStylePresetId || "");
+    } catch {
+      /* optional */
+    }
+  }, [callApi]);
+
+  const loadDigest = useCallback(
+    async (opts: { refresh?: boolean } = {}) => {
+      setDigest("loading");
+      try {
+        const data = await callApi<DigestData>("/api/digest", {
+          method: "POST",
+          body: JSON.stringify({ refresh: Boolean(opts.refresh) }),
+        });
+        setDigest(data);
+      } catch (e) {
+        setDigest(null);
+        throw e;
+      }
+    },
+    [callApi],
+  );
+
+  const loadHealth = useCallback(async () => {
+    try {
+      const h = await callApi<HealthData>("/api/health");
+      setHealth(h);
+      setHealthError(undefined);
+      setHasGeminiKey(Boolean(h.hasGeminiKey));
+    } catch (e) {
+      setHealth(null);
+      setHealthError(e instanceof Error ? e.message : "Health failed");
+    }
+  }, [callApi]);
+
+  const loadLlm = useCallback(async () => {
+    try {
+      const data = await callApi<LlmConfig>("/api/llm");
+      setLlm({
+        ...data,
+        providers: data.providers?.length
+          ? data.providers
+          : (LLM_PROVIDERS as unknown as LlmConfig["providers"]),
+      });
+    } catch {
+      setLlm({
+        provider: "groq",
+        model: "openai/gpt-oss-20b",
+        hasKey: false,
+        providers: LLM_PROVIDERS as unknown as LlmConfig["providers"],
+      });
+    }
+  }, [callApi]);
+
+  const loadLogs = useCallback(async () => {
+    try {
+      const data = await callApi<{ entries?: LogEntry[] }>("/api/logs?limit=80");
+      setLogs(data.entries || []);
+    } catch (e) {
+      setLogs([{ action: "error", at: new Date().toISOString(), username: e instanceof Error ? e.message : "error" }]);
+    }
+  }, [callApi]);
+
+  const loadUsers = useCallback(async () => {
+    try {
+      const data = await callApi<{ users?: UserRecord[] }>("/api/users");
+      setUsers(data.users || []);
+    } catch {
+      setUsers([]);
+    }
+  }, [callApi]);
+
+  const loadAutopilotStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/autopilot/status");
+      if (!res.ok) return;
+      setAutopilot(await res.json());
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const loadAutopilotHistory = useCallback(async () => {
+    try {
+      const res = await fetch("/api/autopilot/history?limit=10");
+      if (!res.ok) return;
+      const data = await res.json();
+      setAutopilotCycles(data.cycles || []);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const selectRun = useCallback(
+    async (id: string) => {
+      setSelectedId(id);
+      setHomeView("runs");
+      const next = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(id)}`);
+      setRun(next);
+    },
+    [callApi],
+  );
+
+  const act = useCallback(
+    async (action: string, body?: Record<string, unknown>) => {
+      if (!selectedId || busy) return null;
+      const payload = { ...(body || {}), generateImages: Boolean(generateImages && hasGeminiKey) };
+      setBusy(true);
+      startProgress(action);
+      let lastKey = "";
+      const poller = setInterval(async () => {
+        if (!selectedId) return;
+        try {
+          const latest = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(selectedId)}`);
+          const running = (latest.stages || []).find((s: any) => s.status === "running");
+          const key = running
+            ? `run:${running.stage}`
+            : `status:${latest.status}:${latest.error || ""}`;
+          if (key === lastKey) return;
+          lastKey = key;
+          if (running) {
+            pushProgress(
+              (
+                {
+                  research: "Gathering resources...",
+                  analysis: "Analyzing sources...",
+                  outline: "Drafting the outline...",
+                  generation: "Writing the article...",
+                  images: "Generating images with Gemini...",
+                  quality: "Scoring quality...",
+                  publish: "Publishing...",
+                } as Record<string, string>
+              )[running.stage] || `${running.stage}...`,
+            );
+          } else if (latest.error) pushProgress(latest.error);
+        } catch {
+          /* ignore */
+        }
+      }, 1200);
+      try {
+        const next = await callApi<RunRecord>(
+          `/api/runs/${encodeURIComponent(selectedId)}/${action}`,
+          { method: "POST", body: JSON.stringify(payload) },
+        );
+        setRun(next);
+        stopProgress(
+          !["FAILED", "PUBLISH_FAILED"].includes(next.status),
+          next.error ? `${action} failed: ${next.error}` : `${action} completed → ${next.status}`,
+        );
+        toastRunResult(next, `${action} complete`);
+        if (
+          next?.article &&
+          ["generate", "quality-check", "accept-stream-draft", "run", "save-review"].includes(action)
+        ) {
+          if (["generate", "quality-check", "accept-stream-draft", "run"].includes(action)) {
+            setTab("quality");
+          }
+        }
+        if (action === "approve") setTab("publish");
+        if (action === "regenerate-section") setTab("article");
+        await loadRuns();
+        return next;
+      } catch (e) {
+        stopProgress(false, e instanceof Error ? e.message : "Action failed.");
+        toast(e instanceof Error ? e.message : "Action failed", true);
+        try {
+          if (selectedId) {
+            const latest = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(selectedId)}`);
+            setRun(latest);
+          }
+        } catch {
+          /* keep */
+        }
+        return null;
+      } finally {
+        clearInterval(poller);
+        setBusy(false);
+      }
+    },
+    [
+      selectedId,
+      busy,
+      generateImages,
+      hasGeminiKey,
+      startProgress,
+      pushProgress,
+      stopProgress,
+      callApi,
+      toastRunResult,
+      toast,
+      loadRuns,
+    ],
+  );
+
+  const bootAfterAuth = useCallback(
+    async (name: string) => {
+      setAuthenticated(true);
+      setUsername(name);
+      setSetupRequired(false);
+      setBooting(true);
+      try {
+        try {
+          setGenerateImages(localStorage.getItem("pipeline.generateImages") === "1");
+        } catch {
+          /* ignore */
+        }
+        await loadHealth();
+        const boot: Promise<unknown>[] = [loadLlm(), loadTemplates()];
+        if (page === "settings") {
+          boot.push(loadLogs(), loadUsers(), loadAutopilotStatus(), loadAutopilotHistory());
+        } else {
+          boot.push(loadRuns(), loadDigest());
+        }
+        await Promise.all(boot);
+      } finally {
+        setBooting(false);
+      }
+    },
+    [
+      page,
+      loadHealth,
+      loadLlm,
+      loadTemplates,
+      loadLogs,
+      loadUsers,
+      loadAutopilotStatus,
+      loadAutopilotHistory,
+      loadRuns,
+      loadDigest,
+    ],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (sessionStatus === "loading") return;
+        if (sessionStatus === "authenticated") {
+          const name = session?.user?.username || session?.user?.name || "";
+          if (name && !cancelled) await bootAfterAuth(name);
+          return;
+        }
+        const me = await fetch("/api/me", { credentials: "same-origin" })
+          .then((r) => r.json())
+          .catch(() => ({}));
+        if (cancelled) return;
+        if (me.authenticated && me.username) {
+          await bootAfterAuth(me.username);
+        } else {
+          showAuthGate(Boolean(me.setupRequired));
+        }
+      } finally {
+        if (!cancelled && sessionStatus !== "loading") setAuthChecked(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bootAfterAuth, showAuthGate, session, sessionStatus]);
+
+  useEffect(() => {
+    document.title = page === "settings" ? "Settings · Spanwrap Pipeline" : "Spanwrap Blog Pipeline";
+  }, [page]);
+
+  useEffect(() => {
+    try {
+      setSidebarCollapsed(localStorage.getItem("pipeline.sidebarCollapsed") === "1");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("pipeline.sidebarCollapsed", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
+  async function createRun(brief: Record<string, string | null>, andRun: boolean) {
+    if (busy) return;
+    if (!brief.topic || String(brief.topic).length < 3) {
+      toast("Topic is required (at least 3 characters)", true);
+      return;
+    }
+    setBusy(true);
+    try {
+      const created = await callApi<RunRecord>("/api/runs", {
+        method: "POST",
+        body: JSON.stringify(brief),
+      });
+      toast(`Created ${created.id}`);
+      await loadRuns();
+      setSelectedId(created.id);
+      setRun(created);
+      setHomeView("runs");
+      setBusy(false);
+      if (andRun) await act("run");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Create failed", true);
+      setBusy(false);
+    }
+  }
+
+  async function writeBlogFromRun() {
+    if (!selectedId) {
+      toast("Select a run in the list first", true);
+      return;
+    }
+    setBusy(true);
+    try {
+      let current = run;
+      if (!current || current.id !== selectedId) {
+        current = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(selectedId)}`);
+        setRun(current);
+      }
+      const templateId = current.templateId || null;
+      const locked = ["PUBLISHED", "APPROVED"].includes(current.status);
+      let next: RunRecord;
+      if (locked) {
+        const created = await callApi<RunRecord>("/api/runs", {
+          method: "POST",
+          body: JSON.stringify({
+            topic: current.brief.topic,
+            targetAudience: current.brief.targetAudience,
+            tone: current.brief.tone,
+            keywords: current.brief.keywords || [],
+            referenceUrls: current.brief.referenceUrls || [],
+            templateId,
+          }),
+        });
+        setSelectedId(created.id);
+        next = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(created.id)}/run`, {
+          method: "POST",
+          body: "{}",
+        });
+        toastRunResult(next, `Wrote new draft ${next.id}`);
+      } else {
+        next = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(current.id)}/run`, {
+          method: "POST",
+          body: "{}",
+        });
+        toastRunResult(next, "Write blog finished");
+      }
+      setRun(next);
+      if (next?.article) setTab("quality");
+      setHomeView("runs");
+      await loadRuns();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Write failed", true);
+      await loadRuns().catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (sessionStatus === "loading" || !authChecked || booting) {
+    return <LoadingScreen label={booting ? "Preparing your workspace…" : "Loading Spanwrap Pipeline…"} />;
+  }
+
+  if (!authenticated) {
+    return (
+      <>
+        <AuthGate
+          setupRequired={setupRequired}
+          onAuthenticated={(name) => {
+            void bootAfterAuth(name).catch((e) => toast(e.message, true));
+          }}
+        />
+        <Toast message={toastMsg} isError={toastError} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="app">
+        <header className="top">
+          <div>
+            <p className="brand">Spanwrap Pipeline</p>
+            <h1>{page === "settings" ? "Settings" : "Blog content runs"}</h1>
+          </div>
+          <div className="top-right">
+            {username ? <span className="auth-user">{username}</span> : null}
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={async () => {
+                await signOut({ redirect: false });
+                showAuthGate(false);
+              }}
+            >
+              Log out
+            </button>
+            {page === "settings" ? (
+              <Link href="/" className="btn ghost">
+                Back to runs
+              </Link>
+            ) : (
+              <Link href="/settings" className="icon-btn" aria-label="Settings" title="Settings">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+              </Link>
+            )}
+          </div>
+        </header>
+
+        {page === "home" ? (
+          <div
+            className={`home-shell${sidebarCollapsed ? " is-collapsed" : ""}`}
+            data-view={homeView}
+          >
+            <aside className="home-sidebar" aria-label="Workspace sidebar">
+              <div className="home-sidebar-top">
+                <button
+                  type="button"
+                  className="sidebar-toggle"
+                  onClick={toggleSidebar}
+                  aria-expanded={!sidebarCollapsed}
+                  aria-controls="home-sidebar-nav"
+                  title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                >
+                  <SidebarToggleIcon collapsed={sidebarCollapsed} />
+                  <span className="sidebar-toggle-label">Menu</span>
+                </button>
+              </div>
+              <nav id="home-sidebar-nav" className="home-nav" aria-label="Workspace">
+                {(
+                  [
+                    {
+                      id: "topics" as const,
+                      label: "Hot topics",
+                      icon: (
+                        <>
+                          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                        </>
+                      ),
+                    },
+                    {
+                      id: "create" as const,
+                      label: "New run",
+                      icon: (
+                        <>
+                          <path d="M12 5v14" />
+                          <path d="M5 12h14" />
+                        </>
+                      ),
+                    },
+                    {
+                      id: "runs" as const,
+                      label: "Runs",
+                      icon: (
+                        <>
+                          <path d="M4 6h16" />
+                          <path d="M4 12h16" />
+                          <path d="M4 18h10" />
+                        </>
+                      ),
+                    },
+                  ] as const
+                ).map(({ id, label, icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={`home-nav-btn ${homeView === id ? "active" : ""}`}
+                    onClick={() => setHomeView(id)}
+                    title={label}
+                    aria-current={homeView === id ? "page" : undefined}
+                  >
+                    <svg
+                      className="home-nav-icon"
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      {icon}
+                    </svg>
+                    <span className="home-nav-label">{label}</span>
+                  </button>
+                ))}
+              </nav>
+            </aside>
+            <main className="home-main">
+              {homeView === "topics" ? (
+                <TopicsView
+                  digest={digest}
+                  digestFilter={digestFilter}
+                  busy={busy}
+                  onFilter={setDigestFilter}
+                  onRefresh={async () => {
+                    setBusy(true);
+                    try {
+                      const data = await callApi<DigestData>("/api/digest", {
+                        method: "POST",
+                        body: JSON.stringify({ refresh: true }),
+                      });
+                      setDigest(data);
+                      toast(
+                        `Digest: ${data.github?.length ?? 0} GitHub · ${data.reddit?.length ?? 0} Reddit · ${data.x?.length ?? 0} X`,
+                      );
+                    } catch (e) {
+                      setDigest(null);
+                      toast(e instanceof Error ? e.message : "Digest failed", true);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  onWrite={async (item: DigestItem) => {
+                    setBusy(true);
+                    try {
+                      const result = await callApi<{ run: RunRecord }>("/api/digest/start-run", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          title: item.title || "",
+                          url: item.url || "",
+                          description: item.description || "",
+                          templateId: null,
+                        }),
+                      });
+                      toast(`Created run ${result.run.id}`);
+                      await loadRuns();
+                      setSelectedId(result.run.id);
+                      setRun(result.run);
+                      setHomeView("runs");
+                    } catch (e) {
+                      toast(e instanceof Error ? e.message : "Failed", true);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                />
+              ) : null}
+              {homeView === "create" ? (
+                <CreateRunView
+                  templates={templates}
+                  stylePresets={stylePresets}
+                  lastStylePresetId={lastStylePresetId}
+                  busy={busy}
+                  onCreate={createRun}
+                  onBatch={async (topics, templateId, stylePresetId) => {
+                    if (!topics.length) {
+                      toast("Add at least one topic (one per line)", true);
+                      return;
+                    }
+                    setBusy(true);
+                    try {
+                      const data = await callApi<{ runs?: RunRecord[] }>("/api/runs/batch", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          topics,
+                          templateId,
+                          stylePresetId,
+                          generateImages: Boolean(generateImages && hasGeminiKey),
+                        }),
+                      });
+                      toast(`Batch created ${data.runs?.length || 0} runs through outline`);
+                      await loadRuns();
+                      if (data.runs?.[0]?.id) await selectRun(data.runs[0].id);
+                    } catch (e) {
+                      toast(e instanceof Error ? e.message : "Batch failed", true);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                />
+              ) : null}
+              {homeView === "runs" ? (
+                <RunsView
+                  runs={runs}
+                  dashboard={dashboard}
+                  selectedId={selectedId}
+                  run={run}
+                  templates={templates}
+                  tab={tab}
+                  busy={busy}
+                  hasGeminiKey={hasGeminiKey}
+                  generateImages={generateImages}
+                  progress={progress}
+                  onRefresh={() => loadRuns().catch((e) => toast(e.message, true))}
+                  onWriteBlog={writeBlogFromRun}
+                  onSelect={(id) => selectRun(id).catch((e) => toast(e.message, true))}
+                  onDelete={async (id) => {
+                    try {
+                      await callApi(`/api/runs/${encodeURIComponent(id)}`, { method: "DELETE" });
+                      toast("Run deleted successfully");
+                      if (selectedId === id) {
+                        setSelectedId(null);
+                        setRun(null);
+                      }
+                      await loadRuns();
+                    } catch (e) {
+                      toast(e instanceof Error ? e.message : "Delete failed", true);
+                    }
+                  }}
+                  onTab={setTab}
+                  onAct={act}
+                  onGenerateImagesChange={(value) => {
+                    setGenerateImages(value);
+                    try {
+                      localStorage.setItem("pipeline.generateImages", value ? "1" : "0");
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  onRunUpdated={setRun}
+                  toast={toast}
+                />
+              ) : null}
+            </main>
+          </div>
+        ) : (
+          <SettingsView
+            health={health}
+            healthError={healthError}
+            llm={llm}
+            templates={templates}
+            users={users}
+            logs={logs}
+            autopilot={autopilot}
+            autopilotCycles={autopilotCycles}
+            busy={busy}
+            onSaveLlm={async (provider, model, apiKey) => {
+              setBusy(true);
+              try {
+                const saved = await callApi<LlmConfig>("/api/llm", {
+                  method: "POST",
+                  body: JSON.stringify({ provider, model, apiKey }),
+                });
+                setLlm({
+                  ...saved,
+                  providers: saved.providers?.length
+                    ? saved.providers
+                    : (LLM_PROVIDERS as unknown as LlmConfig["providers"]),
+                });
+                toast(`LLM set to ${saved.provider} · ${saved.model}`);
+                await loadHealth();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Save failed", true);
+              } finally {
+                setBusy(false);
+              }
+            }}
+            onLlmProviderChange={(provider) => {
+              const providers = llm.providers?.length
+                ? llm.providers
+                : (LLM_PROVIDERS as unknown as NonNullable<LlmConfig["providers"]>);
+              const info = providers.find((p) => p.id === provider);
+              setLlm((prev) => ({
+                ...prev,
+                providers,
+                provider,
+                model: info?.defaultModel || "",
+                hasKey: prev.provider === provider ? prev.hasKey : false,
+                keyPreview: prev.provider === provider ? prev.keyPreview : null,
+                remappedFrom: null,
+              }));
+            }}
+            onSaveTemplate={async (name, markdown, filename) => {
+              try {
+                if (!markdown) throw new Error("Provide a .md file or paste markdown");
+                const tokens = Math.ceil(markdown.length / 4);
+                await callApi("/api/templates", {
+                  method: "POST",
+                  body: JSON.stringify({ name, markdown, filename }),
+                });
+                if (tokens > 1500) {
+                  toast(
+                    `Template saved (~${tokens.toLocaleString()} tokens). That is large for Groq's free TPM cap — keep headings and short instructions so generation does not 413.`,
+                  );
+                } else {
+                  toast("Template saved");
+                }
+                await loadTemplates();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Template save failed", true);
+              }
+            }}
+            onUpdateTemplate={async ({ id, name, markdown, filename }) => {
+              if (!markdown.trim()) throw new Error("Template markdown cannot be empty");
+              const tokens = Math.ceil(markdown.length / 4);
+              await callApi("/api/templates", {
+                method: "POST",
+                body: JSON.stringify({ id, name, markdown, filename }),
+              });
+              if (tokens > 1500) {
+                toast(
+                  `Template updated (~${tokens.toLocaleString()} tokens). That is large for Groq's free TPM cap — keep headings and short instructions so generation does not 413.`,
+                );
+              } else {
+                toast("Template updated");
+              }
+              await loadTemplates();
+            }}
+            onDeleteTemplate={async (id) => {
+              try {
+                await callApi(`/api/templates/${encodeURIComponent(id)}`, { method: "DELETE" });
+                toast("Template deleted");
+                await loadTemplates();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Delete failed", true);
+              }
+            }}
+            onFetchTemplate={async (id) => {
+              const data = await callApi<{
+                id: string;
+                name: string;
+                markdown: string;
+                filename?: string | null;
+              }>(`/api/templates/${encodeURIComponent(id)}`);
+              return data;
+            }}
+            onAddUser={async (u, password) => {
+              try {
+                await callApi("/api/users", {
+                  method: "POST",
+                  body: JSON.stringify({ username: u, password }),
+                });
+                toast("Person added");
+                await loadUsers();
+                await loadLogs();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Add user failed", true);
+              }
+            }}
+            onRefreshLogs={() => loadLogs().catch((e) => toast(e.message, true))}
+            onToggleAutopilot={async () => {
+              try {
+                const res = await fetch("/api/autopilot/toggle", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ enabled: !autopilot?.enabled }),
+                });
+                if (!res.ok) throw new Error("Toggle failed");
+                const data = await res.json();
+                setAutopilot(data);
+                toast(data.enabled ? "Autopilot enabled" : "Autopilot disabled");
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Toggle failed", true);
+              }
+            }}
+            onTriggerAutopilot={async () => {
+              try {
+                const res = await fetch("/api/autopilot/trigger", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({}),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || "Trigger failed");
+                toast(
+                  `Autopilot cycle complete: ${data.runsCreated?.length ?? 0} runs created, ${data.runsPublished ?? 0} published`,
+                );
+                await loadAutopilotStatus();
+                await loadAutopilotHistory();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Trigger failed", true);
+              }
+            }}
+          />
+        )}
+      </div>
+      <Toast message={toastMsg} isError={toastError} />
+    </>
+  );
+}

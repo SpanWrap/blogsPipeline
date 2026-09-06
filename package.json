@@ -1,19 +1,17 @@
 {
   "name": "spanwrap-blog-pipeline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Standalone blog research and generation pipeline that publishes approved posts to Spanwrap via HTTP",
+  "description": "Next.js blog research and generation pipeline that publishes approved posts to Spanwrap and other platforms",
   "type": "module",
-  "main": "server.ts",
   "bin": {
     "blog-pipeline": "./src/cli/index.ts"
   },
   "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
     "pipeline": "tsx src/cli/index.ts",
-    "ui": "tsx server.ts",
-    "dev": "tsx server.ts",
-    "build": "esbuild server.ts --bundle --platform=node --target=node20 --format=esm --packages=external --outfile=dist/server.js && cp -R public dist/public",
-    "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -26,6 +24,10 @@
     "commander": "^14.0.3",
     "dotenv": "^17.4.2",
     "mongodb": "^7.5.0",
+    "next": "^16.3.4",
+    "next-auth": "^5.0.0-beta.32",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "robots-parser": "^3.0.1",
     "sanitize-html": "^2.17.5",
     "slugify": "^1.6.9",
@@ -34,8 +36,9 @@
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
     "@types/sanitize-html": "^2.16.1",
-    "esbuild": "^0.28.2",
     "typescript": "^5",
     "vitest": "^4.1.10"
   }

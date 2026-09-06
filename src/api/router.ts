@@ -1,0 +1,805 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { auth } from "../auth";
+import { appConfig } from "../config";
+import { ContentBriefSchema, type PipelineRun, type PublishTarget } from "../models";
+import { createOrchestrator } from "../pipeline";
+import { logger } from "../services/logger";
+import { getTemplateStore, uploadTemplate } from "../services/templates";
+import { discoverTopicRecommendations } from "../services/topic-discovery";
+import { discoverTechDigest } from "../services/tech-digest";
+import { getTopicStore } from "../services/topic-store";
+import { ensureLlmSettings, getResolvedLlmConfig, publicLlmStatus, saveLlmSettings } from "../services/llm-settings";
+import { getAutopilotScheduler, maybeStartAutopilotScheduler } from "../services/scheduler";
+import { getAutopilotLogStore } from "../services/autopilot-log";
+import { createUser, ensureSeedUser, getUserStore, type SessionUser } from "../services/auth";
+import { getActivityLogStore, recordActivity } from "../services/activity-log";
+import { enrichRunView } from "../services/enrichment";
+import { clientIpFromHeaders } from "./session";
+
+function runView(run: PipelineRun) {
+  return { ...run, ...enrichRunView(run) };
+}
+
+function orch() {
+  return createOrchestrator();
+}
+
+function jsonResponse(
+  status: number,
+  body: unknown,
+  extraHeaders?: Record<string, string>,
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...extraHeaders,
+    },
+  });
+}
+
+function resolvePathname(request: Request, pathSegments?: string[]): string {
+  if (pathSegments !== undefined) {
+    return pathSegments.length === 0 ? "/api" : `/api/${pathSegments.join("/")}`;
+  }
+  return new URL(request.url).pathname;
+}
+
+function isPublicAuthPath(method: string, pathname: string): boolean {
+  if (pathname === "/api/healthz" && method === "GET") return true;
+  if (pathname === "/api/cron/autopilot" && method === "GET") return true;
+  if (pathname === "/api/me" && method === "GET") return true;
+  if (pathname === "/api/setup" && method === "POST") return true;
+  return false;
+}
+
+function isVercelCronRequest(request: Request): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
+  const auth = request.headers.get("authorization");
+  return typeof auth === "string" && auth === `Bearer ${secret}`;
+}
+
+async function readJsonBody(request: Request): Promise<unknown> {
+  const text = await request.text();
+  return JSON.parse(text || "{}");
+}
+
+let bootStarted = false;
+
+/** Call once on first API request (idempotent). Starts autopilot scheduler when enabled. */
+export function ensureBoot(): void {
+  if (bootStarted) return;
+  bootStarted = true;
+  maybeStartAutopilotScheduler();
+
+  // Local restarts leave runs stuck in GENERATING/RESEARCHING; mark them failed so Retry works.
+  if (!process.env.VERCEL) {
+    void createOrchestrator()
+      .recoverInterruptedRuns({ force: true })
+      .then((n) => {
+        if (n > 0) logger.warn("Marked interrupted runs as failed on boot", { count: n });
+      })
+      .catch((error) => {
+        logger.warn("Interrupted-run recovery failed on boot", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+}
+
+export async function handleApiRequest(
+  request: Request,
+  pathSegments?: string[],
+): Promise<Response> {
+  ensureBoot();
+
+  const url = new URL(request.url);
+  const method = request.method.toUpperCase();
+  const pathname = resolvePathname(request, pathSegments);
+  const ip = clientIpFromHeaders(request.headers);
+
+  try {
+    if (method === "GET" && pathname === "/api/healthz") {
+      return jsonResponse(200, {
+        ok: true,
+        vercel: Boolean(process.env.VERCEL),
+        storage: appConfig.storage.backend,
+      });
+    }
+
+    if (method === "GET" && pathname === "/api/cron/autopilot") {
+      if (!isVercelCronRequest(request)) {
+        return jsonResponse(401, { error: "Unauthorized" });
+      }
+      if (!appConfig.autopilot.enabled) {
+        return jsonResponse(200, { ok: true, skipped: true, reason: "AUTOPILOT_ENABLED is false" });
+      }
+      try {
+        const cycle = await getAutopilotScheduler().triggerNow();
+        return jsonResponse(200, {
+          ok: true,
+          cycleId: cycle.id,
+          created: cycle.runsCreated.length,
+          published: cycle.runsPublished,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return jsonResponse(409, { error: message });
+      }
+    }
+
+    await ensureSeedUser();
+    await ensureLlmSettings();
+
+    if (method === "GET" && pathname === "/api/me") {
+      const nextSession = await auth();
+      const username =
+        nextSession?.user?.username || nextSession?.user?.name || null;
+      const setupRequired = (await getUserStore().count()) === 0;
+      return jsonResponse(200, {
+        authenticated: Boolean(username),
+        username,
+        setupRequired,
+      });
+    }
+
+    if (method === "POST" && pathname === "/api/setup") {
+      if ((await getUserStore().count()) > 0) {
+        return jsonResponse(409, { error: "An account already exists. Sign in instead." });
+      }
+      const body = (await readJsonBody(request)) as Record<string, unknown>;
+      const created = await createUser(String(body.username ?? ""), String(body.password ?? ""));
+      await recordActivity({
+        username: created.username,
+        action: "account_setup",
+        method,
+        path: pathname,
+        ip,
+      });
+      return jsonResponse(201, { username: created.username });
+    }
+
+    if (!isPublicAuthPath(method, pathname)) {
+      const nextSession = await auth();
+      const username = nextSession?.user?.username || nextSession?.user?.name;
+      if (!username) {
+        return jsonResponse(401, { error: "Sign in required" });
+      }
+      return handleAuthedApi(request, url, pathname, { username }, ip);
+    }
+
+    return jsonResponse(404, { error: "Not found" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("API error", { path: pathname, error: message });
+    return jsonResponse(400, { error: message });
+  }
+}
+
+async function handleAuthedApi(
+  request: Request,
+  url: URL,
+  pathname: string,
+  session: SessionUser,
+  ip: string,
+): Promise<Response> {
+  const method = request.method.toUpperCase();
+  const log = (action: string, details?: Record<string, unknown>) =>
+    recordActivity({
+      username: session.username,
+      action,
+      method,
+      path: pathname,
+      ip,
+      details,
+    });
+
+  try {
+    if (method === "GET" && pathname === "/api/logs") {
+      const limitRaw = url.searchParams.get("limit");
+      const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 80;
+      const entries = await getActivityLogStore().list(Number.isFinite(limit) ? limit : 80);
+      return jsonResponse(200, { entries });
+    }
+
+    if (method === "GET" && pathname === "/api/users") {
+      const users = await getUserStore().list();
+      return jsonResponse(200, { users });
+    }
+
+    if (method === "POST" && pathname === "/api/users") {
+      const body = (await readJsonBody(request)) as Record<string, unknown>;
+      const created = await createUser(String(body.username ?? ""), String(body.password ?? ""));
+      await recordActivity({
+        username: session.username,
+        action: "user_created",
+        method,
+        path: pathname,
+        ip,
+        details: { createdUsername: created.username },
+      });
+      return jsonResponse(201, created);
+    }
+
+    if (method === "GET" && pathname === "/api/health") {
+      const llm = getResolvedLlmConfig();
+      return jsonResponse(200, {
+        ok: true,
+        storage: appConfig.storage.backend,
+        llmProvider: llm.provider,
+        llmModel: llm.model,
+        researchProvider: appConfig.research.provider,
+        hasLlmKey: Boolean(llm.apiKey),
+        hasSpanwrapKey: Boolean(appConfig.spanwrap.apiKey),
+        trendsSources: appConfig.trends.sources,
+        hasGithubToken: Boolean(appConfig.trends.githubToken),
+        hasRedditOAuth: Boolean(appConfig.trends.redditClientId && appConfig.trends.redditClientSecret),
+        hasXBearer: Boolean(appConfig.trends.xBearerToken),
+        hasGeminiKey: Boolean(appConfig.images.geminiApiKey),
+        autoAcceptEnabled: appConfig.quality.autoAcceptEnabled,
+        autoAcceptMinScore: appConfig.quality.autoAcceptMinScore,
+      });
+    }
+
+    // ── Autopilot API ──
+
+    if (method === "GET" && pathname === "/api/autopilot/status") {
+      const scheduler = getAutopilotScheduler();
+      const status = await scheduler.status();
+      return jsonResponse(200, status);
+    }
+
+    if (method === "POST" && pathname === "/api/autopilot/trigger") {
+      const scheduler = getAutopilotScheduler();
+      const body = (await readJsonBody(request)) as {
+        dryRun?: boolean;
+        platforms?: PublishTarget[];
+        postsPerPlatform?: number;
+      };
+      try {
+        const cycle = await scheduler.triggerNow({
+          dryRun: body.dryRun,
+          platforms: body.platforms,
+          postsPerPlatform: body.postsPerPlatform,
+        });
+        await log("autopilot_triggered", {
+          cycleId: cycle.id,
+          created: cycle.runsCreated.length,
+          published: cycle.runsPublished,
+        });
+        return jsonResponse(200, cycle);
+      } catch (error) {
+        return jsonResponse(409, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    if (method === "POST" && pathname === "/api/autopilot/toggle") {
+      const body = (await readJsonBody(request)) as Record<string, unknown>;
+      const scheduler = getAutopilotScheduler();
+      if (body.enabled) {
+        scheduler.start();
+      } else {
+        scheduler.stop();
+      }
+      await log(body.enabled ? "autopilot_enabled" : "autopilot_disabled", {});
+      return jsonResponse(200, await scheduler.status());
+    }
+
+    if (method === "GET" && pathname === "/api/autopilot/history") {
+      const limitRaw = url.searchParams.get("limit");
+      const limit = limitRaw ? Math.min(parseInt(limitRaw, 10), 50) : 20;
+      const logStore = getAutopilotLogStore();
+      const history = await logStore.list(limit);
+      return jsonResponse(200, { cycles: history });
+    }
+
+    if (method === "GET" && pathname === "/api/autopilot/config") {
+      return jsonResponse(200, appConfig.autopilot);
+    }
+
+    if (method === "GET" && pathname === "/api/llm") {
+      return jsonResponse(200, publicLlmStatus());
+    }
+
+    if (method === "POST" && pathname === "/api/llm") {
+      const body = (await readJsonBody(request)) as Record<string, unknown>;
+      await saveLlmSettings({
+        provider: body.provider,
+        model: body.model,
+        apiKey: body.apiKey,
+        baseUrl: body.baseUrl,
+      });
+      await log("llm_settings_saved", { provider: body.provider, model: body.model });
+      return jsonResponse(200, publicLlmStatus());
+    }
+
+    if ((pathname === "/api/digest" || pathname === "/api/topics/digest" || pathname === "/api/trending") && method === "GET") {
+      const offline = url.searchParams.get("offline") === "1" || process.env.TRENDS_OFFLINE === "1";
+      const limitRaw = url.searchParams.get("limit");
+      const digest = await discoverTechDigest({
+        offline,
+        refresh: url.searchParams.get("refresh") === "1",
+        limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
+      });
+      return jsonResponse(200, digest);
+    }
+
+    if ((pathname === "/api/digest" || pathname === "/api/topics/digest" || pathname === "/api/trending") && method === "POST") {
+      const bodyText = await request.text();
+      const body = bodyText ? JSON.parse(bodyText) : {};
+      const offline = body.offline === true || process.env.TRENDS_OFFLINE === "1";
+      const digest = await discoverTechDigest({
+        offline,
+        refresh: body.refresh === true,
+        limit: typeof body.limit === "number" ? body.limit : undefined,
+      });
+      if (body.refresh === true) await log("digest_refreshed");
+      return jsonResponse(200, digest);
+    }
+
+    if (pathname === "/api/digest/start-run" && method === "POST") {
+      const body = (await readJsonBody(request)) as Record<string, unknown>;
+      const title = String(body.title ?? "").trim();
+      if (title.length < 3) {
+        return jsonResponse(400, { error: "title is required" });
+      }
+      const description = String(body.description ?? "").trim();
+      const sourceUrl = typeof body.url === "string" && body.url.startsWith("http") ? body.url : null;
+      const extraKeywords = description
+        .split(/\s+/)
+        .map((w) => w.replace(/[^a-zA-Z0-9-]/g, ""))
+        .filter((w) => w.length > 3)
+        .slice(0, 5);
+      const brief = ContentBriefSchema.parse({
+        topic: title.slice(0, 140),
+        targetAudience: body.targetAudience ?? "startup founders and product teams",
+        tone: body.tone ?? "technical but easy to understand",
+        contentType: "educational",
+        keywords: ["AI", "machine learning", "technology", ...extraKeywords],
+        referenceUrls: sourceUrl ? [sourceUrl] : [],
+      });
+      const run = await orch().create(brief, { templateId: (body.templateId as string) || null });
+      await log("run_created", { runId: run.id, topic: run.brief.topic, source: "digest" });
+      return jsonResponse(201, { run });
+    }
+
+    // Hot topic discovery
+    if (pathname === "/api/topics" && method === "GET") {
+      const topics = await getTopicStore().list();
+      return jsonResponse(200, topics);
+    }
+
+    if (pathname === "/api/topics/discover" && method === "POST") {
+      const bodyText = await request.text();
+      const body = bodyText ? JSON.parse(bodyText) : {};
+      const offline = body.offline === true || process.env.TRENDS_OFFLINE === "1";
+      const topics = await discoverTopicRecommendations({
+        offline,
+        limit: typeof body.limit === "number" ? body.limit : undefined,
+        subreddits: Array.isArray(body.subreddits) ? body.subreddits : undefined,
+      });
+      try {
+        const saved = await getTopicStore().saveMany(topics);
+        await log("topics_discovered", { count: saved.length });
+        return jsonResponse(200, { count: saved.length, topics: saved });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          message.includes("MongoDB")
+            ? message
+            : `Failed to save topics to storage: ${message}`,
+        );
+      }
+    }
+
+    const topicMatch = pathname.match(/^\/api\/topics\/([^/]+)(?:\/(start-run))?$/);
+    if (topicMatch) {
+      const tid = decodeURIComponent(topicMatch[1]!);
+      const action = topicMatch[2];
+      if (method === "GET" && !action) {
+        const topic = await getTopicStore().require(tid);
+        return jsonResponse(200, topic);
+      }
+      if (method === "POST" && action === "start-run") {
+        const topic = await getTopicStore().require(tid);
+        const bodyText = await request.text();
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        const brief = ContentBriefSchema.parse({
+          topic: topic.topic,
+          targetAudience: body.targetAudience ?? "startup founders and product teams",
+          tone: body.tone ?? "technical but easy to understand",
+          contentType: "educational",
+          keywords: topic.keywords.length
+            ? topic.keywords
+            : topic.topic.split(/\s+/).slice(0, 5),
+          referenceUrls: topic.signals
+            .map((s: { url?: string | null }) => s.url)
+            .filter((u: string | null | undefined): u is string => Boolean(u))
+            .slice(0, 5),
+        });
+        const run = await orch().create(brief, {
+          templateId: body.templateId || null,
+        });
+        await log("run_created", { runId: run.id, topic: run.brief.topic, source: "topic" });
+        return jsonResponse(201, { topic, run });
+      }
+    }
+
+    if (method === "GET" && pathname === "/api/runs") {
+      const runs = await orch().list();
+      return jsonResponse(
+        200,
+        runs.map((r) => ({
+          id: r.id,
+          status: r.status,
+          topic: r.brief.topic,
+          updatedAt: r.updatedAt,
+          createdAt: r.createdAt,
+          qualityScore: r.quality?.score ?? null,
+          error: r.error,
+          failedStage: r.failedStage,
+          retryable: r.retryable,
+          autoAccepted: r.autoAccepted,
+        })),
+      );
+    }
+
+    if (method === "GET" && pathname === "/api/dashboard") {
+      const runs = await orch().list();
+      return jsonResponse(200, orch().getResumeDashboard(runs));
+    }
+
+    if (method === "GET" && pathname === "/api/style-presets") {
+      const { STYLE_PRESETS } = await import("../services/style-presets");
+      const { loadTemplateMemory } = await import("../services/template-memory");
+      return jsonResponse(200, { presets: STYLE_PRESETS, memory: loadTemplateMemory() });
+    }
+
+    if (method === "POST" && pathname === "/api/runs/batch") {
+      const raw = (await readJsonBody(request)) as Record<string, unknown>;
+      const topics = Array.isArray(raw.topics) ? raw.topics : [];
+      if (!topics.length) return jsonResponse(400, { error: "topics array required" });
+      const briefs = topics.slice(0, 8).map((t: unknown) =>
+        ContentBriefSchema.parse({
+          topic: String(t).slice(0, 140),
+          targetAudience: raw.targetAudience ?? "startup founders",
+          tone: raw.tone ?? "technical but easy to understand",
+          contentType: "educational",
+          keywords: Array.isArray(raw.keywords) ? raw.keywords : [],
+          stylePresetId: raw.stylePresetId ?? null,
+          referenceUrls: [],
+        }),
+      );
+      const runs = await orch().batchCreateAndRun(briefs, {
+        generateImages: raw.generateImages === true,
+        templateId: (raw.templateId as string) || null,
+      });
+      await log("runs_batch", { count: runs.length });
+      return jsonResponse(201, { runs });
+    }
+
+    if (method === "POST" && pathname === "/api/runs") {
+      const raw = (await readJsonBody(request)) as Record<string, unknown>;
+      const brief = ContentBriefSchema.parse({
+        topic: raw.topic,
+        targetAudience: raw.targetAudience ?? "general readers",
+        tone: raw.tone ?? "clear and professional",
+        contentType: raw.contentType ?? "educational",
+        keywords: Array.isArray(raw.keywords)
+          ? raw.keywords
+          : typeof raw.keywords === "string"
+            ? raw.keywords
+                .split(",")
+                .map((k: string) => k.trim())
+                .filter(Boolean)
+            : [],
+        referenceUrls: Array.isArray(raw.referenceUrls) ? raw.referenceUrls : [],
+        stylePresetId: raw.stylePresetId ?? null,
+        competitorUrls: Array.isArray(raw.competitorUrls) ? raw.competitorUrls : [],
+      });
+      const run = await orch().create(brief, {
+        templateId: (raw.templateId as string) || null,
+      });
+      await log("run_created", { runId: run.id, topic: run.brief.topic });
+      return jsonResponse(201, runView(run));
+    }
+
+    // Templates API
+    if (pathname === "/api/templates" && method === "GET") {
+      const list = await getTemplateStore().list();
+      return jsonResponse(
+        200,
+        list.map((t) => ({
+          id: t.id,
+          name: t.name,
+          filename: t.filename,
+          updatedAt: t.updatedAt,
+          createdAt: t.createdAt,
+          notes: t.notes,
+          preview: t.markdown.slice(0, 200),
+          chars: t.markdown.length,
+        })),
+      );
+    }
+
+    if (pathname === "/api/templates" && method === "POST") {
+      const raw = (await readJsonBody(request)) as Record<string, unknown>;
+      const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : undefined;
+      const template = await uploadTemplate({
+        id,
+        name: (raw.name as string) ?? (raw.filename as string) ?? "Untitled template",
+        markdown: (raw.markdown as string) ?? "",
+        filename: raw.filename as string | undefined,
+        notes: (raw.notes as string | null) ?? null,
+      });
+      await log("template_saved", {
+        templateId: template.id,
+        name: template.name,
+        chars: template.markdown.length,
+        updated: Boolean(id),
+      });
+      return jsonResponse(id ? 200 : 201, template);
+    }
+
+    const tplMatch = pathname.match(/^\/api\/templates\/([^/]+)$/);
+    if (tplMatch) {
+      const tid = decodeURIComponent(tplMatch[1]!);
+      if (method === "GET") {
+        const t = await getTemplateStore().require(tid);
+        return jsonResponse(200, t);
+      }
+      if (method === "DELETE") {
+        const ok = await getTemplateStore().delete(tid);
+        if (ok) await log("template_deleted", { templateId: tid });
+        return jsonResponse(ok ? 200 : 404, { deleted: ok });
+      }
+    }
+
+    const imageMatch = pathname.match(/^\/api\/runs\/([^/]+)\/images\/([^/]+)$/);
+    if (imageMatch && method === "GET") {
+      const runId = decodeURIComponent(imageMatch[1]!);
+      const filename = decodeURIComponent(imageMatch[2]!);
+      if (!/^[\w.-]+$/.test(filename)) {
+        return jsonResponse(400, { error: "Invalid image filename" });
+      }
+      const filePath = path.join(appConfig.images.outputDir, runId, filename);
+      try {
+        const buf = await readFile(filePath);
+        const ext = path.extname(filename).toLowerCase();
+        const mime =
+          ext === ".png"
+            ? "image/png"
+            : ext === ".webp"
+              ? "image/webp"
+              : ext === ".gif"
+                ? "image/gif"
+                : "image/jpeg";
+        return new Response(buf, {
+          status: 200,
+          headers: {
+            "Content-Type": mime,
+            "Cache-Control": "public, max-age=86400",
+          },
+        });
+      } catch {
+        return jsonResponse(404, { error: "Image not found" });
+      }
+    }
+
+    const runMatch = pathname.match(/^\/api\/runs\/([^/]+)(?:\/([^/]+))?$/);
+    if (runMatch) {
+      const id = decodeURIComponent(runMatch[1]!);
+      const action = runMatch[2];
+
+      if (method === "GET" && !action) {
+        const run = await orch().get(id);
+        return jsonResponse(200, runView(run));
+      }
+
+      if (method === "DELETE" && !action) {
+        const ok = await orch().delete(id);
+        if (ok) await log("run_deleted", { runId: id });
+        return jsonResponse(ok ? 200 : 404, { deleted: ok });
+      }
+
+      if (method === "POST" && action) {
+        const bodyText = await request.text();
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        const o = orch();
+
+        if (action === "generate-stream") {
+          const encoder = new TextEncoder();
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              const send = (event: string, data: unknown) => {
+                controller.enqueue(
+                  encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+                );
+              };
+              const ac = new AbortController();
+              const onAbort = () => ac.abort();
+              request.signal.addEventListener("abort", onAbort);
+              try {
+                send("status", { stage: "generation", message: "Streaming draft..." });
+                const { markdown, run } = await o.streamDraft(
+                  id,
+                  async (chunk) => {
+                    send("delta", { text: chunk });
+                  },
+                  ac.signal,
+                );
+                send("done", {
+                  markdown,
+                  runId: run.id,
+                  status: run.status,
+                });
+                await log("run_generate_stream", { runId: id, chars: markdown.length });
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                try {
+                  send("error", { error: message });
+                } catch {
+                  // controller may already be closed
+                }
+                await log("run_generate_stream_failed", { runId: id, error: message });
+              } finally {
+                request.signal.removeEventListener("abort", onAbort);
+                try {
+                  controller.close();
+                } catch {
+                  // already closed
+                }
+              }
+            },
+          });
+
+          return new Response(stream, {
+            status: 200,
+            headers: {
+              "Content-Type": "text/event-stream; charset=utf-8",
+              "Cache-Control": "no-cache, no-transform",
+              Connection: "keep-alive",
+              "X-Accel-Buffering": "no",
+            },
+          });
+        }
+
+        let run;
+        switch (action) {
+          case "research":
+            run = await o.research(id);
+            break;
+          case "outline":
+            run = await o.outline(id);
+            break;
+          case "generate":
+            run = await o.generate(id, { generateImages: body.generateImages });
+            break;
+          case "quality-check":
+            run = await o.qualityCheck(id);
+            break;
+          case "run":
+            run = await o.runUntilReview(id, {
+              generateImages: body.generateImages,
+              stopAfter: body.stopAfter === "outline" ? "outline" : null,
+              forceFull: body.forceFull === true,
+            });
+            break;
+          case "accept-stream-draft":
+            run = await o.acceptStreamDraft(id, String(body.markdown ?? ""), {
+              generateImages: body.generateImages,
+            });
+            break;
+          case "reject-stream-draft":
+            run = await o.rejectStreamDraft(id, body.reason ? String(body.reason) : undefined);
+            break;
+          case "approve":
+            run = await o.approve(id, body.notes);
+            break;
+          case "reject":
+            run = await o.reject(id, body.notes);
+            break;
+          case "publish":
+            run = await o.publish(id);
+            break;
+          case "cancel":
+            run = await o.cancel(id);
+            break;
+          case "outline-update":
+            run = await o.updateOutline(id, body.outline ?? body);
+            break;
+          case "article-update":
+            run = await o.updateArticle(id, body.article ?? body);
+            break;
+          case "save-review":
+            run = await o.saveReview(id, {
+              article: body.article,
+              publishTargets: body.publishTargets,
+            });
+            break;
+          case "assign-template":
+            run = await o.assignTemplate(id, body.templateId ?? null);
+            break;
+          case "generate-images":
+            run = await o.generateImages(id);
+            break;
+          case "readability-pass":
+            run = await o.readabilityPass(id);
+            break;
+          case "regenerate-section":
+            run = await o.regenerateSection(id, String(body.heading ?? ""));
+            break;
+          case "regenerate-selection":
+            run = await o.regenerateSelection(id, {
+              selectedText: String(body.selectedText ?? ""),
+              instruction: String(body.instruction ?? ""),
+              content: body.content != null ? String(body.content) : undefined,
+            });
+            break;
+          case "apply-seo":
+            run = await o.applySeoPack(id, {
+              title: body.title,
+              description: body.description,
+              slug: body.slug,
+            });
+            break;
+          case "select-thumbnail":
+            run = await o.selectThumbnail(id, String(body.variantId ?? ""));
+            break;
+          case "refresh":
+            run = await o.refreshPublished(id);
+            break;
+          case "distribute":
+            run = await o.distribute(id);
+            break;
+          case "diff":
+            return jsonResponse(200, await o.getDiff(id));
+          case "sections":
+            return jsonResponse(200, { sections: await o.listSections(id) });
+          default:
+            return jsonResponse(404, { error: `Unknown action: ${action}` });
+        }
+        const actionNames: Record<string, string> = {
+          research: "run_research",
+          outline: "run_outline",
+          generate: "run_generate",
+          "quality-check": "run_quality",
+          run: "run_started",
+          "accept-stream-draft": "run_accept_stream_draft",
+          "reject-stream-draft": "run_reject_stream_draft",
+          "readability-pass": "run_readability",
+          "regenerate-section": "run_regen_section",
+          "regenerate-selection": "run_regen_selection",
+          "apply-seo": "run_apply_seo",
+          "select-thumbnail": "run_select_thumbnail",
+          refresh: "run_refresh",
+          distribute: "run_distribute",
+          approve: "run_approved",
+          reject: "run_rejected",
+          publish: "run_published",
+          cancel: "run_cancelled",
+          "outline-update": "outline_edited",
+          "article-update": "article_edited",
+          "save-review": "review_saved",
+          "assign-template": "template_assigned",
+        };
+        await log(actionNames[action] ?? `run_${action}`, {
+          runId: id,
+          status: run.status,
+        });
+        return jsonResponse(200, runView(run));
+      }
+    }
+
+    return jsonResponse(404, { error: "Not found" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("API error", { path: pathname, error: message });
+    return jsonResponse(400, { error: message });
+  }
+}

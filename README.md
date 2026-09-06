@@ -36,34 +36,33 @@ With no API keys configured, mock research, mock LLM, and mock publisher are use
 ## Review UI
 
 ```bash
-npm run ui
-# open http://127.0.0.1:8787
+npm run dev
+# open http://localhost:3000
 ```
 
-The UI requires a signed-in account. On first launch, create an admin username and password (or set `AUTH_USERNAME` / `AUTH_PASSWORD` in `.env`). Add teammates under **Settings → People**. Sign-ins and edits are recorded in **Settings → Activity log**.
+Next.js App Router app. The UI requires a signed-in account. On first launch, create an admin username and password (or set `AUTH_USERNAME` / `AUTH_PASSWORD` in `.env`). Add teammates under **Settings → People**. Sign-ins and edits are recorded in **Settings → Activity log**.
 
-The CLI does not use this login.
+The CLI (`npm run pipeline`) does not use this login.
 
 ## Deploy on Vercel
 
-Yes — this app is a Node HTTP server. Vercel detects root `server.ts` and runs it (Fluid). You do **not** need Next.js.
+Framework preset: **Next.js**. Root directory: this folder.
 
-1. Push the repo to GitHub and import it at [vercel.com/new](https://vercel.com/new).
-2. Framework preset: **Other**. Root directory: repo root (where `server.ts` is).
-3. In **Settings → Environment Variables** (Production + Preview), paste values from [`.env.vercel.example`](.env.vercel.example). Required:
+1. Push the repo and import at [vercel.com/new](https://vercel.com/new).
+2. In **Settings → Environment Variables** (Production + Preview), paste values from [`.env.vercel.example`](.env.vercel.example). Required:
    - `MONGODB_URI` — Atlas connection string (serverless disk is ephemeral; file storage will not persist)
    - `GROQ_API_KEY` — or another LLM key
    - `AUTH_SECRET` — `openssl rand -hex 32`
    - `AUTH_USERNAME` / `AUTH_PASSWORD` — first admin (or create the account on first visit)
    - `SPANWRAP_API_URL` / `SPANWRAP_API_KEY` — live site, not localhost
-4. MongoDB Atlas → **Network Access** → allow `0.0.0.0/0` (Vercel has no fixed IPs).
-5. Deploy. The review UI is the deployment URL (`https://….vercel.app`).
+3. MongoDB Atlas → **Network Access** → allow `0.0.0.0/0` (Vercel has no fixed IPs).
+4. Deploy. The review UI is the deployment URL (`https://….vercel.app`).
 
-Hobby plans cap function time (~60s). Research + generate can exceed that; **Pro** (Fluid, up to 300s via `maxDuration`) is recommended.
+Hobby plans cap function time (~60s). Research + generate may need **Pro** (`maxDuration` up to 300s on the API catch-all).
 
 `STORAGE_BACKEND` is forced to MongoDB on Vercel even if you leave it as `file` locally.
 
-Weekly autopilot uses **Vercel Cron** (`GET /api/cron/autopilot`, Monday 08:00 UTC) because serverless functions do not keep in-process timers. Set `AUTOPILOT_ENABLED=true` and keep `CRON_SECRET` as the platform-injected secret.
+Weekly autopilot uses **Vercel Cron** (`GET /api/cron/autopilot`, Monday 08:00 UTC). Set `AUTOPILOT_ENABLED=true`; Vercel injects `CRON_SECRET`.
 
 ## Markdown templates (intern format)
 

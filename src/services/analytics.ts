@@ -21,7 +21,7 @@ export type PostAnalytics = {
 
 function analyticsDir(): string {
   const dir = appConfig.analytics.dataDir;
-  return path.isAbsolute(dir) ? dir : path.join(process.cwd(), dir);
+  return path.isAbsolute(dir) ? dir : path.join(/*turbopackIgnore: true*/ process.cwd(), dir);
 }
 
 function filePath(runId: string): string {

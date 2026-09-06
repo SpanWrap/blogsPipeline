@@ -41,14 +41,18 @@ export async function uploadTemplate(
   input: UploadTemplateInput,
   store: TemplateStore = getTemplateStore(),
 ): Promise<ArticleTemplate> {
+  const existing = input.id ? await store.get(input.id) : null;
+  if (input.id && !existing) {
+    throw new Error(`Template not found: ${input.id}`);
+  }
   const now = new Date().toISOString();
   const template = ArticleTemplateSchema.parse({
     id: input.id ?? createId("tpl"),
-    name: input.name.trim() || input.filename?.replace(/\.md$/i, "") || "Untitled template",
-    filename: input.filename ?? "",
+    name: input.name.trim() || input.filename?.replace(/\.md$/i, "") || existing?.name || "Untitled template",
+    filename: input.filename ?? existing?.filename ?? "",
     markdown: input.markdown.trim(),
-    notes: input.notes ?? null,
-    createdAt: now,
+    notes: input.notes !== undefined ? input.notes : (existing?.notes ?? null),
+    createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   });
   if (template.markdown.length < 20) {

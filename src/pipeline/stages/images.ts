@@ -20,7 +20,7 @@ async function saveBase64Image(
 ): Promise<string> {
   await mkdir(outputDir, { recursive: true });
   const ext = mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
-  const filePath = path.join(outputDir, `${filename}.${ext}`);
+  const filePath = path.join(/*turbopackIgnore: true*/ outputDir, `${filename}.${ext}`);
   await writeFile(filePath, Buffer.from(base64, "base64"));
   return filePath;
 }

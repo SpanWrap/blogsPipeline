@@ -95,7 +95,7 @@ describe("file activity log", () => {
       username: "jai",
       action: "login",
       method: "POST",
-      path: "/api/auth/login",
+      path: "/api/auth/callback/credentials",
       ip: "127.0.0.1",
     });
     await store.append({

@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 
+# Next.js
+.next/
+out/
+
 # Runtime storage
 .data/
 coverage/
@@ -16,6 +20,7 @@ coverage/
 
 # Tooling
 *.tsbuildinfo
+next-env.d.ts
 .DS_Store
 npm-debug.log*
 yarn-error.log*
@@ -25,3 +30,6 @@ yarn-error.log*
 .idea/
 .vscode/
 *-log-export-*.csv
+
+# Legacy build output
+dist/
