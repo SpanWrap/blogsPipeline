@@ -40,13 +40,20 @@ export class FileRunStore implements RunStore {
 
   async list(): Promise<PipelineRun[]> {
     const names = await this.fs.listNames("runs");
-    const runs: PipelineRun[] = [];
-    for (const file of names) {
-      if (!file.endsWith(".json")) continue;
-      const raw = await this.fs.readText(`runs/${file}`);
-      if (!raw) continue;
-      runs.push(PipelineRunSchema.parse(JSON.parse(raw)));
-    }
+    const files = names.filter((file) => file.endsWith(".json"));
+    const runs = (
+      await Promise.all(
+        files.map(async (file) => {
+          const raw = await this.fs.readText(`runs/${file}`);
+          if (!raw) return null;
+          try {
+            return PipelineRunSchema.parse(JSON.parse(raw));
+          } catch {
+            return null;
+          }
+        }),
+      )
+    ).filter((r): r is PipelineRun => Boolean(r));
     return runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 }

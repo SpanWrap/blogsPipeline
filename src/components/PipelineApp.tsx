@@ -47,6 +47,8 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   const [homeView, setHomeView] = useState<HomeView>("runs");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const bootUserRef = useRef<string | null>(null);
+  const bootInFlightRef = useRef(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastError, setToastError] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -152,13 +154,12 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   );
 
   const loadRuns = useCallback(async () => {
-    const list = await callApi<RunRecord[]>("/api/runs");
+    const [list, dash] = await Promise.all([
+      callApi<RunRecord[]>("/api/runs"),
+      callApi<DashboardData>("/api/dashboard").catch(() => null),
+    ]);
     setRuns(list);
-    try {
-      setDashboard(await callApi<DashboardData>("/api/dashboard"));
-    } catch {
-      setDashboard(null);
-    }
+    setDashboard(dash);
     setSelectedId((current) => {
       if (current && !list.find((r) => r.id === current)) {
         setRun(null);
@@ -326,7 +327,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
       let lastKey = "";
       try {
         while (Date.now() - startedAt < maxMs) {
-          await new Promise((r) => setTimeout(r, 1200));
+          await new Promise((r) => setTimeout(r, 1800));
           const latest = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(runId)}`);
           setRun(latest);
           setSelectedId((current) => current || runId);
@@ -477,14 +478,24 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         } catch {
           /* ignore */
         }
-        await loadHealth();
-        const boot: Promise<unknown>[] = [loadLlm(), loadTemplates()];
+        // Critical path only — digest / settings extras load after the shell is usable.
+        await Promise.all([loadHealth(), loadLlm(), loadTemplates()]);
         if (page === "settings") {
-          boot.push(loadLogs(), loadUsers(), loadAutopilotStatus(), loadAutopilotHistory());
+          void Promise.all([
+            loadLogs(),
+            loadUsers(),
+            loadAutopilotStatus(),
+            loadAutopilotHistory(),
+          ]).catch(() => {});
         } else {
-          boot.push(loadRuns(), loadDigest());
+          setDigest((prev) => (prev === null ? "loading" : prev));
+          void loadRuns().catch((e) =>
+            toast(e instanceof Error ? e.message : "Could not load runs", true),
+          );
+          void loadDigest().catch(() => {
+            setDigest((prev) => (prev === "loading" ? null : prev));
+          });
         }
-        await Promise.all(boot);
       } finally {
         setBooting(false);
       }
@@ -500,6 +511,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
       loadAutopilotHistory,
       loadRuns,
       loadDigest,
+      toast,
     ],
   );
 
@@ -508,16 +520,38 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     (async () => {
       try {
         if (sessionStatus === "loading") return;
+
         if (sessionStatus === "authenticated") {
           const name = session?.user?.username || session?.user?.name || "";
-          if (name && !cancelled) await bootAfterAuth(name);
+          if (!name) return;
+          // Already booted this user — never remount the full-page loader mid-session.
+          if (bootUserRef.current === name) {
+            if (!cancelled) {
+              setAuthenticated(true);
+              setUsername(name);
+              setSetupRequired(false);
+            }
+            return;
+          }
+          if (bootInFlightRef.current) return;
+          bootInFlightRef.current = true;
+          bootUserRef.current = name;
+          try {
+            if (!cancelled) await bootAfterAuth(name);
+          } finally {
+            bootInFlightRef.current = false;
+          }
           return;
         }
+
+        bootUserRef.current = null;
         const me = await fetch("/api/me", { credentials: "same-origin" })
           .then((r) => r.json())
           .catch(() => ({}));
         if (cancelled) return;
         if (me.authenticated && me.username) {
+          if (bootUserRef.current === me.username) return;
+          bootUserRef.current = me.username;
           await bootAfterAuth(me.username);
         } else {
           showAuthGate(Boolean(me.setupRequired));
@@ -529,7 +563,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     return () => {
       cancelled = true;
     };
-  }, [bootAfterAuth, showAuthGate, session, sessionStatus]);
+  }, [bootAfterAuth, showAuthGate, session?.user?.username, session?.user?.name, sessionStatus]);
 
   useEffect(() => {
     document.title = page === "settings" ? "Settings · Spanwrap Pipeline" : "Spanwrap Blog Pipeline";
@@ -610,6 +644,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
       toast("Select a run in the list first", true);
       return;
     }
+    if (busy) return;
     setBusy(true);
     try {
       let current = run;
@@ -619,7 +654,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
       }
       const templateId = current.templateId || null;
       const locked = ["PUBLISHED", "APPROVED"].includes(current.status);
-      let next: RunRecord;
+      let targetId = current.id;
       if (locked) {
         const created = await callApi<RunRecord>("/api/runs", {
           method: "POST",
@@ -632,41 +667,47 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
             templateId,
           }),
         });
+        targetId = created.id;
         setSelectedId(created.id);
-        next = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(created.id)}/run`, {
-          method: "POST",
-          body: "{}",
-        });
-        toastRunResult(next, `Wrote new draft ${next.id}`);
-      } else {
-        next = await callApi<RunRecord>(`/api/runs/${encodeURIComponent(current.id)}/run`, {
-          method: "POST",
-          body: "{}",
-        });
-        toastRunResult(next, "Write blog finished");
+        setRun(created);
       }
-      setRun(next);
-      if (next?.article) setTab("quality");
+      setBusy(false);
       setHomeView("runs");
-      await loadRuns();
+      const next = await callApi<RunRecord & { accepted?: boolean }>(
+        `/api/runs/${encodeURIComponent(targetId)}/run`,
+        { method: "POST", body: "{}" },
+      );
+      setRun(next);
+      setSelectedId(targetId);
+      if (next.accepted || isInFlightRun(next)) {
+        await watchBackgroundRun(targetId, "run");
+      } else {
+        toastRunResult(next, locked ? `Wrote new draft ${next.id}` : "Write blog finished");
+        if (next?.article) setTab("quality");
+        await loadRuns();
+      }
     } catch (e) {
       toast(e instanceof Error ? e.message : "Write failed", true);
       await loadRuns().catch(() => {});
-    } finally {
       setBusy(false);
     }
   }
 
-  if (sessionStatus === "loading" || !authChecked || booting) {
-    return <LoadingScreen label={booting ? "Preparing your workspace…" : "Loading Spanwrap Pipeline…"} />;
+  if (booting) {
+    return <LoadingScreen label="Preparing your workspace…" />;
   }
 
+  // Never tear down the app on session refetch — only block before first auth resolution.
   if (!authenticated) {
+    if (sessionStatus === "loading" || !authChecked) {
+      return <LoadingScreen label="Loading Spanwrap Pipeline…" />;
+    }
     return (
       <>
         <AuthGate
           setupRequired={setupRequired}
           onAuthenticated={(name) => {
+            bootUserRef.current = name;
             void bootAfterAuth(name).catch((e) => toast(e.message, true));
           }}
         />
@@ -689,6 +730,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
               type="button"
               className="btn ghost"
               onClick={async () => {
+                bootUserRef.current = null;
                 await signOut({ redirect: false });
                 showAuthGate(false);
               }}

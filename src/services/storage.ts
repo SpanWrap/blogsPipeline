@@ -1,4 +1,5 @@
 import { appConfig } from "../config";
+import { CachedRunStore } from "./cached-run-store";
 import { FileRunStore } from "./file-store";
 import { MongoRunStore } from "./mongo-store";
 import type { RunStore } from "./store";
@@ -25,8 +26,9 @@ export function createRunStore(backend = appConfig.storage.backend): RunStore {
       appConfig.storage.mongoCollection,
     );
   }
-  // file + s3 share FileRunStore via DataFs
-  return new FileRunStore();
+  const fileStore = new FileRunStore();
+  // S3 (and local file) benefit from short TTL caching under poll load.
+  return new CachedRunStore(fileStore);
 }
 
 /** Shared store for CLI and UI (lazily created). */
