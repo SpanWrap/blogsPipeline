@@ -443,7 +443,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   const act = useCallback(
     async (action: string, body?: Record<string, unknown>) => {
       if (!selectedId || busy) return null;
-      const payload = { ...(body || {}), generateImages: Boolean(generateImages && hasGeminiKey) };
+      const payload = { ...(body || {}), generateImages: Boolean(generateImages) };
       const backgroundActions = new Set([
         "run",
         "research",
@@ -972,7 +972,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                           topics,
                           templateId,
                           stylePresetId,
-                          generateImages: Boolean(generateImages && hasGeminiKey),
+                          generateImages: Boolean(generateImages),
                         }),
                       });
                       toast(`Batch created ${data.runs?.length || 0} runs through outline`);

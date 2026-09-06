@@ -306,15 +306,69 @@ export class BlogPipelineOrchestrator {
     return this.maybeRecoverInterrupted(run);
   }
 
+  /** True when this process holds the lock or a non-expired lease is present. */
+  isActivelyWorking(id: string, run?: PipelineRun | null): boolean {
+    if (isRunLockedLocally(id)) return true;
+    if (run && hasActiveLease(run)) return true;
+    return false;
+  }
+
   /**
-   * Soft-claim a run as RESEARCHING before background work starts so the UI
-   * can show progress immediately after a 202 Accepted response.
+   * Soft-claim a run before background work starts so the UI can show progress
+   * immediately after a 202 Accepted response. Also re-claims abandoned
+   * in-flight rows (QUALITY_CHECK/GENERATING with no live lease/lock).
    */
   async claimRunStart(id: string): Promise<PipelineRun> {
     return withRunLock(id, async () => {
-      const run = await this.store.require(id);
-      if (isInFlightRun(run)) return run;
-      // Resuming a later failed stage — don't pretend research is running.
+      let run = await this.store.require(id);
+      if (isInFlightRun(run) && hasActiveLease(run)) return run;
+
+      const resumeFrom = resolveResumeStage(run);
+      const leaseId = createId("lease");
+      const leaseFields = { leaseId, leaseUntil: leaseExpiryIso() };
+
+      // Resume quality / generation / outline without pretending research is running.
+      if (resumeFrom === "quality" && run.article) {
+        return this.store.save({
+          ...setStatus(startStage(run, "quality"), "QUALITY_CHECK"),
+          ...leaseFields,
+          error: null,
+          failedStage: null,
+          errorCode: null,
+          retryable: false,
+        });
+      }
+      if (resumeFrom === "generation" && run.outline) {
+        return this.store.save({
+          ...setStatus(startStage(run, "generation"), "GENERATING"),
+          ...leaseFields,
+          error: null,
+          failedStage: null,
+          errorCode: null,
+          retryable: false,
+        });
+      }
+      if (resumeFrom === "outline" && run.analysis) {
+        return this.store.save({
+          ...setStatus(startStage(run, "outline"), "GENERATING"),
+          ...leaseFields,
+          error: null,
+          failedStage: null,
+          errorCode: null,
+          retryable: false,
+        });
+      }
+      if (resumeFrom === "images" && run.article) {
+        return this.store.save({
+          ...setStatus(startStage(run, "images"), "GENERATING"),
+          ...leaseFields,
+          error: null,
+          failedStage: null,
+          errorCode: null,
+          retryable: false,
+        });
+      }
+
       if (
         run.status === "FAILED" &&
         run.failedStage &&
@@ -325,9 +379,16 @@ export class BlogPipelineOrchestrator {
         return run;
       }
       if (!["CREATED", "FAILED", "CANCELLED", "RESEARCH_COMPLETE"].includes(run.status)) {
+        // Abandoned in-flight without a known resume artifact — keep status but refresh lease.
+        if (isInFlightRun(run)) {
+          return this.store.save({ ...run, ...leaseFields, updatedAt: nowIso() });
+        }
         return run;
       }
-      return this.store.save(setStatus(startStage(run, "research"), "RESEARCHING"));
+      return this.store.save({
+        ...setStatus(startStage(run, "research"), "RESEARCHING"),
+        ...leaseFields,
+      });
     });
   }
 
@@ -400,8 +461,11 @@ export class BlogPipelineOrchestrator {
 
   private async clearLease(id: string, leaseId: string | null): Promise<void> {
     try {
+      // Re-read immediately before write so we never clobber a newer lease/status
+      // from a concurrent Continue / claim (stale snapshot race).
       const run = await this.store.require(id);
       if (leaseId && run.leaseId && run.leaseId !== leaseId) return;
+      if (!run.leaseId && !run.leaseUntil) return;
       await this.store.save({
         ...run,
         leaseId: null,
@@ -897,7 +961,7 @@ export class BlogPipelineOrchestrator {
 
   private async attachGeneratedImages(run: PipelineRun): Promise<PipelineRun> {
     if (!run.article) return run;
-    let next = startStage(run, "images", { provider: "gemini" });
+    let next = startStage(run, "images", { provider: "auto" });
     next = await this.store.save(next);
     try {
       const result = await imageStage(next.article!, next.id);
@@ -906,21 +970,35 @@ export class BlogPipelineOrchestrator {
       const heroFile = filenames.find((n) => n.startsWith("hero-"));
       const socialFile = filenames.find((n) => n.startsWith("social-"));
       const sectionFile = filenames.find((n) => n.startsWith("section-"));
+      const heroUrl =
+        (heroFile ? publicImageUrl(next.id, heroFile) : null) || result.heroImage?.url || null;
+      const socialUrl =
+        (socialFile ? publicImageUrl(next.id, socialFile) : null) || result.socialImage?.url || null;
+      const sectionUrl =
+        (sectionFile ? publicImageUrl(next.id, sectionFile) : null) ||
+        result.sectionImages[0]?.url ||
+        null;
       const variants = [
-        heroFile
+        heroUrl
           ? {
               id: "a",
-              url: publicImageUrl(next.id, heroFile),
-              label: "Hero A",
+              url: heroUrl,
+              label: result.provider === "web-search" ? "Web hero" : "Hero A",
               selected: true,
             }
           : null,
-        socialFile || sectionFile
+        socialUrl || sectionUrl
           ? {
               id: "b",
-              url: publicImageUrl(next.id, (socialFile || sectionFile)!),
-              label: socialFile ? "Social B" : "Section B",
-              selected: !heroFile,
+              url: (socialUrl || sectionUrl)!,
+              label: socialUrl
+                ? result.provider === "web-search"
+                  ? "Web social"
+                  : "Social B"
+                : result.provider === "web-search"
+                  ? "Web section"
+                  : "Section B",
+              selected: !heroUrl,
             }
           : null,
       ].filter(Boolean) as PipelineRun["thumbnailVariants"];
@@ -934,6 +1012,8 @@ export class BlogPipelineOrchestrator {
         thumbnailVariants: variants,
       };
       next = completeStage(next, "images", {
+        provider: result.provider,
+        fallbackFrom: result.fallbackFrom ?? null,
         total:
           (result.sectionImages?.length ?? 0) +
           (result.heroImage ? 1 : 0) +
@@ -941,6 +1021,17 @@ export class BlogPipelineOrchestrator {
         saved: result.savedPaths.length,
         thumbnails: variants.length,
       });
+      if (result.fallbackFrom) {
+        next = {
+          ...next,
+          reviewNotes: [
+            next.reviewNotes,
+            `Images: used web search (Gemini unavailable: ${result.fallbackFrom})`,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        };
+      }
       return next;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

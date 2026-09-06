@@ -715,13 +715,16 @@ async function handleAuthedApi(
 
         if (BACKGROUND_RUN_ACTIONS.has(action)) {
           const current = await o.get(id);
-          if (action === "run" && isInFlightRun(current)) {
+          // Only skip re-dispatch when a worker is actually alive (local lock or lease).
+          // Ghost QUALITY_CHECK/GENERATING rows (no lease after restart/aborted after())
+          // used to return 202 forever, then get marked INTERRUPTED on the next poll.
+          if (action === "run" && isInFlightRun(current) && o.isActivelyWorking(id, current)) {
             await log("run_started", { runId: id, status: current.status, resumed: true });
             return jsonResponse(202, { ...runView(current), accepted: true });
           }
 
           let accepted = current;
-          if (action === "run" && !isInFlightRun(current)) {
+          if (action === "run") {
             accepted = await o.claimRunStart(id);
           }
 

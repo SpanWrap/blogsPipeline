@@ -670,10 +670,8 @@ export function RunDetail({
       <p className="hint">
         <strong>Run to review</strong> runs research → outline → draft → quality. If a run failed, it
         resumes from the failed stage. Tabs below inspect/edit results — select text in Quality to
-        Quick Edit.
-        {hasGeminiKey
-          ? " Enable Gemini images to generate art with the draft (also works when continuing an existing draft)."
-          : ""}
+        Quick Edit. Enable Generate images for Gemini art (falls back to web image search when Gemini
+        fails or has no key).
       </p>
       <div className="actions">
         <button className="btn primary" disabled={busy} onClick={() => onAct("run")}>
@@ -683,17 +681,16 @@ export function RunDetail({
           className="check-inline"
           title={
             hasGeminiKey
-              ? "Generate hero/section images with Gemini after the draft"
-              : "Add GEMINI_API_KEY in .env to enable"
+              ? "Generate hero/section images with Gemini; falls back to web search if Gemini fails"
+              : "Search the web for relevant images (set GEMINI_API_KEY for AI-generated art)"
           }
         >
           <input
             type="checkbox"
-            disabled={!hasGeminiKey}
-            checked={generateImages && hasGeminiKey}
-            onChange={(e) => onGenerateImagesChange(e.target.checked && hasGeminiKey)}
+            checked={generateImages}
+            onChange={(e) => onGenerateImagesChange(e.target.checked)}
           />
-          Gemini images
+          Generate images
         </label>
         <button className="btn" disabled={busy} onClick={() => onTab("publish")}>
           Open publish
@@ -731,16 +728,18 @@ export function RunDetail({
           <button className="btn" disabled={busy} onClick={() => onAct("generate")}>
             Generate
           </button>
-          {hasGeminiKey ? (
-            <button
-              className="btn"
-              disabled={busy || !run.article}
-              title="Generate hero/section images for the current draft"
-              onClick={() => onAct("generate-images")}
-            >
-              Generate images
-            </button>
-          ) : null}
+          <button
+            className="btn"
+            disabled={busy || !run.article}
+            title={
+              hasGeminiKey
+                ? "Generate hero/section images (Gemini, with web search fallback)"
+                : "Find relevant web images for the current draft"
+            }
+            onClick={() => onAct("generate-images")}
+          >
+            Generate images
+          </button>
           <button className="btn" disabled={busy} onClick={() => onAct("quality-check")}>
             Quality score
           </button>

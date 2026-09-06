@@ -303,7 +303,7 @@ export function SettingsView({
         ],
         ["research", health.researchProvider],
         ["publish key", health.hasSpanwrapKey ? "set" : "missing"],
-        ["gemini images", health.hasGeminiKey ? "key set" : "no key"],
+        ["gemini images", health.hasGeminiKey ? "key set" : "no key (web search fallback)"],
         [
           "auto-accept",
           health.autoAcceptEnabled ? `on (≥${health.autoAcceptMinScore})` : "off",

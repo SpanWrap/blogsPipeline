@@ -1,4 +1,5 @@
 import { createImageProvider, type GeneratedImage } from "../../providers/images";
+import { WebSearchImageProvider } from "../../providers/images/web-search";
 import { logger } from "../../services/logger";
 import type { GeneratedBlog } from "../../models";
 import { getDataFs } from "../../services/data-fs";
@@ -9,6 +10,10 @@ export type ImageStageResult = {
   sectionImages: GeneratedImage[];
   socialImage: GeneratedImage | null;
   savedPaths: string[];
+  /** Which provider produced the usable images. */
+  provider: string;
+  /** Set when Gemini failed/was skipped and web search was used. */
+  fallbackFrom?: string | null;
 };
 
 async function saveBase64Image(
@@ -26,21 +31,12 @@ async function saveBase64Image(
   return key;
 }
 
-export async function imageStage(
-  article: GeneratedBlog,
+async function materializeImages(
+  allImages: GeneratedImage[],
   runId: string,
+  provider: string,
+  fallbackFrom?: string | null,
 ): Promise<ImageStageResult> {
-  const provider = createImageProvider();
-
-  logger.info("Generating blog images", { provider: provider.name, runId });
-
-  const allImages = await provider.generateBlogImages({
-    title: article.title,
-    excerpt: article.excerpt,
-    content: article.content,
-    tags: article.tags,
-  });
-
   const savedPaths: string[] = [];
 
   for (let i = 0; i < allImages.length; i++) {
@@ -55,19 +51,89 @@ export async function imageStage(
   const sectionImages = allImages.filter((i) => i.type === "section");
   const socialImage = allImages.find((i) => i.type === "social") ?? null;
 
-  logger.info("Image generation complete", {
+  logger.info("Image materialization complete", {
+    provider,
+    fallbackFrom: fallbackFrom ?? null,
     total: allImages.length,
     saved: savedPaths.length,
+    remoteOnly: allImages.filter((i) => !i.base64 && i.url).length,
   });
 
-  return { heroImage, sectionImages, socialImage, savedPaths };
+  return {
+    heroImage,
+    sectionImages,
+    socialImage,
+    savedPaths,
+    provider,
+    fallbackFrom: fallbackFrom ?? null,
+  };
+}
+
+function hasUsableImages(result: ImageStageResult): boolean {
+  if (result.savedPaths.length > 0) return true;
+  if (result.heroImage?.url || result.heroImage?.base64) return true;
+  if (result.sectionImages.some((i) => i.url || i.base64)) return true;
+  if (result.socialImage?.url || result.socialImage?.base64) return true;
+  return false;
+}
+
+export async function imageStage(
+  article: GeneratedBlog,
+  runId: string,
+): Promise<ImageStageResult> {
+  const primary = createImageProvider();
+  let geminiError: string | null = null;
+
+  if (primary.name !== "mock") {
+    try {
+      logger.info("Generating blog images", { provider: primary.name, runId });
+      const allImages = await primary.generateBlogImages({
+        title: article.title,
+        excerpt: article.excerpt,
+        content: article.content,
+        tags: article.tags,
+      });
+      const result = await materializeImages(allImages, runId, primary.name);
+      if (hasUsableImages(result)) return result;
+      geminiError = "Gemini returned no usable image data";
+      logger.warn(geminiError, { runId, provider: primary.name });
+    } catch (error) {
+      geminiError = error instanceof Error ? error.message : String(error);
+      logger.warn("Gemini image generation failed; falling back to web search", {
+        runId,
+        error: geminiError.slice(0, 300),
+      });
+    }
+  } else {
+    geminiError = "No Gemini API key configured";
+    logger.info("Skipping Gemini images; using web image search", { runId });
+  }
+
+  const web = new WebSearchImageProvider();
+  logger.info("Searching the web for relevant blog images", {
+    runId,
+    reason: geminiError,
+  });
+  const webImages = await web.generateBlogImages({
+    title: article.title,
+    excerpt: article.excerpt,
+    content: article.content,
+    tags: article.tags,
+  });
+  const webResult = await materializeImages(webImages, runId, web.name, geminiError);
+  if (!hasUsableImages(webResult)) {
+    throw new Error(
+      `Image generation failed (${geminiError || "unknown"}). Web image search also found nothing usable.`,
+    );
+  }
+  return webResult;
 }
 
 export function publicImageUrl(runId: string, filename: string): string {
   return `/api/runs/${encodeURIComponent(runId)}/images/${encodeURIComponent(filename)}`;
 }
 
-/** Attach generated images to the article as a featured URL and inline Markdown. */
+/** Attach generated or searched images to the article as featured URL + inline Markdown. */
 export function applyGeneratedImages(
   article: GeneratedBlog,
   result: ImageStageResult,
@@ -79,12 +145,20 @@ export function applyGeneratedImages(
   let content = article.content;
   const headings = content.match(/^## .+$/gm) ?? [];
 
-  for (let i = 0; i < Math.min(sectionFiles.length, headings.length); i++) {
+  const sectionUrls: string[] = sectionFiles.map((file) => publicImageUrl(runId, file));
+  // Prefer saved files; otherwise use remote search URLs.
+  if (!sectionUrls.length) {
+    for (const img of result.sectionImages) {
+      if (img.url) sectionUrls.push(img.url);
+    }
+  }
+
+  for (let i = 0; i < Math.min(sectionUrls.length, headings.length); i++) {
     const heading = headings[i]!;
-    const file = sectionFiles[i]!;
+    const imageUrl = sectionUrls[i]!;
     const alt = result.sectionImages[i]?.altText || heading.replace(/^##\s+/, "");
-    const imageMd = `![${alt}](${publicImageUrl(runId, file)})`;
-    if (content.includes(imageMd)) continue;
+    const imageMd = `![${alt}](${imageUrl})`;
+    if (content.includes(imageMd) || content.includes(`](${imageUrl})`)) continue;
     const idx = content.indexOf(heading);
     if (idx < 0) continue;
     const end = content.indexOf("\n", idx);
@@ -94,7 +168,9 @@ export function applyGeneratedImages(
 
   const featuredImage =
     article.featuredImage ||
-    (heroFile ? publicImageUrl(runId, heroFile) : null);
+    (heroFile ? publicImageUrl(runId, heroFile) : null) ||
+    result.heroImage?.url ||
+    null;
 
   return { ...article, content, featuredImage };
 }
