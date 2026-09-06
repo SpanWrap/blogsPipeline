@@ -137,12 +137,44 @@ export function htmlToMarkdown(html: string): string {
     .trim();
 }
 
-export function featuredImageFor(run: { article?: any; sources?: any[] }, articleOverride?: any): string | null {
+function isBlockedFeaturedHost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return /(^|\.)(fbsbx\.com|facebook\.com|fbcdn\.net|instagram\.com|cdninstagram\.com|threads\.net|tiktok\.com|pinterest\.com|pinimg\.com)/i.test(
+      host,
+    );
+  } catch {
+    return true;
+  }
+}
+
+export function featuredImageFor(run: { article?: any; sources?: any[]; thumbnailVariants?: any[] }, articleOverride?: any): string | null {
   const a = articleOverride || run.article;
   if (!a) return null;
-  if (a.featuredImage && /^https?:\/\//i.test(a.featuredImage)) return a.featuredImage;
-  const md = String(a.content || "").match(/!\[[^\]]*]\(\s*(https?:\/\/[^)\s]+)\s*\)/);
-  if (md?.[1]) return md[1];
+  const candidates = [
+    a.featuredImage,
+    ...(Array.isArray(run.thumbnailVariants)
+      ? run.thumbnailVariants
+          .slice()
+          .sort((x: any, y: any) => Number(Boolean(y?.selected)) - Number(Boolean(x?.selected)))
+          .map((v: any) => v?.url)
+      : []),
+  ];
+  for (const raw of candidates) {
+    const url = typeof raw === "string" ? raw.trim() : "";
+    if (!url) continue;
+    // Same-origin generated assets always render.
+    if (url.startsWith("/api/runs/")) return url;
+    // Absolute http(s) — skip social hotlinks that browsers block.
+    if (/^https?:\/\//i.test(url) && !isBlockedFeaturedHost(url)) return url;
+  }
+  const md = String(a.content || "").match(
+    /!\[[^\]]*]\(\s*((?:https?:\/\/|\/api\/runs\/)[^)\s]+)\s*\)/,
+  );
+  if (md?.[1]) {
+    const src = md[1];
+    if (src.startsWith("/api/runs/") || !isBlockedFeaturedHost(src)) return src;
+  }
   const gh = (a.sources || [])
     .map((s: any) => s.url)
     .find((u: string) => /github\.com\/[^/]+\/[^/]+/i.test(u || ""));

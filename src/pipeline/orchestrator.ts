@@ -2,6 +2,7 @@ import {
   BlogOutlineSchema,
   ContentBriefSchema,
   GeneratedBlogSchema,
+  QualityResultSchema,
   parsePublishTargets,
   type BlogOutline,
   type ContentBrief,
@@ -67,9 +68,9 @@ import { createQuickEditLLM } from "../providers/llm/quick-edit";
 /** Process-wide lock so two "Run to review" clicks cannot wipe each other's outline/article. */
 const runLocks = new Map<string, Promise<void>>();
 
-/** Soft lease TTL — renewed by heartbeats during long LLM stages. */
-const LEASE_TTL_MS = 3 * 60_000;
-const HEARTBEAT_MS = 25_000;
+/** Soft lease TTL — renewed by heartbeats during long LLM / image stages. */
+const LEASE_TTL_MS = 15 * 60_000;
+const HEARTBEAT_MS = 20_000;
 
 function isRunLockedLocally(id: string): boolean {
   return runLocks.has(id);
@@ -730,7 +731,9 @@ export class BlogPipelineOrchestrator {
     run = setStatus(startStage(run, "quality"), "QUALITY_CHECK");
     run = await this.store.save(run);
     try {
-      const quality = qualityStage(article, run.sources, run.analysis);
+      const quality = QualityResultSchema.parse(
+        qualityStage(article, run.sources, run.analysis),
+      );
       const seoPack = buildSeoPack(article, run.brief.topic);
       const repurposePack = buildRepurposePack({
         title: article.title,
@@ -770,7 +773,18 @@ export class BlogPipelineOrchestrator {
       return this.store.save(next);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return this.store.save(failStage(run, "quality", message));
+      logger.warn("Quality check failed", { runId: id, error: message.slice(0, 400) });
+      try {
+        return await this.store.save(
+          failStage({ ...run, quality: null }, "quality", message.slice(0, 800)),
+        );
+      } catch (saveError) {
+        logger.error("Failed to persist quality failure", {
+          runId: id,
+          error: saveError instanceof Error ? saveError.message : String(saveError),
+        });
+        return failStage({ ...run, quality: null }, "quality", message.slice(0, 800));
+      }
     }
   }
 
@@ -970,14 +984,10 @@ export class BlogPipelineOrchestrator {
       const heroFile = filenames.find((n) => n.startsWith("hero-"));
       const socialFile = filenames.find((n) => n.startsWith("social-"));
       const sectionFile = filenames.find((n) => n.startsWith("section-"));
-      const heroUrl =
-        (heroFile ? publicImageUrl(next.id, heroFile) : null) || result.heroImage?.url || null;
-      const socialUrl =
-        (socialFile ? publicImageUrl(next.id, socialFile) : null) || result.socialImage?.url || null;
-      const sectionUrl =
-        (sectionFile ? publicImageUrl(next.id, sectionFile) : null) ||
-        result.sectionImages[0]?.url ||
-        null;
+      // Only use saved /api assets — remote Facebook/social URLs do not render.
+      const heroUrl = heroFile ? publicImageUrl(next.id, heroFile) : null;
+      const socialUrl = socialFile ? publicImageUrl(next.id, socialFile) : null;
+      const sectionUrl = sectionFile ? publicImageUrl(next.id, sectionFile) : null;
       const variants = [
         heroUrl
           ? {

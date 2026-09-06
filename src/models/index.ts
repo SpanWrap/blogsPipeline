@@ -158,7 +158,15 @@ export type GeneratedBlog = z.infer<typeof GeneratedBlogSchema>;
 export const QualityIssueSchema = z.object({
   severity: z.enum(["info", "warning", "error"]),
   type: z.string(),
-  message: z.string(),
+  message: z.preprocess((v) => {
+    if (typeof v === "string") return v;
+    if (v && typeof v === "object" && "message" in (v as object)) {
+      const nested = (v as { message?: unknown }).message;
+      if (typeof nested === "string") return nested;
+    }
+    if (v == null) return "";
+    return typeof v === "object" ? JSON.stringify(v) : String(v);
+  }, z.string()),
 });
 
 export const QualityResultSchema = z.object({

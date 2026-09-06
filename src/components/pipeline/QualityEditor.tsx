@@ -42,6 +42,10 @@ export function QualityEditor({
   const [previewHtml, setPreviewHtml] = useState("");
   const runId = run.id;
   const contentKey = a?.content || "";
+  const heroSrc = featuredImageFor(run, {
+    ...a,
+    featuredImage: featured.trim() || a?.featuredImage,
+  });
 
   useEffect(() => {
     setTitle(a?.title || "");
@@ -52,7 +56,7 @@ export function QualityEditor({
       editorRef.current.innerHTML = markdownToEditorHtml(a?.content || "");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, contentKey]);
+  }, [runId, contentKey, a?.featuredImage]);
 
   function getContent() {
     if (editorRef.current) return htmlToMarkdown(editorRef.current.innerHTML);
@@ -387,6 +391,17 @@ export function QualityEditor({
             value={excerpt}
             onChange={(e) => setExcerpt(e.target.value)}
           />
+          {heroSrc ? (
+            <figure className="draft-featured-figure">
+              <img
+                className="post-hero"
+                src={heroSrc}
+                alt={title ? `Featured image for ${title}` : "Featured image"}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+              />
+            </figure>
+          ) : null}
           <div className="rich-editor">
             <div className="rich-toolbar">
               <button type="button" data-cmd="bold" title="Bold (Ctrl+B)">
@@ -435,15 +450,7 @@ export function QualityEditor({
             />
           </div>
           <div className="doc-meta-panel" style={{ marginTop: "1rem" }}>
-            <label>
-              Featured image URL (optional)
-              <input
-                placeholder="https://"
-                value={featured}
-                onChange={(e) => setFeatured(e.target.value)}
-              />
-            </label>
-            <fieldset className="destinations" style={{ marginTop: "1rem" }}>
+            <fieldset className="destinations">
               <legend>Publish to</legend>
               {PUBLISH_SITES.map((site) => (
                 <label key={site.id} className="check">

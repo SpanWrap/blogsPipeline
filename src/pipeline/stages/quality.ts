@@ -7,7 +7,11 @@ import type {
 } from "../../models";
 import { isValidHttpUrl } from "../../utils/url";
 
-let scoreSEO: ((article: GeneratedBlog) => { score: number; issues: string[] }) | undefined;
+type SeoIssueLike = string | { type?: string; message?: string; severity?: string };
+
+let scoreSEO:
+  | ((article: GeneratedBlog) => { score: number; issues: SeoIssueLike[] })
+  | undefined;
 try {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const mod = require("../../services/seo-research");
@@ -187,8 +191,17 @@ export function qualityStage(
   const issues: QualityIssue[] = [];
   let score = 100;
 
-  const add = (severity: QualityIssue["severity"], type: string, message: string, penalty: number) => {
-    issues.push({ severity, type, message });
+  const add = (
+    severity: QualityIssue["severity"],
+    type: string,
+    message: string,
+    penalty: number,
+  ) => {
+    issues.push({
+      severity,
+      type: String(type || "issue"),
+      message: typeof message === "string" ? message : String(message),
+    });
     score -= penalty;
   };
 
@@ -368,7 +381,23 @@ export function qualityStage(
       seoScore = result.score;
       seoWeight = 0.3;
       for (const issue of result.issues) {
-        add("warning", "seo_issue", issue, 0);
+        const message =
+          typeof issue === "string"
+            ? issue
+            : typeof issue?.message === "string"
+              ? issue.message
+              : JSON.stringify(issue);
+        const type =
+          typeof issue === "object" && issue && typeof issue.type === "string"
+            ? `seo_${issue.type}`
+            : "seo_issue";
+        const severity =
+          typeof issue === "object" &&
+          issue &&
+          (issue.severity === "info" || issue.severity === "warning" || issue.severity === "error")
+            ? issue.severity
+            : "warning";
+        add(severity, type, message, 0);
       }
     } catch {
       // scoreSEO threw – skip SEO weighting

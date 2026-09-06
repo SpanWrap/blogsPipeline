@@ -33,7 +33,7 @@ Rules:
 - when a source is marked as a primary/reference blog URL, treat it as the main grounding document and rewrite the ideas originally (do not copy prose)
 - clear structure; no filler/keyword stuffing or padded repetition
 - follow template headings/instructions when provided
-- featuredImage: https URL from sources when available
+- featuredImage: null (image stage fills a royalty-free saved asset; do not use Facebook/Instagram/social CDN URLs)
 - embed at most 1 real https Markdown image when available
 - end with a conclusion that synthesizes takeaways and a clear next step for the reader
 

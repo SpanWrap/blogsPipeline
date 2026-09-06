@@ -70,10 +70,11 @@ async function materializeImages(
 }
 
 function hasUsableImages(result: ImageStageResult): boolean {
+  // Require saved bytes so the UI can render via /api/runs/.../images/...
   if (result.savedPaths.length > 0) return true;
-  if (result.heroImage?.url || result.heroImage?.base64) return true;
-  if (result.sectionImages.some((i) => i.url || i.base64)) return true;
-  if (result.socialImage?.url || result.socialImage?.base64) return true;
+  if (result.heroImage?.base64) return true;
+  if (result.sectionImages.some((i) => i.base64)) return true;
+  if (result.socialImage?.base64) return true;
   return false;
 }
 
@@ -146,13 +147,6 @@ export function applyGeneratedImages(
   const headings = content.match(/^## .+$/gm) ?? [];
 
   const sectionUrls: string[] = sectionFiles.map((file) => publicImageUrl(runId, file));
-  // Prefer saved files; otherwise use remote search URLs.
-  if (!sectionUrls.length) {
-    for (const img of result.sectionImages) {
-      if (img.url) sectionUrls.push(img.url);
-    }
-  }
-
   for (let i = 0; i < Math.min(sectionUrls.length, headings.length); i++) {
     const heading = headings[i]!;
     const imageUrl = sectionUrls[i]!;
@@ -166,10 +160,11 @@ export function applyGeneratedImages(
     content = `${content.slice(0, insertAt)}\n${imageMd}\n${content.slice(insertAt)}`;
   }
 
+  // Prefer saved same-origin assets so the UI can render them. Never keep a
+  // prior Facebook/social hotlink from the LLM as the featured image.
   const featuredImage =
-    article.featuredImage ||
     (heroFile ? publicImageUrl(runId, heroFile) : null) ||
-    result.heroImage?.url ||
+    (article.featuredImage?.startsWith("/api/runs/") ? article.featuredImage : null) ||
     null;
 
   return { ...article, content, featuredImage };
