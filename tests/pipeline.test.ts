@@ -281,6 +281,23 @@ describe("publishing", () => {
     expect(blog.featuredImage).toBe("https://opengraph.githubassets.com/1/owner/repo");
   });
 
+  it("rewrites relative run image URLs to absolute public URLs on publish", async () => {
+    const { toPublishableBlog } = await import("@/pipeline/stages/publishing");
+    const { appConfig } = await import("@/config");
+    const rel = "/api/runs/run_a8d9df440102/images/section-1.jpg";
+    const blog = toPublishableBlog(
+      sampleArticle({
+        featuredImage: rel,
+        content: `## Intro\n\n![Section](${rel})\n\nBody text.`,
+        sources: [],
+      }),
+    );
+    const expected = `${appConfig.publicUrl}${rel}`;
+    expect(blog.featuredImage).toBe(expected);
+    expect(blog.content).toContain(`](${expected})`);
+    expect(blog.content).not.toContain(`](${rel})`);
+  });
+
   it("publishes successfully and is idempotent", async () => {
     const publisher = new MockPublisher("success");
     const blog = {

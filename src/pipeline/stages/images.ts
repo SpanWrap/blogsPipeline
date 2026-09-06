@@ -3,6 +3,7 @@ import { WebSearchImageProvider } from "../../providers/images/web-search";
 import { logger } from "../../services/logger";
 import type { GeneratedBlog } from "../../models";
 import { getDataFs } from "../../services/data-fs";
+import { relativeRunImagePath } from "../../utils/public-assets";
 import path from "node:path";
 
 export type ImageStageResult = {
@@ -131,7 +132,8 @@ export async function imageStage(
 }
 
 export function publicImageUrl(runId: string, filename: string): string {
-  return `/api/runs/${encodeURIComponent(runId)}/images/${encodeURIComponent(filename)}`;
+  // Relative path for the review UI (same-origin). Publish rewrites to absolute.
+  return relativeRunImagePath(runId, filename);
 }
 
 /** Attach generated or searched images to the article as featured URL + inline Markdown. */

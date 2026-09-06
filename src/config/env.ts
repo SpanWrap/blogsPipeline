@@ -73,6 +73,20 @@ function resolveS3Region(): string {
   return raw.replace(/\.$/, "") || "eu-north-1";
 }
 
+/** Public origin for absolute image URLs when publishing to Spanwrap / Medium / etc. */
+function resolvePipelinePublicUrl(): string {
+  const explicit =
+    env("PIPELINE_PUBLIC_URL") ?? env("AUTH_URL") ?? env("NEXTAUTH_URL") ?? env("NEXT_PUBLIC_APP_URL");
+  if (explicit?.trim()) return explicit.trim().replace(/\/+$/, "");
+  const vercel = process.env.VERCEL_URL?.trim();
+  if (vercel) {
+    const host = vercel.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    return `https://${host}`;
+  }
+  // Production default so publish payloads never ship relative /api/runs/... paths.
+  return "https://pipeline.spanwrap.com";
+}
+
 export const appConfig = {
   dataDir: resolveDataDir(),
   requestTimeoutMs: envInt("REQUEST_TIMEOUT_MS", 30_000),
@@ -99,8 +113,19 @@ export const appConfig = {
       prefix: (env("AWS_S3_PREFIX", "pipeline") || "pipeline").replace(/^\/+|\/+$/g, ""),
       /** Optional custom endpoint (MinIO, LocalStack). */
       endpoint: env("AWS_S3_ENDPOINT"),
+      /**
+       * Optional public CDN/base for objects (no trailing slash), e.g.
+       * https://pipeline-spanwrap.s3.eu-north-1.amazonaws.com/pipeline
+       * or a CloudFront origin. When set, publish uses S3 URLs instead of /api/runs/...
+       */
+      publicBaseUrl: (env("AWS_S3_PUBLIC_BASE_URL") ?? "").replace(/\/+$/, "") || null,
     },
   },
+  /**
+   * Absolute origin of this pipeline deployment (no trailing slash).
+   * Used to turn `/api/runs/.../images/...` into publicly fetchable URLs on publish.
+   */
+  publicUrl: resolvePipelinePublicUrl(),
   ui: {
     host: env("UI_HOST", process.env.VERCEL ? "0.0.0.0" : "127.0.0.1")!,
     /** Vercel sets PORT; locally UI_PORT (default 8787) is used. */

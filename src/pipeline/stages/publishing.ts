@@ -9,6 +9,7 @@ import { createPublisherForTarget } from "../../providers/publishing";
 import type { Publisher } from "../../providers/publishing";
 import sanitizeHtml from "sanitize-html";
 import { resolveFeaturedImage } from "../../utils/images";
+import { rewriteAssetUrlsForPublish, toPublicAssetUrl } from "../../utils/public-assets";
 
 const SITE_LABEL: Record<PublishTarget, string> = {
   spanwrap: "Spanwrap",
@@ -27,20 +28,24 @@ function sanitizeContent(content: string): string {
 }
 
 export function toPublishableBlog(article: GeneratedBlog): PublishableBlog {
+  const content = rewriteAssetUrlsForPublish(sanitizeContent(article.content));
+  const featured = resolveFeaturedImage({
+    featuredImage: article.featuredImage,
+    content: article.content,
+    sourceUrls: article.sources.map((s) => s.url),
+  });
+
   return {
     title: article.title,
     slug: article.slug,
     excerpt: article.excerpt,
-    content: sanitizeContent(article.content),
+    content,
     tags: article.tags,
     keywords: article.keywords,
     seoTitle: article.seoTitle,
     seoDescription: article.seoDescription,
-    featuredImage: resolveFeaturedImage({
-      featuredImage: article.featuredImage,
-      content: article.content,
-      sourceUrls: article.sources.map((s) => s.url),
-    }),
+    // External platforms need absolute https URLs (S3 public or pipeline.spanwrap.com).
+    featuredImage: toPublicAssetUrl(featured),
     publishedAt: null,
     sources: article.sources.map((s) => ({
       title: s.title,
