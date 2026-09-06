@@ -1000,7 +1000,14 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                   progress={progress}
                   onRefresh={() => loadRuns().catch((e) => toast(e.message, true))}
                   onWriteBlog={writeBlogFromRun}
-                  onSelect={(id) => selectRun(id).catch((e) => toast(e.message, true))}
+                  onSelect={(id) => {
+                    if (!id) {
+                      setSelectedId(null);
+                      setRun(null);
+                      return;
+                    }
+                    selectRun(id).catch((e) => toast(e.message, true));
+                  }}
                   onDelete={async (id) => {
                     try {
                       await callApi(`/api/runs/${encodeURIComponent(id)}`, { method: "DELETE" });

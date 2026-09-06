@@ -295,6 +295,32 @@ body {
   height: 100%;
 }
 
+.runs-detail {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.runs-back {
+  display: none;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 650;
+  font-size: 0.9rem;
+  padding: 0.85rem 1.15rem 0;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.runs-back:hover {
+  text-decoration: underline;
+}
+
 .runs-rail {
   display: flex;
   flex-direction: column;
@@ -311,6 +337,7 @@ body {
   min-height: 0;
   overflow: auto;
   padding: 1.15rem 1.35rem 2.5rem;
+  flex: 1;
 }
 
 .create {
@@ -1935,14 +1962,39 @@ label.check input {
   .app {
     height: auto;
     max-height: none;
+    min-height: 100dvh;
     overflow: visible;
+  }
+
+  .top {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.85rem 1rem;
+  }
+
+  .top > div:first-child {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .top h1 {
+    font-size: 1.35rem;
+  }
+
+  .top-right {
+    width: 100%;
+    justify-content: flex-start;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
 
   .home-shell,
   .home-shell.is-collapsed {
     grid-template-columns: 1fr;
     height: auto;
-    min-height: calc(100vh - 4.5rem);
+    min-height: calc(100dvh - 4.5rem);
     overflow: visible;
   }
 
@@ -1955,38 +2007,45 @@ label.check input {
     border-right: 0;
     border-bottom: 1px solid var(--line);
     overflow: visible;
-    padding: 0.65rem 0.75rem;
+    padding: 0.55rem 0.65rem 0.7rem;
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg));
   }
 
   .home-sidebar-top {
-    justify-content: flex-end;
-  }
-
-  .home-shell.is-collapsed .home-nav {
     display: none;
   }
 
-  .sidebar-toggle-label {
-    display: inline;
+  /* Keep section nav usable on phones — don't hide when "collapsed". */
+  .home-shell.is-collapsed .home-nav {
+    display: flex;
   }
 
-  .home-shell.is-collapsed .sidebar-toggle-label {
+  .home-shell.is-collapsed .home-nav-label {
     display: inline;
   }
 
   .home-nav {
     flex-direction: row;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    gap: 0.35rem;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    padding-bottom: 0.15rem;
   }
 
   .home-nav-btn {
-    flex: 1 1 auto;
+    flex: 0 0 auto;
+    width: auto;
     justify-content: center;
     text-align: center;
+    padding: 0.55rem 0.75rem;
+    white-space: nowrap;
   }
 
   .home-shell.is-collapsed .home-nav-btn {
-    padding: 0.65rem 0.75rem;
+    padding: 0.55rem 0.75rem;
+    justify-content: center;
   }
 
   .home-main {
@@ -1994,33 +2053,219 @@ label.check input {
     height: auto;
   }
 
+  .home-pane {
+    max-width: none;
+    padding: 1rem 0.9rem 2rem;
+  }
+
   .home-pane-runs {
     overflow: visible;
+    padding: 0;
+  }
+
+  .settings-main {
+    max-width: none;
+    padding: 1rem 0.9rem 2rem;
+  }
+
+  .panel {
+    padding: 0.95rem 0.95rem;
+    border-radius: 14px;
+  }
+
+  .panel-head {
+    flex-wrap: wrap;
+    gap: 0.65rem;
+    align-items: center;
+  }
+
+  .autopilot-controls {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .autopilot-controls .btn {
+    flex: 1 1 auto;
   }
 
   .runs-layout {
     grid-template-columns: 1fr;
     height: auto;
+    min-height: calc(100dvh - 8.5rem);
+  }
+
+  .runs-layout:not(.has-selection) .runs-detail {
+    display: none;
+  }
+
+  .runs-layout.has-selection .runs-rail {
+    display: none;
   }
 
   .runs-rail {
     border-right: 0;
-    border-bottom: 1px solid var(--line);
-    max-height: 42vh;
+    border-bottom: 0;
+    max-height: none;
+    padding: 0.9rem 0.85rem 1.5rem;
+  }
+
+  .runs-rail-hint {
+    display: none;
+  }
+
+  .runs-detail {
+    overflow: visible;
+  }
+
+  .runs-back {
+    display: inline-flex;
+  }
+
+  .detail-panel {
+    padding: 0.75rem 0.9rem 2rem;
+    overflow: visible;
   }
 
   .form-grid {
     grid-template-columns: 1fr;
   }
 
-  .top {
-    flex-direction: column;
+  .template-list li {
+    flex-wrap: wrap;
     align-items: flex-start;
   }
 
-  .top-right {
-    align-items: center;
+  .template-list .btn {
+    margin-left: auto;
+  }
+
+  .actions,
+  .stage-actions .actions {
     flex-wrap: wrap;
+  }
+
+  .tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+
+  .tabs button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .template-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-grid div {
+    grid-template-columns: minmax(5.5rem, 7rem) 1fr;
+  }
+
+  .status-grid div:nth-last-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .status-grid div:last-child {
+    border-bottom: 0;
+  }
+
+  .digest-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .source-filters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    padding-bottom: 0.2rem;
+  }
+
+  .source-filter {
+    flex: 0 0 auto;
+  }
+
+  #run-list .run-delete-btn {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .modal-backdrop {
+    padding: 0.5rem;
+    align-items: stretch;
+  }
+
+  .modal-dialog {
+    width: 100%;
+    max-height: calc(100dvh - 1rem);
+    border-radius: 14px;
+  }
+
+  .modal-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .modal-head-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .post-preview {
+    padding: 1rem 0.95rem 1.25rem;
+    border-radius: 12px;
+  }
+
+  .doc-title-input {
+    font-size: 1.55rem;
+  }
+
+  .toast {
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    max-width: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .top h1 {
+    font-size: 1.2rem;
+  }
+
+  .brand {
+    font-size: 0.68rem;
+  }
+
+  .home-nav-btn {
+    padding: 0.5rem 0.65rem;
+    font-size: 0.85rem;
+  }
+
+  .home-nav-label {
+    font-size: 0.82rem;
+  }
+
+  .btn {
+    padding: 0.55rem 0.75rem;
+    font-size: 0.85rem;
+  }
+
+  .ap-history-table {
+    font-size: 0.75rem;
+  }
+
+  .ap-history-table th,
+  .ap-history-table td {
+    padding: 0.35rem 0.45rem;
   }
 }
 

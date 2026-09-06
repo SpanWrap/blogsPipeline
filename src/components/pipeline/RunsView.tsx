@@ -18,7 +18,7 @@ type RunsViewProps = {
   progress: { active: boolean; action: string; lines: ProgressLine[] };
   onRefresh: () => void;
   onWriteBlog: () => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string | null) => void;
   onDelete: (id: string) => void;
   onTab: (tab: string) => void;
   onAct: (action: string, body?: Record<string, unknown>) => Promise<any>;
@@ -42,7 +42,7 @@ export function RunsView(props: RunsViewProps) {
 
   return (
     <section className="home-pane home-pane-runs">
-      <div className="runs-layout">
+      <div className={`runs-layout${selectedId ? " has-selection" : ""}`}>
         <aside className="runs-rail">
           <div className="panel-head">
             <h2>Runs</h2>
@@ -75,7 +75,9 @@ export function RunsView(props: RunsViewProps) {
               Write blog
             </button>
           </div>
-          <p className="hint">Select a run to open it on the right. Templates live under Settings.</p>
+          <p className="hint runs-rail-hint">
+            Select a run to open it. Templates live under Settings.
+          </p>
           <ul id="run-list">
             {!runs.length ? (
               <li className="empty">No runs yet.</li>
@@ -110,20 +112,31 @@ export function RunsView(props: RunsViewProps) {
             )}
           </ul>
         </aside>
-        <RunDetail
-          run={run}
-          templates={props.templates}
-          tab={props.tab}
-          busy={busy}
-          hasGeminiKey={props.hasGeminiKey}
-          generateImages={props.generateImages}
-          progress={props.progress}
-          onTab={props.onTab}
-          onAct={props.onAct}
-          onGenerateImagesChange={props.onGenerateImagesChange}
-          onRunUpdated={props.onRunUpdated}
-          toast={props.toast}
-        />
+        <div className="runs-detail">
+          {selectedId ? (
+            <button
+              type="button"
+              className="runs-back"
+              onClick={() => onSelect(null)}
+            >
+              ← Runs
+            </button>
+          ) : null}
+          <RunDetail
+            run={run}
+            templates={props.templates}
+            tab={props.tab}
+            busy={busy}
+            hasGeminiKey={props.hasGeminiKey}
+            generateImages={props.generateImages}
+            progress={props.progress}
+            onTab={props.onTab}
+            onAct={props.onAct}
+            onGenerateImagesChange={props.onGenerateImagesChange}
+            onRunUpdated={props.onRunUpdated}
+            toast={props.toast}
+          />
+        </div>
       </div>
     </section>
   );
