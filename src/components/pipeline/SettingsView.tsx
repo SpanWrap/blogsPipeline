@@ -6,6 +6,7 @@ import { markdownToEditorHtml } from "./markdown";
 import {
   AutopilotCycle,
   AutopilotStatus,
+  EmailNotifyConfig,
   HealthData,
   LlmConfig,
   LlmProvider,
@@ -16,13 +17,14 @@ import {
 import { activityLabel, formatWhen } from "./utils";
 import { SidebarToggleIcon } from "./SidebarToggleIcon";
 
-type SettingsSection = "status" | "llm" | "templates" | "autopilot" | "people" | "activity";
+type SettingsSection = "status" | "llm" | "templates" | "autopilot" | "email" | "people" | "activity";
 
 const SETTINGS_NAV: { id: SettingsSection; label: string }[] = [
   { id: "status", label: "Status" },
   { id: "llm", label: "LLM" },
   { id: "templates", label: "Templates" },
   { id: "autopilot", label: "Autopilot" },
+  { id: "email", label: "Email" },
   { id: "people", label: "People" },
   { id: "activity", label: "Activity" },
 ];
@@ -36,6 +38,7 @@ type SettingsViewProps = {
   logs: LogEntry[];
   autopilot: AutopilotStatus | null;
   autopilotCycles: AutopilotCycle[];
+  emailNotify: EmailNotifyConfig | null;
   busy: boolean;
   onSaveLlm: (provider: string, model: string, apiKey?: string) => void;
   onSaveTemplate: (name: string, markdown: string, filename: string) => void;
@@ -57,6 +60,8 @@ type SettingsViewProps = {
   onToggleAutopilot: () => void;
   onTriggerAutopilot: () => void;
   onLlmProviderChange: (provider: string) => void;
+  onSaveEmailNotify: (input: { enabled: boolean; recipients: string[] }) => Promise<void>;
+  onTestEmailNotify: () => Promise<void>;
 };
 
 function NavIcon({ id }: { id: SettingsSection }) {
@@ -106,6 +111,13 @@ function NavIcon({ id }: { id: SettingsSection }) {
           <path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z" />
         </svg>
       );
+    case "email":
+      return (
+        <svg {...common}>
+          <path d="M4 4h16v16H4z" />
+          <path d="M4 7l8 6 8-6" />
+        </svg>
+      );
     case "people":
       return (
         <svg {...common}>
@@ -137,6 +149,7 @@ export function SettingsView({
   logs,
   autopilot,
   autopilotCycles,
+  emailNotify,
   busy,
   onSaveLlm,
   onSaveTemplate,
@@ -148,6 +161,8 @@ export function SettingsView({
   onToggleAutopilot,
   onTriggerAutopilot,
   onLlmProviderChange,
+  onSaveEmailNotify,
+  onTestEmailNotify,
 }: SettingsViewProps) {
   const providers: LlmProvider[] = llm.providers?.length
     ? llm.providers
@@ -176,6 +191,13 @@ export function SettingsView({
   const [previewSaving, setPreviewSaving] = useState(false);
   const [previewError, setPreviewError] = useState("");
   const [previewSaveError, setPreviewSaveError] = useState("");
+  const [emailEnabled, setEmailEnabled] = useState(true);
+  const [emailRecipients, setEmailRecipients] = useState("");
+
+  useEffect(() => {
+    setEmailEnabled(emailNotify?.enabled !== false);
+    setEmailRecipients((emailNotify?.recipients || []).join("\n"));
+  }, [emailNotify?.enabled, emailNotify?.recipients, emailNotify?.updatedAt]);
 
   useEffect(() => {
     try {
@@ -686,6 +708,107 @@ export function SettingsView({
                   </table>
                 </div>
               </div>
+            </section>
+          ) : null}
+
+          {section === "email" ? (
+            <section className="panel">
+              <div className="panel-head">
+                <h2>Email (Brevo)</h2>
+                <div className="autopilot-controls">
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy || !emailNotify?.configured}
+                    title={
+                      emailNotify?.configured
+                        ? "Send a test message to the saved recipients"
+                        : "Set BREVO_API_KEY and BREVO_SENDER_EMAIL in .env first"
+                    }
+                    onClick={() => void onTestEmailNotify()}
+                  >
+                    Send test
+                  </button>
+                  <button
+                    type="button"
+                    className="btn primary"
+                    disabled={busy}
+                    onClick={() =>
+                      void onSaveEmailNotify({
+                        enabled: emailEnabled,
+                        recipients: emailRecipients
+                          .split(/[\n,;]+/)
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                      })
+                    }
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+              <p className="hint">
+                When Autopilot finishes a blog run, the pipeline can email the draft as a{" "}
+                <code>.md</code> attachment via Brevo. Put API credentials in <code>.env</code>, then
+                choose recipients here.
+              </p>
+              <dl className="status-grid" style={{ marginBottom: "1rem" }}>
+                <div>
+                  <dt>API key</dt>
+                  <dd>{emailNotify?.hasApiKey ? "set" : "missing (BREVO_API_KEY)"}</dd>
+                </div>
+                <div>
+                  <dt>Sender</dt>
+                  <dd>{emailNotify?.senderEmail || "missing (BREVO_SENDER_EMAIL)"}</dd>
+                </div>
+                <div>
+                  <dt>Ready</dt>
+                  <dd>{emailNotify?.configured ? "yes" : "no"}</dd>
+                </div>
+                <div>
+                  <dt>Updated</dt>
+                  <dd>
+                    {emailNotify?.updatedAt && emailNotify.updatedAt !== new Date(0).toISOString()
+                      ? new Date(emailNotify.updatedAt).toLocaleString()
+                      : "—"}
+                  </dd>
+                </div>
+              </dl>
+              <form
+                className="form-grid"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void onSaveEmailNotify({
+                    enabled: emailEnabled,
+                    recipients: emailRecipients
+                      .split(/[\n,;]+/)
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  });
+                }}
+              >
+                <label className="check full" style={{ flexDirection: "row", alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={emailEnabled}
+                    onChange={(e) => setEmailEnabled(e.target.checked)}
+                  />
+                  <span>Send Autopilot draft emails</span>
+                </label>
+                <label className="full">
+                  Recipients (one email per line)
+                  <textarea
+                    value={emailRecipients}
+                    onChange={(e) => setEmailRecipients(e.target.value)}
+                    placeholder={"editor@spanwrap.com\nteam@spanwrap.com"}
+                    rows={5}
+                  />
+                </label>
+                <p className="hint full">
+                  Optional defaults also come from <code>BREVO_NOTIFY_TO</code> in <code>.env</code>{" "}
+                  until you save recipients here.
+                </p>
+              </form>
             </section>
           ) : null}
 

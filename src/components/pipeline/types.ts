@@ -40,5 +40,14 @@ export type HealthData = Record<string, any>;
 export type DashboardData = { buckets?: { label: string; count: number; runIds: string[] }[] };
 export type AutopilotStatus = Record<string, any>;
 export type AutopilotCycle = Record<string, any>;
+export type EmailNotifyConfig = {
+  enabled?: boolean;
+  recipients?: string[];
+  updatedAt?: string;
+  configured?: boolean;
+  hasApiKey?: boolean;
+  senderEmail?: string | null;
+  senderName?: string;
+};
 export type LogEntry = Record<string, any>;
 export type UserRecord = { username: string; createdAt?: string; lastLoginAt?: string };

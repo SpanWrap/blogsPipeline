@@ -316,6 +316,16 @@ export const appConfig = {
     /** Generate drafts but skip publishing (testing). */
     dryRun: envBool("AUTOPILOT_DRY_RUN", false),
   },
+  /** Brevo (Sendinblue) transactional email for Autopilot draft notifications. */
+  brevo: {
+    apiKey: env("BREVO_API_KEY"),
+    senderEmail: env("BREVO_SENDER_EMAIL"),
+    senderName: env("BREVO_SENDER_NAME", "Spanwrap Pipeline")!,
+    /** Default on when key+sender exist; Settings can disable. */
+    notifyEnabled: envBool("BREVO_NOTIFY_ENABLED", true),
+    /** Comma-separated default recipients (overridden/extended in Settings). */
+    defaultRecipients: env("BREVO_NOTIFY_TO", "") || "",
+  },
   auth: {
     /** Optional bootstrap account created on first boot if no users exist. */
     username: env("AUTH_USERNAME"),

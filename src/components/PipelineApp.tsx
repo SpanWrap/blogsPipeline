@@ -20,6 +20,7 @@ import type {
   DashboardData,
   DigestData,
   DigestItem,
+  EmailNotifyConfig,
   HealthData,
   LlmConfig,
   LogEntry,
@@ -123,6 +124,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [autopilot, setAutopilot] = useState<AutopilotStatus | null>(null);
   const [autopilotCycles, setAutopilotCycles] = useState<AutopilotCycle[]>([]);
+  const [emailNotify, setEmailNotify] = useState<EmailNotifyConfig | null>(null);
 
   const showAuthGate = useCallback((setup = false) => {
     clearWorkspaceBoot();
@@ -334,6 +336,15 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     }
   }, []);
 
+  const loadEmailNotify = useCallback(async () => {
+    try {
+      const data = await callApi<EmailNotifyConfig>("/api/email-notify");
+      setEmailNotify(data);
+    } catch {
+      setEmailNotify(null);
+    }
+  }, [callApi]);
+
   const applyProgressFromRun = useCallback(
     (latest: RunRecord) => {
       const running = (latest.stages || []).find((s: { status?: string }) => s.status === "running");
@@ -519,6 +530,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         loadUsers(),
         loadAutopilotStatus(),
         loadAutopilotHistory(),
+        loadEmailNotify(),
       ]).catch(() => {});
       return;
     }
@@ -538,6 +550,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     loadUsers,
     loadAutopilotStatus,
     loadAutopilotHistory,
+    loadEmailNotify,
     loadRuns,
     loadDigest,
     toast,
@@ -1047,6 +1060,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
             logs={logs}
             autopilot={autopilot}
             autopilotCycles={autopilotCycles}
+            emailNotify={emailNotify}
             busy={busy}
             onSaveLlm={async (provider, model, apiKey) => {
               setBusy(true);
@@ -1183,6 +1197,36 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                 await loadAutopilotHistory();
               } catch (e) {
                 toast(e instanceof Error ? e.message : "Trigger failed", true);
+              }
+            }}
+            onSaveEmailNotify={async ({ enabled, recipients }) => {
+              setBusy(true);
+              try {
+                const saved = await callApi<EmailNotifyConfig>("/api/email-notify", {
+                  method: "POST",
+                  body: JSON.stringify({ enabled, recipients }),
+                });
+                setEmailNotify(saved);
+                toast(
+                  `Email notify saved · ${saved.recipients?.length ?? 0} recipient${
+                    (saved.recipients?.length ?? 0) === 1 ? "" : "s"
+                  }`,
+                );
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Save failed", true);
+              } finally {
+                setBusy(false);
+              }
+            }}
+            onTestEmailNotify={async () => {
+              setBusy(true);
+              try {
+                await callApi("/api/email-notify/test", { method: "POST", body: "{}" });
+                toast("Test email sent");
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Test email failed", true);
+              } finally {
+                setBusy(false);
               }
             }}
           />

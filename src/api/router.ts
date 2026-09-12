@@ -305,6 +305,63 @@ async function handleAuthedApi(
       return jsonResponse(200, appConfig.autopilot);
     }
 
+    if (method === "GET" && pathname === "/api/email-notify") {
+      const {
+        getEmailNotifySettings,
+        publicEmailNotifyStatus,
+      } = await import("../services/email-notify-settings");
+      const settings = await getEmailNotifySettings();
+      return jsonResponse(200, publicEmailNotifyStatus(settings));
+    }
+
+    if (method === "POST" && pathname === "/api/email-notify") {
+      const body = (await readJsonBody(request)) as Record<string, unknown>;
+      const {
+        saveEmailNotifySettings,
+        publicEmailNotifyStatus,
+      } = await import("../services/email-notify-settings");
+      const saved = await saveEmailNotifySettings({
+        enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
+        recipients: body.recipients,
+      });
+      await log("email_notify_settings_saved", {
+        enabled: saved.enabled,
+        recipients: saved.recipients.length,
+      });
+      return jsonResponse(200, publicEmailNotifyStatus(saved));
+    }
+
+    if (method === "POST" && pathname === "/api/email-notify/test") {
+      const {
+        getEmailNotifySettings,
+      } = await import("../services/email-notify-settings");
+      const { sendBrevoEmail } = await import("../providers/email/brevo");
+      const settings = await getEmailNotifySettings();
+      if (!settings.recipients.length) {
+        return jsonResponse(400, { error: "Add at least one recipient first" });
+      }
+      if (!appConfig.brevo.apiKey || !appConfig.brevo.senderEmail) {
+        return jsonResponse(400, {
+          error: "Set BREVO_API_KEY and BREVO_SENDER_EMAIL in .env",
+        });
+      }
+      const result = await sendBrevoEmail({
+        to: settings.recipients.map((email) => ({ email })),
+        subject: "[Pipeline] Brevo test email",
+        htmlContent:
+          "<p>Brevo is configured. Autopilot will attach finished drafts as <code>.md</code> files.</p>",
+        textContent: "Brevo is configured. Autopilot will attach finished drafts as .md files.",
+      });
+      if (!result.ok) {
+        return jsonResponse(502, { error: result.error || "Send failed", status: result.status });
+      }
+      await log("email_notify_test_sent", {
+        recipients: settings.recipients.length,
+        messageId: result.messageId,
+      });
+      return jsonResponse(200, { ok: true, messageId: result.messageId });
+    }
+
     if (method === "GET" && pathname === "/api/llm") {
       return jsonResponse(200, publicLlmStatus());
     }

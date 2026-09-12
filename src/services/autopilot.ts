@@ -228,6 +228,36 @@ async function processAutopilotPick(
       });
     }
 
+    // Email the completed draft (.md attachment) when Brevo + recipients are configured.
+    if (run.article?.content && !options.dryRun) {
+      try {
+        const { notifyAutopilotDraftEmail } = await import("./autopilot-email");
+        const latest = (await store.require(created.id)) as PipelineRun;
+        const mail = await notifyAutopilotDraftEmail(latest);
+        if (mail.sent) {
+          logger.info("Autopilot: draft email sent", {
+            runId: created.id,
+            messageId: mail.messageId,
+          });
+        } else if (mail.skipped) {
+          logger.info("Autopilot: draft email skipped", {
+            runId: created.id,
+            reason: mail.skipped,
+          });
+        } else if (mail.error) {
+          logger.warn("Autopilot: draft email failed", {
+            runId: created.id,
+            error: mail.error,
+          });
+        }
+      } catch (mailError) {
+        logger.warn("Autopilot: draft email error", {
+          runId: created.id,
+          error: mailError instanceof Error ? mailError.message : String(mailError),
+        });
+      }
+    }
+
     return record;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
