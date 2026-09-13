@@ -65,6 +65,15 @@ Hobby plans cap function time (~60s). Research + generate may need **Pro** (`max
 
 Weekly autopilot uses **Vercel Cron** (`GET /api/cron/autopilot`, Monday 08:00 UTC). Set `AUTOPILOT_ENABLED=true`; Vercel injects `CRON_SECRET`.
 
+## Deploy on AWS Lightsail
+
+The repository includes a production Docker image, Docker Compose service, and
+a GitHub Actions workflow that deploys to a Lightsail Linux instance after
+type-checks, tests, and a production build pass.
+
+See [AWS Lightsail deployment](docs/LIGHTSAIL_DEPLOYMENT.md) for the instance,
+GitHub secret, networking, and deployment setup.
+
 ## Markdown templates (intern format)
 
 Interns can hand you a `.md` file defining structure and optional placeholders. Research writing is generated to fit that template.

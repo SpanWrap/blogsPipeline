@@ -1,0 +1,96 @@
+name: Deploy to AWS Lightsail
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lightsail-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build application
+        run: npm run build
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+      LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+      LIGHTSAIL_ENV_FILE: ${{ secrets.LIGHTSAIL_ENV_FILE }}
+      CONFIGURED_DEPLOY_PATH: ${{ vars.LIGHTSAIL_DEPLOY_PATH }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.LIGHTSAIL_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.LIGHTSAIL_KNOWN_HOSTS }}
+        run: |
+          test -n "$LIGHTSAIL_HOST"
+          test -n "$LIGHTSAIL_USER"
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/lightsail
+          chmod 600 ~/.ssh/lightsail
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload release
+        run: |
+          REMOTE="${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}"
+          DEPLOY_PATH="${CONFIGURED_DEPLOY_PATH:-/home/${LIGHTSAIL_USER}/pipeline}"
+          SSH_ARGS=(-i ~/.ssh/lightsail -o IdentitiesOnly=yes)
+
+          ssh "${SSH_ARGS[@]}" "$REMOTE" "mkdir -p '$DEPLOY_PATH'"
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.env' \
+            --exclude='.data/' \
+            --exclude='.next/' \
+            --exclude='node_modules/' \
+            -e "ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes" \
+            ./ "$REMOTE:$DEPLOY_PATH/"
+
+          if [[ -n "$LIGHTSAIL_ENV_FILE" ]]; then
+            printf '%s' "$LIGHTSAIL_ENV_FILE" |
+              ssh "${SSH_ARGS[@]}" "$REMOTE" "umask 077; cat > '$DEPLOY_PATH/.env'"
+          fi
+
+      - name: Start production container
+        run: |
+          REMOTE="${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}"
+          DEPLOY_PATH="${CONFIGURED_DEPLOY_PATH:-/home/${LIGHTSAIL_USER}/pipeline}"
+          ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes "$REMOTE" \
+            "cd '$DEPLOY_PATH' && test -s .env && docker compose up -d --build --remove-orphans && docker image prune -f"

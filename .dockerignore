@@ -1,0 +1,13 @@
+.git
+.github
+.next
+.data
+node_modules
+coverage
+.env
+.env.*
+!.env.example
+!.env.vercel.example
+*.log
+*.tsbuildinfo
+.DS_Store
