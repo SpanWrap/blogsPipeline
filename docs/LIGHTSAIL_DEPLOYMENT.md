@@ -53,14 +53,19 @@ repository or `production` environment secrets:
 - `LIGHTSAIL_KNOWN_HOSTS`: the verified SSH host-key line. Generate a candidate
   with `ssh-keyscan -H <static-ip>` and compare its fingerprint with the host
   before saving it.
-- `LIGHTSAIL_ENV_FILE`: the complete production `.env` contents. This is
-  optional after the first deploy; when omitted, the existing server `.env`
-  remains unchanged.
+- `LIGHTSAIL_ENV_FILE`: the complete production `.env` contents (secret).
+  This is optional after the first deploy; when omitted, the existing server
+  `.env` remains unchanged.
 
-Optionally add the Actions variable `LIGHTSAIL_DEPLOY_PATH`. It defaults to
+Do **not** put `.env` contents in an Actions variable. Put them only in the
+`LIGHTSAIL_ENV_FILE` secret.
+
+Optionally add the Actions variable `LIGHTSAIL_DEPLOY_PATH`. It must be a
+single absolute path such as `/home/jai/pipeline`. Leave it unset to use
 `/home/<LIGHTSAIL_USER>/pipeline`.
 
-At minimum, the production environment should set:
+At minimum, put this in the `LIGHTSAIL_ENV_FILE` secret (not in
+`LIGHTSAIL_DEPLOY_PATH`):
 
 ```dotenv
 NODE_ENV=production

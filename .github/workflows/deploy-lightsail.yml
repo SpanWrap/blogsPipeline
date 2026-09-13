@@ -51,6 +51,28 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Resolve deploy path
+        id: path
+        run: |
+          if [[ -n "${CONFIGURED_DEPLOY_PATH}" ]]; then
+            DEPLOY_PATH="${CONFIGURED_DEPLOY_PATH}"
+          else
+            DEPLOY_PATH="/home/${LIGHTSAIL_USER}/pipeline"
+          fi
+
+          if [[ "$DEPLOY_PATH" == *$'\n'* ]]; then
+            echo "::error::LIGHTSAIL_DEPLOY_PATH must be a single filesystem path (for example /home/jai/pipeline). Put the .env contents in the LIGHTSAIL_ENV_FILE secret instead."
+            exit 1
+          fi
+
+          if [[ "$DEPLOY_PATH" != /* || "$DEPLOY_PATH" == *=* ]]; then
+            echo "::error::LIGHTSAIL_DEPLOY_PATH must be an absolute path starting with /. Got: ${DEPLOY_PATH}"
+            exit 1
+          fi
+
+          echo "DEPLOY_PATH=${DEPLOY_PATH}" >> "$GITHUB_ENV"
+          echo "Using deploy path: ${DEPLOY_PATH}"
+
       - name: Configure SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.LIGHTSAIL_SSH_PRIVATE_KEY }}
@@ -69,7 +91,6 @@ jobs:
       - name: Upload release
         run: |
           REMOTE="${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}"
-          DEPLOY_PATH="${CONFIGURED_DEPLOY_PATH:-/home/${LIGHTSAIL_USER}/pipeline}"
           SSH_ARGS=(-i ~/.ssh/lightsail -o IdentitiesOnly=yes)
 
           ssh "${SSH_ARGS[@]}" "$REMOTE" "mkdir -p '$DEPLOY_PATH'"
@@ -91,6 +112,11 @@ jobs:
       - name: Start production container
         run: |
           REMOTE="${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}"
-          DEPLOY_PATH="${CONFIGURED_DEPLOY_PATH:-/home/${LIGHTSAIL_USER}/pipeline}"
-          ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes "$REMOTE" \
-            "cd '$DEPLOY_PATH' && test -s .env && docker compose up -d --build --remove-orphans && docker image prune -f"
+          ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes "$REMOTE" bash -s <<EOF
+          set -euo pipefail
+          cd '$DEPLOY_PATH'
+          test -f compose.yaml
+          test -s .env
+          docker compose -f compose.yaml up -d --build --remove-orphans
+          docker image prune -f
+          EOF
