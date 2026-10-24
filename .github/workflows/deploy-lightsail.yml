@@ -54,6 +54,7 @@ jobs:
         with:
           name: lightsail-release
           path: release
+          include-hidden-files: true
           retention-days: 3
 
   deploy:
@@ -135,6 +136,7 @@ jobs:
           set -euo pipefail
           cd '$DEPLOY_PATH'
           test -f server.js
+          test -f .next/BUILD_ID
           test -f ecosystem.config.cjs
           test -s .env
           command -v pm2 >/dev/null
