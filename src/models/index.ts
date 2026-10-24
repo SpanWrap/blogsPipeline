@@ -180,6 +180,34 @@ export type QualityIssue = z.infer<typeof QualityIssueSchema>;
 
 export const PUBLISH_TARGET_VALUES = ["spanwrap", "medium", "devto", "hashnode", "wordpress", "substack"] as const;
 
+/** Checklist rows. Reddit and LinkedIn are track-only; they are not publish targets. */
+export const DISTRIBUTION_DESTINATIONS = [
+  "spanwrap",
+  "medium",
+  "devto",
+  "hashnode",
+  "wordpress",
+  "substack",
+  "reddit",
+  "linkedin",
+] as const;
+
+export const DistributionDestinationSchema = z.enum(DISTRIBUTION_DESTINATIONS);
+export type DistributionDestination = z.infer<typeof DistributionDestinationSchema>;
+
+export const DistributionStatusSchema = z.enum(["not_sent", "sent", "manual", "failed"]);
+export type DistributionStatus = z.infer<typeof DistributionStatusSchema>;
+
+export const DistributionEntrySchema = z.object({
+  destination: DistributionDestinationSchema,
+  status: DistributionStatusSchema.default("not_sent"),
+  updatedAt: z.string().nullable().default(null),
+  message: z.string().nullable().default(null),
+  externalId: z.string().nullable().default(null),
+});
+
+export type DistributionEntry = z.infer<typeof DistributionEntrySchema>;
+
 export const PublishTargetSchema = z.enum(PUBLISH_TARGET_VALUES);
 
 export type PublishTarget = z.infer<typeof PublishTargetSchema>;
@@ -271,6 +299,8 @@ export const PipelineRunSchema = z.object({
   publishTargets: z.array(PublishTargetSchema).default(["spanwrap"]),
   publishResult: PublishResultSchema.nullable().default(null),
   publishResults: z.array(TargetPublishResultSchema).default([]),
+  /** Per-site upload checklist. Empty until a view or action fills the defaults. */
+  distribution: z.array(DistributionEntrySchema).default([]),
   stages: z.array(StageRecordSchema).default([]),
   reviewNotes: z.string().nullable().default(null),
   error: z.string().nullable().default(null),
@@ -357,6 +387,7 @@ export const PipelineRunSchema = z.object({
       cycleId: z.string(),
       targetPlatform: z.string(),
       topicRank: z.number(),
+      readerLabel: z.string().optional(),
     })
     .nullable()
     .default(null),

@@ -74,6 +74,23 @@ Default stack is **Groq**. Set `GROQ_API_KEY` from https://console.groq.com/keys
 
 Without `SPANWRAP_API_KEY`, the mock publisher is used (CI/local).
 
+## Autopilot
+
+The daily job drafts **one** technical Spanwrap article for the reader selected in Settings, then emails the markdown through Brevo. It does not approve or publish. Publish to Spanwrap from the run’s Publish tab. Medium, Dev.to, Hashnode, and WordPress show a Push button only when their API credentials are set. Substack, Reddit, and LinkedIn are checklist rows you mark after uploading by hand.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTOPILOT_ENABLED` | `false` | Start the daily draft schedule |
+| `AUTOPILOT_CRON` | `0 8 * * *` | 5-field cron, UTC. One draft per match |
+| `AUTOPILOT_DRY_RUN` | `false` | Draft without sending the Brevo email |
+| `AUTOPILOT_DEDUP_DAYS` | `30` | Skip topics covered in this window |
+| `AUTOPILOT_GENERATE_IMAGES` | `true` | Generate images during the draft |
+| `PIPELINE_PUBLIC_URL` | deployment origin | Review link in the draft email |
+
+`AUTOPILOT_SKIP_REVIEW` is ignored. A passing quality score cannot publish overnight.
+
+Reader profiles are saved in Settings (or `.data/reader-profiles.json` / Mongo `reader_profiles`), not in env vars.
+
 ## Retries
 
 | Variable | Default |

@@ -33,6 +33,7 @@ export const BACKGROUND_RUN_ACTIONS = new Set([
   "generate",
   "quality-check",
   "publish",
+  "push-destination",
   "generate-images",
   "readability-pass",
   "regenerate-section",

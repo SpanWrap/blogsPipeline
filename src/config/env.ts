@@ -292,10 +292,10 @@ export const appConfig = {
   autopilot: {
     /** Master switch — set AUTOPILOT_ENABLED=true + configure API keys. */
     enabled: envBool("AUTOPILOT_ENABLED", false),
-    /** 5-field cron expression. Default: every Monday at 08:00 UTC. */
-    cronExpression: env("AUTOPILOT_CRON", "0 8 * * 1")!,
-    /** Number of unique posts to generate per platform per cycle. */
-    postsPerPlatform: envInt("AUTOPILOT_POSTS_PER_PLATFORM", 2),
+    /** 5-field cron expression. Default: every day at 08:00 UTC. The job drafts only. */
+    cronExpression: env("AUTOPILOT_CRON", "0 8 * * *")!,
+    /** Kept for older config. The daily job always drafts one Spanwrap article. */
+    postsPerPlatform: envInt("AUTOPILOT_POSTS_PER_PLATFORM", 1),
     /** Comma-separated platform list. */
     targetPlatforms: (
       env("AUTOPILOT_PLATFORMS", "spanwrap,medium,devto,hashnode,wordpress,substack") || "spanwrap"

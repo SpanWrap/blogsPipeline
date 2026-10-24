@@ -71,19 +71,22 @@ export async function notifyAutopilotDraftEmail(run: PipelineRun): Promise<{
     ? `Quality ${run.quality.score} (${run.quality.passed ? "pass" : "flag"})`
     : "Quality not scored";
   const status = run.status;
-  const platform = run.autopilotSource?.targetPlatform || run.publishTargets?.[0] || "—";
+  const reader =
+    run.autopilotSource?.readerLabel || run.brief?.targetAudience || "—";
+  const reviewUrl = `${appConfig.publicUrl}/?run=${encodeURIComponent(run.id)}`;
 
   const subject = `[Autopilot] Draft ready: ${title}`.slice(0, 200);
   const htmlContent = `
     <div style="font-family:system-ui,sans-serif;line-height:1.5;color:#1c1915">
       <h2 style="margin:0 0 0.5rem">${escapeHtml(title)}</h2>
       <p style="margin:0 0 1rem;color:#5f574c">
-        Autopilot finished a blog pipeline run. The markdown draft is attached.
+        A Spanwrap draft is ready for review. Nothing has been published.
+        Open the pipeline and click <strong>Publish to Spanwrap</strong> when you want it on the site.
       </p>
       <ul>
         <li><strong>Run ID:</strong> ${escapeHtml(run.id)}</li>
         <li><strong>Status:</strong> ${escapeHtml(status)}</li>
-        <li><strong>Platform:</strong> ${escapeHtml(String(platform))}</li>
+        <li><strong>Reader:</strong> ${escapeHtml(String(reader))}</li>
         <li><strong>Quality:</strong> ${escapeHtml(quality)}</li>
         ${run.article?.slug ? `<li><strong>Slug:</strong> ${escapeHtml(run.article.slug)}</li>` : ""}
       </ul>
@@ -92,7 +95,8 @@ export async function notifyAutopilotDraftEmail(run: PipelineRun): Promise<{
           ? `<p style="margin:1rem 0;padding:0.75rem 1rem;background:#f7f2e8;border-radius:8px">${escapeHtml(run.article.excerpt)}</p>`
           : ""
       }
-      <p style="color:#5f574c;font-size:0.9rem">Open the pipeline UI to review, edit, and publish.</p>
+      <p><a href="${escapeHtml(reviewUrl)}">Review this draft</a></p>
+      <p style="color:#5f574c;font-size:0.9rem">The markdown draft is attached. Other sites stay on the checklist until you push or mark them.</p>
     </div>
   `.trim();
 
@@ -105,8 +109,10 @@ export async function notifyAutopilotDraftEmail(run: PipelineRun): Promise<{
       "",
       `Run: ${run.id}`,
       `Status: ${status}`,
-      `Platform: ${platform}`,
+      `Reader: ${reader}`,
       quality,
+      "Nothing is published until you send it to Spanwrap.",
+      `Review: ${reviewUrl}`,
       "",
       run.article?.excerpt || "",
       "",

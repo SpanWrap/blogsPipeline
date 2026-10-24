@@ -93,11 +93,15 @@ export type AutopilotSchedulerStatus = {
   config: {
     platforms: string[];
     postsPerPlatform: number;
+    postsPerDay: number;
     skipReview: boolean;
+    publishesAutomatically: boolean;
     dryRun: boolean;
     generateImages: boolean;
     minQualityScore: number;
     deduplicationDays: number;
+    readerLabel: string | null;
+    readerSummary: string | null;
   };
 };
 
@@ -166,6 +170,11 @@ export class AutopilotScheduler {
     const logStore = getAutopilotLogStore();
     const lastCycle = await logStore.latest();
     const cfg = appConfig.autopilot;
+    const { activeReaderProfile, getReaderProfileSettings, readerSummary } = await import(
+      "./reader-profiles"
+    );
+    const readerSettings = await getReaderProfileSettings();
+    const reader = activeReaderProfile(readerSettings);
     const onVercel = Boolean(process.env.VERCEL);
     const enabled = this._enabled || (onVercel && cfg.enabled);
 
@@ -187,13 +196,17 @@ export class AutopilotScheduler {
       nextRun,
       lastCycle,
       config: {
-        platforms: cfg.targetPlatforms,
-        postsPerPlatform: cfg.postsPerPlatform,
-        skipReview: cfg.skipReview,
+        platforms: ["spanwrap"],
+        postsPerPlatform: 1,
+        postsPerDay: 1,
+        skipReview: false,
+        publishesAutomatically: false,
         dryRun: cfg.dryRun,
         generateImages: cfg.generateImages,
         minQualityScore: cfg.minQualityScore,
         deduplicationDays: cfg.topicDeduplicationDays,
+        readerLabel: reader?.label ?? null,
+        readerSummary: reader ? readerSummary(reader) : null,
       },
     };
   }

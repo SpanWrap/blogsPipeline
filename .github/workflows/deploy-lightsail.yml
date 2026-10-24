@@ -35,8 +35,25 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Build application
-        run: npm run build
+      - name: Build standalone release
+        run: |
+          npm run build
+          mkdir -p release public
+          cp -a .next/standalone/. release/
+          mkdir -p release/.next
+          cp -a .next/static release/.next/static
+          cp -a public/. release/public/
+          cp ecosystem.config.cjs release/
+          # Next can copy local dotenv files into standalone; never ship them.
+          rm -f release/.env release/.env.*
+
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightsail-release
+          path: release
+          retention-days: 3
 
   deploy:
     needs: verify
@@ -48,11 +65,7 @@ jobs:
       LIGHTSAIL_ENV_FILE: ${{ secrets.LIGHTSAIL_ENV_FILE }}
       CONFIGURED_DEPLOY_PATH: ${{ vars.LIGHTSAIL_DEPLOY_PATH }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
       - name: Resolve deploy path
-        id: path
         run: |
           if [[ -n "${CONFIGURED_DEPLOY_PATH}" ]]; then
             DEPLOY_PATH="${CONFIGURED_DEPLOY_PATH}"
@@ -88,35 +101,41 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lightsail-release
+          path: release
+
       - name: Upload release
         run: |
           REMOTE="${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}"
           SSH_ARGS=(-i ~/.ssh/lightsail -o IdentitiesOnly=yes)
 
-          ssh "${SSH_ARGS[@]}" "$REMOTE" "mkdir -p '$DEPLOY_PATH'"
+          ssh "${SSH_ARGS[@]}" "$REMOTE" "mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/.data'"
+
           rsync -az --delete \
-            --exclude='.git/' \
-            --exclude='.github/' \
             --exclude='.env' \
             --exclude='.data/' \
-            --exclude='.next/' \
-            --exclude='node_modules/' \
             -e "ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes" \
-            ./ "$REMOTE:$DEPLOY_PATH/"
+            ./release/ "$REMOTE:$DEPLOY_PATH/"
 
           if [[ -n "$LIGHTSAIL_ENV_FILE" ]]; then
             printf '%s' "$LIGHTSAIL_ENV_FILE" |
               ssh "${SSH_ARGS[@]}" "$REMOTE" "umask 077; cat > '$DEPLOY_PATH/.env'"
           fi
 
-      - name: Start production container
+      - name: Restart with PM2
         run: |
           REMOTE="${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}"
           ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes "$REMOTE" bash -s <<EOF
           set -euo pipefail
           cd '$DEPLOY_PATH'
-          test -f compose.yaml
+          test -f server.js
+          test -f ecosystem.config.cjs
           test -s .env
-          docker compose -f compose.yaml up -d --build --remove-orphans
-          docker image prune -f
+          command -v pm2 >/dev/null
+          mkdir -p .data
+          pm2 startOrReload ecosystem.config.cjs --update-env
+          pm2 save
           EOF

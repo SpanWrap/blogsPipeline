@@ -63,13 +63,12 @@ Hobby plans cap function time (~60s). Research + generate may need **Pro** (`max
 
 `STORAGE_BACKEND=file` is coerced to MongoDB on Vercel. Prefer `s3` or `mongodb` for production.
 
-Weekly autopilot uses **Vercel Cron** (`GET /api/cron/autopilot`, Monday 08:00 UTC). Set `AUTOPILOT_ENABLED=true`; Vercel injects `CRON_SECRET`.
+Daily autopilot uses **Vercel Cron** (`GET /api/cron/autopilot`, 08:00 UTC) to draft one Spanwrap article and email it. It does not publish. Set `AUTOPILOT_ENABLED=true`; Vercel injects `CRON_SECRET`.
 
 ## Deploy on AWS Lightsail
 
-The repository includes a production Docker image, Docker Compose service, and
-a GitHub Actions workflow that deploys to a Lightsail Linux instance after
-type-checks, tests, and a production build pass.
+GitHub Actions builds a Next.js standalone release and deploys it over SSH to a
+Lightsail instance managed by **PM2** (suited to 512MB instances; no Docker).
 
 See [AWS Lightsail deployment](docs/LIGHTSAIL_DEPLOYMENT.md) for the instance,
 GitHub secret, networking, and deployment setup.

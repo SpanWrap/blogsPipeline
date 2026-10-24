@@ -23,10 +23,10 @@ export type AutopilotCycleOptions = {
 };
 
 /**
- * Execute one full autopilot cycle:
- *   discover trends → LLM pick topics → create runs → generate → (auto-approve + publish)
+ * Execute one daily autopilot cycle:
+ *   discover trends → pick one Spanwrap topic → draft → email for review.
  *
- * Returns the cycle log with results for every run created.
+ * The job never approves or publishes. Spanwrap and other sites are manual.
  */
 export async function runAutopilotCycle(
   options: AutopilotCycleOptions = {},
@@ -36,18 +36,22 @@ export async function runAutopilotCycle(
   await logStore.create(cycle);
 
   const cfg = appConfig.autopilot;
-  const platforms = (options.platforms ?? cfg.targetPlatforms) as PublishTarget[];
-  const postsPerPlatform = options.postsPerPlatform ?? cfg.postsPerPlatform;
   const dryRun = options.dryRun ?? cfg.dryRun;
-  const skipReview = cfg.skipReview;
-  const minQuality = cfg.minQualityScore;
+  const platforms: PublishTarget[] = ["spanwrap"];
+  const { activeReaderProfile, getReaderProfileSettings, readerSummary } = await import(
+    "./reader-profiles"
+  );
+  const readerSettings = await getReaderProfileSettings();
+  const reader = activeReaderProfile(readerSettings);
+  const audience = readerSummary(reader);
 
   logger.info("Autopilot cycle started", {
     cycleId: cycle.id,
     platforms,
-    postsPerPlatform,
+    postsPerPlatform: 1,
     dryRun,
-    skipReview,
+    skipReview: false,
+    reader: reader.label,
   });
 
   try {
@@ -57,13 +61,16 @@ export async function runAutopilotCycle(
 
     // 2. Select topics via LLM
     const llm = createLLMProvider();
-    const picks = await selectAutopilotTopics({
-      platforms,
-      postsPerPlatform,
-      recentTopics,
-      llm,
-      offline: options.offline,
-    });
+    const picks = (
+      await selectAutopilotTopics({
+        platforms,
+        postsPerPlatform: 1,
+        recentTopics,
+        llm,
+        offline: options.offline,
+        audience,
+      })
+    ).slice(0, 1);
 
     cycle.topicsDiscovered = picks.length > 0 ? picks.length + 5 : 0; // approximate
     cycle.topicsSelected = picks.length;
@@ -88,10 +95,9 @@ export async function runAutopilotCycle(
     for (const pick of picks) {
       const record = await processAutopilotPick(orch, pick, cycle.id, {
         dryRun,
-        skipReview,
-        minQuality,
         generateImages: cfg.generateImages,
         templateId: cfg.templateId,
+        readerLabel: reader.label,
       });
       cycle.runsCreated.push(record);
 
@@ -138,16 +144,15 @@ async function processAutopilotPick(
   cycleId: string,
   options: {
     dryRun: boolean;
-    skipReview: boolean;
-    minQuality: number;
     generateImages: boolean;
     templateId?: string;
+    readerLabel: string;
   },
 ): Promise<AutopilotRunRecord> {
   const record: AutopilotRunRecord = {
     runId: "",
     topic: pick.titleAngle,
-    platform: pick.targetPlatform,
+    platform: "spanwrap",
     status: "CREATED",
   };
 
@@ -163,18 +168,20 @@ async function processAutopilotPick(
     const store = await import("./storage").then((m) => m.getRunStore());
     await store.save({
       ...created,
-      publishTargets: [pick.targetPlatform],
+      publishTargets: ["spanwrap"],
       autopilotSource: {
         cycleId,
-        targetPlatform: pick.targetPlatform,
+        targetPlatform: "spanwrap",
         topicRank: pick.rank,
+        readerLabel: options.readerLabel,
       },
     });
 
     logger.info("Autopilot: pipeline run created", {
       runId: created.id,
       topic: pick.titleAngle,
-      platform: pick.targetPlatform,
+      platform: "spanwrap",
+      reader: options.readerLabel,
     });
 
     // Run the pipeline: research → outline → generate → quality
@@ -189,44 +196,13 @@ async function processAutopilotPick(
       return record;
     }
 
-    // Auto-approve + publish if configured and quality passes
-    if (
-      options.skipReview &&
-      !options.dryRun &&
-      run.status === "REVIEW_REQUIRED" &&
-      run.quality &&
-      run.quality.score >= options.minQuality &&
-      run.quality.passed
-    ) {
-      run = await orch.approve(created.id, `Autopilot auto-approved (quality=${run.quality.score})`);
-      record.status = run.status;
-
-      run = await orch.publish(created.id);
-      record.status = run.status;
-
-      if (run.status === "PUBLISH_FAILED") {
-        record.error = run.error ?? "Publish failed";
-      }
-
-      logger.info("Autopilot: auto-published", {
-        runId: created.id,
-        platform: pick.targetPlatform,
-        status: run.status,
-      });
-    } else if (options.dryRun) {
-      logger.info("Autopilot: dry-run — skipping publish", {
-        runId: created.id,
-        status: run.status,
-        qualityScore: run.quality?.score,
-      });
-    } else {
-      logger.info("Autopilot: awaiting human review", {
-        runId: created.id,
-        platform: pick.targetPlatform,
-        qualityScore: run.quality?.score,
-        qualityPassed: run.quality?.passed,
-      });
-    }
+    logger.info("Autopilot: draft ready for review. Nothing is published.", {
+      runId: created.id,
+      status: run.status,
+      qualityScore: run.quality?.score,
+      qualityPassed: run.quality?.passed,
+      dryRun: options.dryRun,
+    });
 
     // Email the completed draft (.md attachment) when Brevo + recipients are configured.
     if (run.article?.content && !options.dryRun) {
@@ -265,7 +241,7 @@ async function processAutopilotPick(
     record.error = message;
     logger.error("Autopilot: run processing failed", {
       topic: pick.titleAngle,
-      platform: pick.targetPlatform,
+      platform: "spanwrap",
       error: message,
     });
     return record;

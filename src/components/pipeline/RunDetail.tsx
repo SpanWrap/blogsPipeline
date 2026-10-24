@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import { DETAIL_TABS, PUBLISH_SITES, TAB_LABELS } from "./constants";
+import { DETAIL_TABS, DISTRIBUTION_SITES, TAB_LABELS } from "./constants";
 import { featuredImageFor, markdownToEditorHtml } from "./markdown";
 import { QualityEditor } from "./QualityEditor";
 import { ProgressLine, RunRecord, TemplateRecord } from "./types";
@@ -114,21 +114,11 @@ export function RunDetail({
 }: RunDetailProps) {
   const [assignTemplateId, setAssignTemplateId] = useState(run?.templateId || "");
   const [outlineJson, setOutlineJson] = useState("");
-  const [publishTargets, setPublishTargets] = useState<string[]>(
-    Array.isArray(run?.publishTargets) && run.publishTargets.length
-      ? run.publishTargets
-      : ["spanwrap"],
-  );
 
   useEffect(() => {
     setAssignTemplateId(run?.templateId || "");
     setOutlineJson(run?.outline ? JSON.stringify(run.outline, null, 2) : "");
-    setPublishTargets(
-      Array.isArray(run?.publishTargets) && run.publishTargets.length
-        ? run.publishTargets
-        : ["spanwrap"],
-    );
-  }, [run?.id, run?.templateId, run?.outline, run?.publishTargets]);
+  }, [run?.id, run?.templateId, run?.outline]);
 
   if (!run) {
     return (
@@ -425,106 +415,92 @@ export function RunDetail({
           <p className="empty">No draft yet. Assign a template, then Run to review or Generate.</p>
         );
       }
-      const destLabels = publishTargets
-        .map((id: string) => PUBLISH_SITES.find((s) => s.id === id)?.label || id)
-        .join(", ");
-      const canPublish = ["APPROVED", "PUBLISH_FAILED"].includes(run!.status);
-      const results =
-        Array.isArray(run!.publishResults) && run!.publishResults.length
-          ? run!.publishResults
-          : run!.publishResult
-            ? [run!.publishResult]
-            : [];
+      const board = Array.isArray(run!.distribution) ? run!.distribution : [];
+      const pushable = new Set<string>(
+        Array.isArray(run!.pushableDestinations) ? run!.pushableDestinations : ["spanwrap"],
+      );
+      const spanwrapSent =
+        board.find((row: { destination?: string }) => row.destination === "spanwrap")?.status ===
+          "sent" || run!.status === "PUBLISHED";
+      const canSpanwrap = ["APPROVED", "PUBLISH_FAILED"].includes(run!.status);
+      const statusLabel: Record<string, string> = {
+        not_sent: "Not uploaded",
+        sent: "Uploaded",
+        manual: "Marked uploaded",
+        failed: "Failed",
+      };
       return (
         <>
           <p className="hint">
-            {canPublish
-              ? `Ready to publish to ${destLabels || "selected sites"}. Spanwrap publishes now; Medium and Substack are planned connectors.`
-              : `Approve the draft on the Preview tab first (current status: ${run!.status}). Destinations: ${destLabels || "none"}.`}
+            {canSpanwrap
+              ? "Nothing is uploaded until you click Publish to Spanwrap. Other sites stay on this checklist."
+              : spanwrapSent
+                ? "This post is on Spanwrap. Push the sites that have an API, or mark the others after you paste them yourself."
+                : `Approve the draft on the Preview tab first (current status: ${run!.status}).`}
           </p>
           <PostArticle run={run!} article={a} />
-          {results.length ? (
-            <ul className="issues" style={{ marginTop: "1rem" }}>
-              {results.map((r: any, i: number) => {
-                const label = r.target
-                  ? PUBLISH_SITES.find((s) => s.id === r.target)?.label || r.target
-                  : "Publish";
-                const ok = r.success ? "Published" : r.statusCode === 501 ? "Planned" : "Failed";
-                return (
-                  <li key={i} style={{ marginBottom: "0.5rem" }}>
-                    <strong>{label}</strong> · {ok} — {r.message || ""}
-                    {r.externalId ? ` · id ${r.externalId}` : ""}
-                    {r.raw?.html ? (
-                      <a
-                        href={`data:text/html;charset=utf-8,${encodeURIComponent(r.raw.html)}`}
-                        download={r.raw.filename || "draft.html"}
-                        className="btn"
-                        style={{
-                          marginLeft: "0.5rem",
-                          textDecoration: "none",
-                          display: "inline-block",
-                        }}
+          <ul className="issues" style={{ marginTop: "1rem" }}>
+            {DISTRIBUTION_SITES.map((site) => {
+              const row = board.find(
+                (item: { destination?: string }) => item.destination === site.id,
+              ) || { status: "not_sent", message: "" };
+              const status = String(row.status || "not_sent");
+              const canPush =
+                site.mode === "push" &&
+                pushable.has(site.id) &&
+                status !== "sent" &&
+                status !== "manual" &&
+                (site.id === "spanwrap" ? canSpanwrap : spanwrapSent);
+              return (
+                <li key={site.id} style={{ marginBottom: "0.75rem" }}>
+                  <strong>{site.label}</strong> · {statusLabel[status] || status}
+                  {row.message ? ` — ${row.message}` : ""}
+                  {row.externalId ? ` · id ${row.externalId}` : ""}
+                  <span style={{ display: "inline-flex", gap: "0.4rem", marginLeft: "0.5rem" }}>
+                    {canPush ? (
+                      <button
+                        type="button"
+                        className={site.id === "spanwrap" ? "btn primary" : "btn"}
+                        disabled={busy}
+                        onClick={() => onAct("push-destination", { destination: site.id })}
                       >
-                        Download HTML
-                      </a>
+                        {site.id === "spanwrap" ? "Publish to Spanwrap" : "Push"}
+                      </button>
                     ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-          ) : null}
-          <fieldset className="destinations" style={{ marginTop: "1.25rem" }}>
-            <legend>Publish to</legend>
-            {PUBLISH_SITES.map((site) => (
-              <label key={site.id} className="check">
-                <input
-                  type="checkbox"
-                  checked={publishTargets.includes(site.id)}
-                  onChange={(e) => {
-                    setPublishTargets((prev) =>
-                      e.target.checked
-                        ? [...prev, site.id]
-                        : prev.filter((id) => id !== site.id),
-                    );
-                  }}
-                />
-                <span>
-                  <strong>{site.label}</strong> · {site.note}
-                </span>
-              </label>
-            ))}
-          </fieldset>
-          <div className="form-actions publish-actions" style={{ marginTop: "0.85rem" }}>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy || !publishTargets.length}
-              onClick={() => {
-                if (!publishTargets.length) {
-                  toast("Select at least one publishing site", true);
-                  return;
-                }
-                onAct("save-review", { publishTargets });
-              }}
-            >
-              Save destinations
-            </button>
-            <button
-              type="button"
-              className="btn primary"
-              disabled={!canPublish || busy || !publishTargets.length}
-              onClick={async () => {
-                if (!publishTargets.length) {
-                  toast("Select at least one publishing site", true);
-                  return;
-                }
-                await onAct("save-review", { publishTargets });
-                await onAct("publish");
-              }}
-            >
-              Publish to selected sites
-            </button>
-          </div>
+                    {status !== "sent" && status !== "manual" ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={() =>
+                          onAct("mark-distribution", { destination: site.id, status: "manual" })
+                        }
+                      >
+                        Mark uploaded
+                      </button>
+                    ) : null}
+                    {status === "manual" ? (
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        disabled={busy}
+                        onClick={() =>
+                          onAct("mark-distribution", { destination: site.id, status: "not_sent" })
+                        }
+                      >
+                        Clear
+                      </button>
+                    ) : null}
+                  </span>
+                  {site.mode === "manual" ? (
+                    <div className="meta">Paste this post yourself. This app does not upload here.</div>
+                  ) : site.id !== "spanwrap" && !pushable.has(site.id) ? (
+                    <div className="meta">Add this site’s API credentials to enable Push.</div>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
         </>
       );
     }

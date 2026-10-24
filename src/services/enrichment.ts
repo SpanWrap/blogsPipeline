@@ -3,6 +3,7 @@ import { analyzeKeywords, generateMetaSuggestions } from "./seo-research";
 import { buildFactCards } from "./fact-cards";
 import { buildCompetitorBrief } from "./competitor-brief";
 import { buildRepurposePack } from "./repurpose";
+import { distributionBoard, pushableDestinations } from "./distribution";
 
 export function buildSeoPack(article: GeneratedBlog, topic: string) {
   const kw = analyzeKeywords(topic, article.content);
@@ -38,6 +39,8 @@ export function enrichRunView(run: PipelineRun) {
             content: run.article.content,
           })
         : null),
+    distribution: distributionBoard(run.distribution),
+    pushableDestinations: pushableDestinations(),
   };
 }
 

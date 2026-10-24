@@ -70,6 +70,8 @@ export type TopicSelectorOptions = {
   recentTopics: string[];
   llm: LLMProvider;
   offline?: boolean;
+  /** Reader profile summary. Overrides the hardcoded platform audience. */
+  audience?: string;
 };
 
 /**
@@ -79,7 +81,7 @@ export type TopicSelectorOptions = {
 export async function selectAutopilotTopics(
   options: TopicSelectorOptions,
 ): Promise<AutopilotTopicPick[]> {
-  const { platforms, postsPerPlatform, recentTopics, llm, offline } = options;
+  const { platforms, postsPerPlatform, recentTopics, llm, offline, audience } = options;
   const totalNeeded = platforms.length * postsPerPlatform;
 
   // 1. Discover trending topics (fetch more than needed to give LLM room to pick)
@@ -124,17 +126,38 @@ export async function selectAutopilotTopics(
     platforms,
     postsPerPlatform,
     llm,
+    audience,
   );
 
   return picks;
 }
 
 /** Use the LLM to select the best topics and assign them to platforms. */
+function briefFor(
+  platform: PublishTarget,
+  topic: string,
+  keywords: string[],
+  referenceUrls: string[],
+  audience?: string,
+): ContentBriefInput {
+  const strategy = PLATFORM_STRATEGY[platform];
+  const forSpanwrap = platform === "spanwrap";
+  return {
+    topic,
+    targetAudience: audience?.trim() || strategy.audience,
+    tone: forSpanwrap ? "technical but easy to understand" : strategy.tone,
+    contentType: forSpanwrap ? "technical guide" : strategy.contentType,
+    keywords,
+    referenceUrls,
+  };
+}
+
 async function llmSelectTopics(
   candidates: TopicRecommendation[],
   platforms: PublishTarget[],
   postsPerPlatform: number,
   llm: LLMProvider,
+  audience?: string,
 ): Promise<AutopilotTopicPick[]> {
   const totalNeeded = platforms.length * postsPerPlatform;
   const candidateList = candidates
@@ -155,6 +178,11 @@ ${candidateList}
 
 ## Target Platforms (${postsPerPlatform} unique posts each)
 ${platformDescriptions}
+${
+  audience?.trim()
+    ? `\n## Reader\n${audience.trim()}\nWrite a technical, practical article for this reader. Do not write a short social post.`
+    : ""
+}
 
 ## Instructions
 Select exactly ${totalNeeded} topics from the list above. Rules:
@@ -201,7 +229,6 @@ Respond ONLY with a JSON array (no markdown code fences):
 
       usedTopics.add(idx);
       const rec = candidates[idx]!;
-      const strategy = PLATFORM_STRATEGY[platform];
 
       picks.push({
         recommendation: rec,
@@ -209,17 +236,16 @@ Respond ONLY with a JSON array (no markdown code fences):
         titleAngle: item.titleAngle || rec.topic,
         keywords: item.keywords?.length ? item.keywords : rec.keywords,
         rank: picks.length + 1,
-        brief: {
-          topic: item.titleAngle || rec.topic,
-          targetAudience: strategy.audience,
-          tone: strategy.tone,
-          contentType: strategy.contentType,
-          keywords: item.keywords?.length ? item.keywords : rec.keywords,
-          referenceUrls: rec.signals
+        brief: briefFor(
+          platform,
+          item.titleAngle || rec.topic,
+          item.keywords?.length ? item.keywords : rec.keywords,
+          rec.signals
             .map((s) => s.url)
             .filter((u): u is string => Boolean(u))
             .slice(0, 3),
-        },
+          audience,
+        ),
       });
     }
 
@@ -231,7 +257,7 @@ Respond ONLY with a JSON array (no markdown code fences):
 
     // If LLM didn't return enough, fill with heuristic fallback
     if (picks.length < totalNeeded) {
-      fillWithFallback(picks, candidates, platforms, postsPerPlatform, usedTopics);
+      fillWithFallback(picks, candidates, platforms, postsPerPlatform, usedTopics, audience);
     }
 
     return picks;
@@ -239,7 +265,7 @@ Respond ONLY with a JSON array (no markdown code fences):
     logger.warn("Autopilot: LLM topic selection failed, using heuristic fallback", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return heuristicSelect(candidates, platforms, postsPerPlatform);
+    return heuristicSelect(candidates, platforms, postsPerPlatform, audience);
   }
 }
 
@@ -248,10 +274,11 @@ function heuristicSelect(
   candidates: TopicRecommendation[],
   platforms: PublishTarget[],
   postsPerPlatform: number,
+  audience?: string,
 ): AutopilotTopicPick[] {
   const picks: AutopilotTopicPick[] = [];
   const usedTopics = new Set<number>();
-  fillWithFallback(picks, candidates, platforms, postsPerPlatform, usedTopics);
+  fillWithFallback(picks, candidates, platforms, postsPerPlatform, usedTopics, audience);
   return picks;
 }
 
@@ -261,6 +288,7 @@ function fillWithFallback(
   platforms: PublishTarget[],
   postsPerPlatform: number,
   usedTopics: Set<number>,
+  audience?: string,
 ): void {
   const platformCounts = new Map<string, number>();
   for (const p of picks) {
@@ -272,7 +300,6 @@ function fillWithFallback(
     const needed = postsPerPlatform - current;
     if (needed <= 0) continue;
 
-    const strategy = PLATFORM_STRATEGY[platform];
     for (let i = 0; i < candidates.length && (platformCounts.get(platform) ?? 0) < postsPerPlatform; i++) {
       if (usedTopics.has(i)) continue;
       const rec = candidates[i]!;
@@ -285,17 +312,16 @@ function fillWithFallback(
         titleAngle: rec.topic,
         keywords: rec.keywords,
         rank: picks.length + 1,
-        brief: {
-          topic: rec.topic,
-          targetAudience: strategy.audience,
-          tone: strategy.tone,
-          contentType: strategy.contentType,
-          keywords: rec.keywords,
-          referenceUrls: rec.signals
+        brief: briefFor(
+          platform,
+          rec.topic,
+          rec.keywords,
+          rec.signals
             .map((s) => s.url)
             .filter((u): u is string => Boolean(u))
             .slice(0, 3),
-        },
+          audience,
+        ),
       });
     }
   }

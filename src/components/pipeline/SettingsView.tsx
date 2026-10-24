@@ -7,6 +7,8 @@ import {
   AutopilotCycle,
   AutopilotStatus,
   EmailNotifyConfig,
+  ReaderProfile,
+  ReaderProfilesConfig,
   HealthData,
   LlmConfig,
   LlmProvider,
@@ -39,6 +41,7 @@ type SettingsViewProps = {
   autopilot: AutopilotStatus | null;
   autopilotCycles: AutopilotCycle[];
   emailNotify: EmailNotifyConfig | null;
+  readerProfiles: ReaderProfilesConfig | null;
   busy: boolean;
   onSaveLlm: (provider: string, model: string, apiKey?: string) => void;
   onSaveTemplate: (name: string, markdown: string, filename: string) => void;
@@ -60,6 +63,10 @@ type SettingsViewProps = {
   onToggleAutopilot: () => void;
   onTriggerAutopilot: () => void;
   onLlmProviderChange: (provider: string) => void;
+  onSaveReaderProfiles: (input: {
+    profiles: ReaderProfile[];
+    defaultProfileId: string;
+  }) => Promise<void>;
   onSaveEmailNotify: (input: { enabled: boolean; recipients: string[] }) => Promise<void>;
   onTestEmailNotify: () => Promise<void>;
 };
@@ -150,6 +157,7 @@ export function SettingsView({
   autopilot,
   autopilotCycles,
   emailNotify,
+  readerProfiles,
   busy,
   onSaveLlm,
   onSaveTemplate,
@@ -161,6 +169,7 @@ export function SettingsView({
   onToggleAutopilot,
   onTriggerAutopilot,
   onLlmProviderChange,
+  onSaveReaderProfiles,
   onSaveEmailNotify,
   onTestEmailNotify,
 }: SettingsViewProps) {
@@ -193,6 +202,13 @@ export function SettingsView({
   const [previewSaveError, setPreviewSaveError] = useState("");
   const [emailEnabled, setEmailEnabled] = useState(true);
   const [emailRecipients, setEmailRecipients] = useState("");
+  const [readerDraft, setReaderDraft] = useState<ReaderProfile[]>([]);
+  const [defaultReaderId, setDefaultReaderId] = useState("");
+
+  useEffect(() => {
+    setReaderDraft(readerProfiles?.profiles?.map((profile) => ({ ...profile })) || []);
+    setDefaultReaderId(readerProfiles?.defaultProfileId || "");
+  }, [readerProfiles]);
 
   useEffect(() => {
     setEmailEnabled(emailNotify?.enabled !== false);
@@ -600,10 +616,10 @@ export function SettingsView({
                 </div>
               </div>
               <p className="hint">
-                Weekly automated blog pipeline. Discovers trending AI/tech topics, generates
-                platform-tailored drafts, and publishes to configured platforms. Set{" "}
-                <code>AUTOPILOT_ENABLED=true</code> in <code>.env</code> for scheduled runs, or
-                click <strong>Run Now</strong> to trigger manually.
+                Daily draft for Spanwrap. Discovers a technical topic for the selected reader,
+                writes the article, and emails it. It does not publish. Set{" "}
+                <code>AUTOPILOT_ENABLED=true</code> for the daily schedule, or click{" "}
+                <strong>Run Now</strong> to draft immediately.
               </p>
               <div className="autopilot-status">
                 <dl className="status-grid">
@@ -632,16 +648,20 @@ export function SettingsView({
                     </dd>
                   </div>
                   <div>
-                    <dt>Platforms</dt>
-                    <dd>{(cfg.platforms || []).join(", ") || "—"}</dd>
+                    <dt>Schedule</dt>
+                    <dd>{autopilot?.cronExpression || "0 8 * * *"}</dd>
                   </div>
                   <div>
-                    <dt>Posts/platform</dt>
-                    <dd>{String(cfg.postsPerPlatform ?? "—")}</dd>
+                    <dt>Drafts</dt>
+                    <dd>1 Spanwrap article / day</dd>
                   </div>
                   <div>
-                    <dt>Skip review</dt>
-                    <dd>{cfg.skipReview ? "Yes" : "No"}</dd>
+                    <dt>Publishes</dt>
+                    <dd>No — you publish from the run</dd>
+                  </div>
+                  <div>
+                    <dt>Reader</dt>
+                    <dd>{cfg.readerLabel || readerProfiles?.activeLabel || "—"}</dd>
                   </div>
                   <div>
                     <dt>Min quality</dt>
@@ -656,6 +676,110 @@ export function SettingsView({
                     <dd>{cfg.dryRun ? "Yes (no publish)" : "No"}</dd>
                   </div>
                 </dl>
+              </div>
+              <div className="reader-profiles" style={{ marginTop: "1.25rem" }}>
+                <div className="panel-head">
+                  <h3>Reader</h3>
+                  <button
+                    type="button"
+                    className="btn primary"
+                    disabled={busy || !readerDraft.length}
+                    onClick={() =>
+                      void onSaveReaderProfiles({
+                        profiles: readerDraft,
+                        defaultProfileId: defaultReaderId || readerDraft[0]?.id || "",
+                      })
+                    }
+                  >
+                    Save reader
+                  </button>
+                </div>
+                <p className="hint">
+                  The daily draft uses the selected reader. Tone stays technical; this only changes
+                  who the article is for.
+                </p>
+                <label>
+                  Default reader
+                  <select
+                    value={defaultReaderId}
+                    onChange={(e) => setDefaultReaderId(e.target.value)}
+                  >
+                    {readerDraft.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {readerDraft.map((profile, index) => (
+                  <div key={profile.id} className="form-grid" style={{ marginTop: "0.75rem" }}>
+                    <label>
+                      Label
+                      <input
+                        value={profile.label}
+                        onChange={(e) =>
+                          setReaderDraft((rows) =>
+                            rows.map((row, i) =>
+                              i === index ? { ...row, label: e.target.value } : row,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      Who they are
+                      <input
+                        value={profile.audience}
+                        onChange={(e) =>
+                          setReaderDraft((rows) =>
+                            rows.map((row, i) =>
+                              i === index ? { ...row, audience: e.target.value } : row,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      Seniority
+                      <input
+                        value={profile.seniority}
+                        onChange={(e) =>
+                          setReaderDraft((rows) =>
+                            rows.map((row, i) =>
+                              i === index ? { ...row, seniority: e.target.value } : row,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      Stack
+                      <input
+                        value={profile.stack}
+                        onChange={(e) =>
+                          setReaderDraft((rows) =>
+                            rows.map((row, i) =>
+                              i === index ? { ...row, stack: e.target.value } : row,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                    <label className="full">
+                      What they want
+                      <input
+                        value={profile.goal}
+                        onChange={(e) =>
+                          setReaderDraft((rows) =>
+                            rows.map((row, i) =>
+                              i === index ? { ...row, goal: e.target.value } : row,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                  </div>
+                ))}
               </div>
               <div className="autopilot-history">
                 <h3>Recent cycles</h3>

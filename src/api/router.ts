@@ -305,6 +305,29 @@ async function handleAuthedApi(
       return jsonResponse(200, appConfig.autopilot);
     }
 
+    if (method === "GET" && pathname === "/api/reader-profiles") {
+      const { getReaderProfileSettings, publicReaderProfiles } = await import(
+        "../services/reader-profiles"
+      );
+      return jsonResponse(200, publicReaderProfiles(await getReaderProfileSettings()));
+    }
+
+    if (method === "POST" && pathname === "/api/reader-profiles") {
+      const body = (await readJsonBody(request)) as Record<string, unknown>;
+      const { saveReaderProfileSettings, publicReaderProfiles } = await import(
+        "../services/reader-profiles"
+      );
+      const saved = await saveReaderProfileSettings({
+        profiles: body.profiles,
+        defaultProfileId: body.defaultProfileId,
+      });
+      await log("reader_profiles_saved", {
+        count: saved.profiles.length,
+        defaultProfileId: saved.defaultProfileId,
+      });
+      return jsonResponse(200, publicReaderProfiles(saved));
+    }
+
     if (method === "GET" && pathname === "/api/email-notify") {
       const {
         getEmailNotifySettings,
@@ -812,6 +835,9 @@ async function handleAuthedApi(
               case "publish":
                 await o.publish(id);
                 break;
+              case "push-destination":
+                await o.publishDestination(id, String(body.destination ?? ""));
+                break;
               case "generate-images":
                 await o.generateImages(id);
                 break;
@@ -847,6 +873,7 @@ async function handleAuthedApi(
             run: "run_started",
             "accept-stream-draft": "run_accept_stream_draft",
             publish: "run_published",
+            "push-destination": "run_pushed",
             "generate-images": "run_generate_images",
             "readability-pass": "run_readability",
             "regenerate-section": "run_regen_section",
@@ -869,6 +896,13 @@ async function handleAuthedApi(
             break;
           case "approve":
             run = await o.approve(id, body.notes);
+            break;
+          case "mark-distribution":
+            run = await o.markDistribution(
+              id,
+              String(body.destination ?? ""),
+              body.status === "not_sent" ? "not_sent" : "manual",
+            );
             break;
           case "reject":
             run = await o.reject(id, body.notes);
@@ -913,6 +947,7 @@ async function handleAuthedApi(
           "apply-seo": "run_apply_seo",
           "select-thumbnail": "run_select_thumbnail",
           approve: "run_approved",
+          "mark-distribution": "run_marked_uploaded",
           reject: "run_rejected",
           cancel: "run_cancelled",
           "outline-update": "outline_edited",

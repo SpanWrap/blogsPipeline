@@ -40,6 +40,22 @@ export type HealthData = Record<string, any>;
 export type DashboardData = { buckets?: { label: string; count: number; runIds: string[] }[] };
 export type AutopilotStatus = Record<string, any>;
 export type AutopilotCycle = Record<string, any>;
+export type ReaderProfile = {
+  id: string;
+  label: string;
+  audience: string;
+  seniority: string;
+  stack: string;
+  goal: string;
+  summary?: string;
+};
+export type ReaderProfilesConfig = {
+  profiles: ReaderProfile[];
+  defaultProfileId: string;
+  activeLabel?: string;
+  activeSummary?: string;
+  updatedAt?: string;
+};
 export type EmailNotifyConfig = {
   enabled?: boolean;
   recipients?: string[];

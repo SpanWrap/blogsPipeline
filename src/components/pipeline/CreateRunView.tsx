@@ -1,11 +1,12 @@
 "use client";
 
-import { FormEvent, useRef, useState } from "react";
-import { StylePreset, TemplateRecord } from "./types";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { ReaderProfilesConfig, StylePreset, TemplateRecord } from "./types";
 
 type CreateRunViewProps = {
   templates: TemplateRecord[];
   stylePresets: StylePreset[];
+  readerProfiles?: ReaderProfilesConfig | null;
   lastStylePresetId?: string;
   busy: boolean;
   onCreate: (brief: Record<string, string | string[] | null>, andRun: boolean) => void;
@@ -15,6 +16,7 @@ type CreateRunViewProps = {
 export function CreateRunView({
   templates,
   stylePresets,
+  readerProfiles,
   lastStylePresetId,
   busy,
   onCreate,
@@ -24,13 +26,27 @@ export function CreateRunView({
   const [batchTopics, setBatchTopics] = useState("");
   const [templateId, setTemplateId] = useState("");
   const [stylePresetId, setStylePresetId] = useState(lastStylePresetId || "");
+  const [readerId, setReaderId] = useState(readerProfiles?.defaultProfileId || "");
+  const [audience, setAudience] = useState("");
+  const seededReader = useRef(false);
+
+  useEffect(() => {
+    if (seededReader.current || !readerProfiles?.profiles.length) return;
+    seededReader.current = true;
+    const selected =
+      readerProfiles.profiles.find((profile) => profile.id === readerProfiles.defaultProfileId) ||
+      readerProfiles.profiles[0];
+    if (!selected) return;
+    setReaderId(selected.id);
+    setAudience(selected.summary || selected.audience);
+  }, [readerProfiles]);
 
   function formBrief(form: HTMLFormElement) {
     const fd = new FormData(form);
     const sourceUrl = String(fd.get("sourceUrl") || "").trim();
     return {
       topic: String(fd.get("topic") || "").trim(),
-      targetAudience: String(fd.get("targetAudience") || "").trim(),
+      targetAudience: audience.trim() || String(fd.get("targetAudience") || "").trim(),
       tone: String(fd.get("tone") || "").trim(),
       keywords: String(fd.get("keywords") || ""),
       templateId: String(fd.get("templateId") || "") || null,
@@ -69,8 +85,36 @@ export function CreateRunView({
           />
         </label>
         <label>
+          Reader
+          <select
+            name="readerProfileId"
+            value={readerId}
+            onChange={(e) => {
+              const id = e.target.value;
+              setReaderId(id);
+              const selected = readerProfiles?.profiles.find((profile) => profile.id === id);
+              setAudience(selected?.summary || selected?.audience || "");
+            }}
+          >
+            <option value="">Custom</option>
+            {(readerProfiles?.profiles || []).map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
           Audience
-          <input name="targetAudience" defaultValue="startup founders" />
+          <input
+            name="targetAudience"
+            value={audience}
+            placeholder="Who should this article be for?"
+            onChange={(e) => {
+              setAudience(e.target.value);
+              setReaderId("");
+            }}
+          />
         </label>
         <label>
           Tone

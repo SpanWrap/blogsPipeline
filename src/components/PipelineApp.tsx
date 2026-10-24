@@ -21,6 +21,7 @@ import type {
   DigestData,
   DigestItem,
   EmailNotifyConfig,
+  ReaderProfilesConfig,
   HealthData,
   LlmConfig,
   LogEntry,
@@ -125,6 +126,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
   const [autopilot, setAutopilot] = useState<AutopilotStatus | null>(null);
   const [autopilotCycles, setAutopilotCycles] = useState<AutopilotCycle[]>([]);
   const [emailNotify, setEmailNotify] = useState<EmailNotifyConfig | null>(null);
+  const [readerProfiles, setReaderProfiles] = useState<ReaderProfilesConfig | null>(null);
 
   const showAuthGate = useCallback((setup = false) => {
     clearWorkspaceBoot();
@@ -336,6 +338,15 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     }
   }, []);
 
+  const loadReaderProfiles = useCallback(async () => {
+    try {
+      const data = await callApi<ReaderProfilesConfig>("/api/reader-profiles");
+      setReaderProfiles(data);
+    } catch {
+      setReaderProfiles(null);
+    }
+  }, [callApi]);
+
   const loadEmailNotify = useCallback(async () => {
     try {
       const data = await callApi<EmailNotifyConfig>("/api/email-notify");
@@ -409,7 +420,13 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                 setTab("article");
               }
             }
-            if (action === "approve") setTab("publish");
+            if (
+              action === "approve" ||
+              action === "mark-distribution" ||
+              action === "push-destination"
+            ) {
+              setTab("publish");
+            }
             if (action === "regenerate-section") setTab("article");
             await loadRuns();
             return latest;
@@ -451,6 +468,15 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     [callApi, watchBackgroundRun],
   );
 
+  const openedRunLink = useRef(false);
+  useEffect(() => {
+    if (!workspaceReady || page !== "home" || openedRunLink.current) return;
+    const id = new URLSearchParams(window.location.search).get("run");
+    if (!id) return;
+    openedRunLink.current = true;
+    void selectRun(id);
+  }, [workspaceReady, page, selectRun]);
+
   const act = useCallback(
     async (action: string, body?: Record<string, unknown>) => {
       if (!selectedId || busy) return null;
@@ -462,6 +488,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         "generate",
         "quality-check",
         "publish",
+        "push-destination",
         "generate-images",
         "readability-pass",
         "regenerate-section",
@@ -485,7 +512,9 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
           next.error ? `${action} failed: ${next.error}` : `${action} completed → ${next.status}`,
         );
         toastRunResult(next, `${action} complete`);
-        if (action === "approve") setTab("publish");
+        if (action === "approve" || action === "mark-distribution" || action === "push-destination") {
+          setTab("publish");
+        }
         if (action === "regenerate-section") setTab("article");
         await loadRuns();
         return next;
@@ -520,7 +549,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
 
   const refreshPageData = useCallback(async () => {
     try {
-      await Promise.all([loadHealth(), loadLlm(), loadTemplates()]);
+      await Promise.all([loadHealth(), loadLlm(), loadTemplates(), loadReaderProfiles()]);
     } catch {
       /* individual loaders toast/handle */
     }
@@ -531,6 +560,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         loadAutopilotStatus(),
         loadAutopilotHistory(),
         loadEmailNotify(),
+        loadReaderProfiles(),
       ]).catch(() => {});
       return;
     }
@@ -551,6 +581,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     loadAutopilotStatus,
     loadAutopilotHistory,
     loadEmailNotify,
+    loadReaderProfiles,
     loadRuns,
     loadDigest,
     toast,
@@ -969,6 +1000,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                 <CreateRunView
                   templates={templates}
                   stylePresets={stylePresets}
+                  readerProfiles={readerProfiles}
                   lastStylePresetId={lastStylePresetId}
                   busy={busy}
                   onCreate={createRun}
@@ -1061,6 +1093,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
             autopilot={autopilot}
             autopilotCycles={autopilotCycles}
             emailNotify={emailNotify}
+            readerProfiles={readerProfiles}
             busy={busy}
             onSaveLlm={async (provider, model, apiKey) => {
               setBusy(true);
@@ -1191,12 +1224,29 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || "Trigger failed");
                 toast(
-                  `Autopilot cycle complete: ${data.runsCreated?.length ?? 0} runs created, ${data.runsPublished ?? 0} published`,
+                  `Autopilot drafted ${data.runsCreated?.length ?? 0} Spanwrap article${
+                    (data.runsCreated?.length ?? 0) === 1 ? "" : "s"
+                  }. Nothing was published.`,
                 );
                 await loadAutopilotStatus();
                 await loadAutopilotHistory();
               } catch (e) {
                 toast(e instanceof Error ? e.message : "Trigger failed", true);
+              }
+            }}
+            onSaveReaderProfiles={async (input) => {
+              setBusy(true);
+              try {
+                const saved = await callApi<ReaderProfilesConfig>("/api/reader-profiles", {
+                  method: "POST",
+                  body: JSON.stringify(input),
+                });
+                setReaderProfiles(saved);
+                toast(`Reader set to ${saved.activeLabel || "saved profile"}`);
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Save failed", true);
+              } finally {
+                setBusy(false);
               }
             }}
             onSaveEmailNotify={async ({ enabled, recipients }) => {

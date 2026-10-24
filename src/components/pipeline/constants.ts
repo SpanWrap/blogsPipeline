@@ -68,6 +68,17 @@ export const PUBLISH_SITES = [
   { id: "substack", label: "Substack", note: "Planned" },
 ] as const;
 
+export const DISTRIBUTION_SITES = [
+  { id: "spanwrap", label: "Spanwrap", mode: "push" },
+  { id: "medium", label: "Medium", mode: "push" },
+  { id: "devto", label: "Dev.to", mode: "push" },
+  { id: "hashnode", label: "Hashnode", mode: "push" },
+  { id: "wordpress", label: "WordPress", mode: "push" },
+  { id: "substack", label: "Substack", mode: "manual" },
+  { id: "reddit", label: "Reddit", mode: "manual" },
+  { id: "linkedin", label: "LinkedIn", mode: "manual" },
+] as const;
+
 export const TAB_LABELS: Record<string, string> = {
   article: "Preview",
   publish: "Publish",

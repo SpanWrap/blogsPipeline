@@ -33,3 +33,4 @@ yarn-error.log*
 
 # Legacy build output
 dist/
+release/

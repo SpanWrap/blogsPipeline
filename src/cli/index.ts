@@ -307,12 +307,12 @@ program
 
 // ── Autopilot CLI ──
 
-const autopilot = program.command("autopilot").description("Manage the weekly autopilot scheduler");
+const autopilot = program.command("autopilot").description("Manage the daily Spanwrap draft scheduler");
 
 autopilot
   .command("run")
-  .description("Trigger one autopilot cycle immediately (discover → generate → publish)")
-  .option("--dry-run", "Generate drafts but skip publishing")
+  .description("Draft one Spanwrap article now (discover → generate → email). Does not publish.")
+  .option("--dry-run", "Generate a draft but skip the review email")
   .option("--offline", "Use mock providers (testing)")
   .option("--platforms <list>", "Comma-separated platforms to target")
   .option("--posts <n>", "Posts per platform", "2")
@@ -362,9 +362,10 @@ autopilot
       console.log(`Cycle busy:    ${status.cycleBusy}`);
       console.log(`Cron:          ${status.cronExpression}`);
       console.log(`Next run:      ${status.nextRun ?? "—"}`);
-      console.log(`Platforms:     ${status.config.platforms.join(", ")}`);
-      console.log(`Posts/platform:${status.config.postsPerPlatform}`);
-      console.log(`Skip review:   ${status.config.skipReview}`);
+      console.log(`Platforms:     spanwrap`);
+      console.log(`Drafts/day:    1`);
+      console.log(`Publishes:     no`);
+      console.log(`Reader:        ${status.config.readerLabel ?? "—"}`);
       console.log(`Dry run:       ${status.config.dryRun}`);
       console.log(`Min quality:   ${status.config.minQualityScore}`);
       console.log(`Dedup days:    ${status.config.deduplicationDays}`);

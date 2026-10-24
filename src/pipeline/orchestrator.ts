@@ -64,9 +64,25 @@ import { diffSummary } from "../services/diff-review";
 import { scoreSEO } from "../services/seo-research";
 import { buildFactCards, unsourcedClaimCount } from "../services/fact-cards";
 import { createQuickEditLLM } from "../providers/llm/quick-edit";
+import {
+  distributionBoard,
+  isDistributionDestination,
+  isPushDestination,
+  mergePublishResults,
+  setDistributionStatus,
+} from "../services/distribution";
+import { isLivePublishTarget } from "./stages/publishing";
+import type { DistributionDestination, TargetPublishResult } from "../models";
 
 /** Process-wide lock so two "Run to review" clicks cannot wipe each other's outline/article. */
 const runLocks = new Map<string, Promise<void>>();
+
+function upsertPublishResult(
+  current: TargetPublishResult[],
+  result: TargetPublishResult,
+): TargetPublishResult[] {
+  return [...current.filter((item) => item.target !== result.target), result];
+}
 
 /** Soft lease TTL — renewed by heartbeats during long LLM / image stages. */
 const LEASE_TTL_MS = 15 * 60_000;
@@ -250,6 +266,7 @@ export class BlogPipelineOrchestrator {
       publishTargets: ["spanwrap"],
       publishResult: null,
       publishResults: [],
+      distribution: distributionBoard(),
       stages: [],
       reviewNotes: null,
       error: null,
@@ -893,6 +910,7 @@ export class BlogPipelineOrchestrator {
         ...run,
         publishResult: primary,
         publishResults: results,
+        distribution: mergePublishResults(run.distribution, results),
       };
       if (live.length === 0) {
         next = completeStage(next, "publish", {
@@ -965,6 +983,124 @@ export class BlogPipelineOrchestrator {
       };
       return this.store.save(next);
     }
+  }
+
+  /**
+   * Publish one destination. Spanwrap is the canonical post. Other API sites
+   * can be pushed only after Spanwrap has been sent. This never runs from autopilot.
+   */
+  async publishDestination(id: string, destination: string): Promise<PipelineRun> {
+    if (!isDistributionDestination(destination) || !isPushDestination(destination)) {
+      throw new Error("This site has no upload API. Mark it uploaded after you paste it.");
+    }
+    const dest = destination;
+    let run = await this.store.require(id);
+    if (!run.article) throw new Error("No article to publish");
+
+    if (dest === "spanwrap") {
+      if (run.status !== "APPROVED" && run.status !== "PUBLISH_FAILED") {
+        throw new Error("Approve the draft before publishing to Spanwrap");
+      }
+    } else {
+      if (!isLivePublishTarget(dest)) {
+        throw new Error(`Credentials are not configured for ${dest}`);
+      }
+      const spanwrap = distributionBoard(run.distribution).find((row) => row.destination === "spanwrap");
+      if (spanwrap?.status !== "sent" && run.status !== "PUBLISHED") {
+        throw new Error("Publish to Spanwrap before sending this post to other sites");
+      }
+    }
+
+    const stageName = dest === "spanwrap" ? "publish" : `distribute-${dest}`;
+    run = await this.store.save(
+      startStage(run, stageName, { provider: dest, meta: { destination: dest } }),
+    );
+
+    try {
+      const { results } = await publishingStage(
+        run.article!,
+        this.publisher,
+        run.idempotencyKey,
+        [dest],
+      );
+      const result = results[0]!;
+      const distribution = mergePublishResults(run.distribution, results);
+      const publishResults = upsertPublishResult(run.publishResults, result);
+      if (dest === "spanwrap") {
+        if (result.success) {
+          let next = completeStage(
+            {
+              ...run,
+              distribution,
+              publishResult: result,
+              publishResults,
+              error: null,
+            },
+            stageName,
+            { destination: dest },
+          );
+          next = setStatus(next, "PUBLISHED");
+          return this.store.save(next);
+        }
+        const failed = failStage(
+          { ...run, distribution, publishResult: result, publishResults, status: "PUBLISH_FAILED" },
+          stageName,
+          result.message,
+        );
+        return this.store.save({
+          ...failed,
+          status: "PUBLISH_FAILED",
+          error: result.message,
+        });
+      }
+
+      const next = completeStage(
+        { ...run, distribution, publishResults },
+        stageName,
+        { destination: dest, success: result.success },
+      );
+      return this.store.save(next);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const distribution = mergePublishResults(run.distribution, [
+        {
+          target: dest,
+          success: false,
+          message,
+        },
+      ]);
+      if (dest === "spanwrap") {
+        const failed = failStage(
+          { ...run, distribution, status: "PUBLISH_FAILED" },
+          stageName,
+          message,
+        );
+        return this.store.save({ ...failed, status: "PUBLISH_FAILED", error: message });
+      }
+      return this.store.save(
+        completeStage({ ...run, distribution }, stageName, { destination: dest, success: false }),
+      );
+    }
+  }
+
+  async markDistribution(
+    id: string,
+    destination: string,
+    status: "manual" | "not_sent",
+  ): Promise<PipelineRun> {
+    if (!isDistributionDestination(destination)) {
+      throw new Error("Unknown distribution site");
+    }
+    if (status !== "manual" && status !== "not_sent") {
+      throw new Error("Status must be manual or not_sent");
+    }
+    const run = await this.store.require(id);
+    const message =
+      status === "manual" ? "Marked uploaded outside this app" : "Marked as not uploaded";
+    return this.store.save({
+      ...run,
+      distribution: setDistributionStatus(run.distribution, destination, status, message),
+    });
   }
 
   async generateImages(id: string): Promise<PipelineRun> {

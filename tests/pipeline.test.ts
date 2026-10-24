@@ -430,6 +430,9 @@ describe("end-to-end pipeline", () => {
     expect(published.publishResult?.success).toBe(true);
     expect(published.publishTargets).toEqual(["spanwrap"]);
     expect(published.publishResults.some((r) => r.target === "spanwrap" && r.success)).toBe(true);
+    expect(published.distribution.find((row) => row.destination === "spanwrap")?.status).toBe(
+      "sent",
+    );
 
     // Idempotent re-publish should not explode (publisher layer); run still published
     const again = await orch.get(created.id);
@@ -631,5 +634,31 @@ describe("end-to-end pipeline", () => {
     const second = await orch.generate(created.id);
     expect(second.previousArticle?.title).toBe(firstTitle);
     expect(second.article).toBeTruthy();
+  });
+
+  it("pushes Spanwrap on demand and only marks sites without an API", async () => {
+    const created = await orch.create({
+      topic: "AI agents in customer support",
+      targetAudience: "startup founders",
+      tone: "clear",
+      contentType: "educational",
+      keywords: ["AI agents"],
+      referenceUrls: [],
+    });
+    await orch.runUntilReview(created.id);
+    await expect(orch.publishDestination(created.id, "spanwrap")).rejects.toThrow(/Approve/);
+    await orch.approve(created.id);
+    const published = await orch.publishDestination(created.id, "spanwrap");
+    expect(published.status).toBe("PUBLISHED");
+    expect(published.distribution.find((row) => row.destination === "spanwrap")?.status).toBe(
+      "sent",
+    );
+    await expect(orch.publishDestination(created.id, "reddit")).rejects.toThrow(/no upload API/i);
+    const marked = await orch.markDistribution(created.id, "reddit", "manual");
+    expect(marked.status).toBe("PUBLISHED");
+    expect(marked.distribution.find((row) => row.destination === "reddit")?.status).toBe("manual");
+    expect(marked.distribution.find((row) => row.destination === "substack")?.status).toBe(
+      "not_sent",
+    );
   });
 });
