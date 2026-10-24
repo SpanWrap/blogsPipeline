@@ -19,6 +19,7 @@ import {
 import { toSlug } from "../../utils/slug";
 import { resolveFeaturedImage } from "../../utils/images";
 import { logger } from "../../services/logger";
+import { isNoReaderAudience } from "../../services/reader-constants";
 
 export function buildStreamDraftPrompt(input: {
   briefJson: string;
@@ -26,6 +27,7 @@ export function buildStreamDraftPrompt(input: {
   analysisJson: string;
   sourcesJson: string;
   templateGuidance?: string | null;
+  freeReader?: boolean;
 }): string {
   const templateBlock = input.templateGuidance
     ? `\nTemplate guidance:\n${input.templateGuidance}\n`
@@ -44,7 +46,7 @@ Length & depth (required):
 - Prefer specificity over generic advice.
 
 Rules:
-- Start with a single H1 title (# Title)
+${input.freeReader ? "- do not write for one job title or persona; let the topic decide the angle, examples, and depth\n" : ""}- Start with a single H1 title (# Title)
 - Use H2/H3 for sections from the outline
 - Ground claims in the provided sources only; no invented stats
 - Clear, scannable prose; no filler or padded repetition
@@ -123,6 +125,7 @@ export async function streamDraftStage(
     analysisJson: compactJson(compactAnalysis(analysis)),
     sourcesJson: compactJson(compactSourcesForGeneration(selected)),
     templateGuidance: templateGuidance?.trim() || null,
+    freeReader: isNoReaderAudience(brief.targetAudience),
   });
   logger.info("Stream draft prompt budget", {
     sources: selected.length,

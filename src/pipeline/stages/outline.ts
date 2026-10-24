@@ -11,6 +11,7 @@ import {
   pickSourcesForPrompt,
 } from "../../utils/prompt-budget";
 import { logger } from "../../services/logger";
+import { isNoReaderAudience } from "../../services/reader-constants";
 
 export async function outlineStage(
   brief: ContentBriefInput,
@@ -29,6 +30,7 @@ export async function outlineStage(
     templateMarkdown: templateMarkdown?.trim()
       ? compactTemplateForPrompt(templateMarkdown)
       : null,
+    freeReader: isNoReaderAudience(brief.targetAudience),
   });
   logger.info("Outline prompt budget", {
     sources: sourceIds.length,

@@ -6,6 +6,7 @@ export function buildGenerationPrompt(input: {
   analysisJson: string;
   sourcesJson: string;
   templateGuidance?: string | null;
+  freeReader?: boolean;
 }): string {
   const templateBlock = input.templateGuidance
     ? `\n${input.templateGuidance}\n`
@@ -29,7 +30,7 @@ Length & depth (required):
 - For technical topics, include at least one realistic code or config example when sources support it.
 
 Rules:
-- grounded in sources only; no invented stats/citations
+${input.freeReader ? "- do not write for one job title or persona; let the topic decide the angle, examples, and depth\n" : ""}- grounded in sources only; no invented stats/citations
 - when a source is marked as a primary/reference blog URL, treat it as the main grounding document and rewrite the ideas originally (do not copy prose)
 - clear structure; no filler/keyword stuffing or padded repetition
 - follow template headings/instructions when provided

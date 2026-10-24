@@ -25,6 +25,7 @@ import {
   pickSourcesForPrompt,
 } from "../../utils/prompt-budget";
 import { logger } from "../../services/logger";
+import { isNoReaderAudience } from "../../services/reader-constants";
 
 export async function generationStage(
   brief: ContentBriefInput,
@@ -48,6 +49,7 @@ export async function generationStage(
     analysisJson: compactJson(compactAnalysis(analysis)),
     sourcesJson,
     templateGuidance,
+    freeReader: isNoReaderAudience(brief.targetAudience),
   });
   logger.info("Generation prompt budget", {
     sources: selected.length,

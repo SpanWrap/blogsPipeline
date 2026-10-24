@@ -43,9 +43,11 @@ export async function runAutopilotCycle(
   const { activeReaderProfile, getReaderProfileSettings, readerSummary } = await import(
     "./reader-profiles"
   );
+  const { NO_READER_AUDIENCE, NO_READER_LABEL } = await import("./reader-constants");
   const readerSettings = await getReaderProfileSettings();
   const reader = activeReaderProfile(readerSettings);
-  const audience = readerSummary(reader);
+  const audience = reader ? readerSummary(reader) : NO_READER_AUDIENCE;
+  const readerLabel = reader?.label ?? NO_READER_LABEL;
 
   logger.info("Autopilot cycle started", {
     cycleId: cycle.id,
@@ -53,7 +55,7 @@ export async function runAutopilotCycle(
     postsPerPlatform: 1,
     dryRun,
     skipReview: false,
-    reader: reader.label,
+    reader: readerLabel,
   });
 
   try {
@@ -99,7 +101,7 @@ export async function runAutopilotCycle(
         dryRun,
         generateImages: cfg.generateImages,
         templateId: cfg.templateId,
-        readerLabel: reader.label,
+        readerLabel,
       });
       cycle.runsCreated.push(record);
       if (email) recordEmailDelivery(cycle, email);

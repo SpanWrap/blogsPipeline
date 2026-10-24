@@ -66,4 +66,21 @@ export type EmailNotifyConfig = {
   senderName?: string;
 };
 export type LogEntry = Record<string, any>;
-export type UserRecord = { username: string; createdAt?: string; lastLoginAt?: string };
+export type AccessLevel = "none" | "view" | "edit" | "full";
+export type ModuleId =
+  | "topics"
+  | "runs"
+  | "templates"
+  | "autopilot"
+  | "email"
+  | "llm"
+  | "people"
+  | "activity";
+export type ModulePermissions = Record<ModuleId, AccessLevel>;
+export type UserRecord = {
+  username: string;
+  createdAt?: string;
+  lastLoginAt?: string | null;
+  active?: boolean;
+  permissions?: ModulePermissions;
+};

@@ -28,6 +28,7 @@ import type {
   ProgressLine,
   RunRecord,
   StylePreset,
+  ModulePermissions,
   TemplateRecord,
   UserRecord,
 } from "./pipeline/types";
@@ -122,6 +123,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     hasKey: false,
   });
   const [users, setUsers] = useState<UserRecord[]>([]);
+  const [access, setAccess] = useState<ModulePermissions | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [autopilot, setAutopilot] = useState<AutopilotStatus | null>(null);
   const [autopilotCycles, setAutopilotCycles] = useState<AutopilotCycle[]>([]);
@@ -316,6 +318,15 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
       setUsers([]);
     }
   }, [callApi]);
+
+  const loadAccess = useCallback(async () => {
+    try {
+      const me = await fetch("/api/me", { credentials: "same-origin" }).then((r) => r.json());
+      if (me?.permissions) setAccess(me.permissions as ModulePermissions);
+    } catch {
+      /* keep the last known access */
+    }
+  }, []);
 
   const loadAutopilotStatus = useCallback(async () => {
     try {
@@ -565,9 +576,11 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
       return;
     }
     setDigest((prev) => (prev === null ? "loading" : prev));
-    void loadRuns().catch((e) =>
-      toast(e instanceof Error ? e.message : "Could not load runs", true),
-    );
+    void loadRuns().catch((e) => {
+      const message = e instanceof Error ? e.message : "Could not load runs";
+      if (/don't have access/i.test(message)) return;
+      toast(message, true);
+    });
     void loadDigest().catch(() => {
       setDigest((prev) => (prev === "loading" ? null : prev));
     });
@@ -601,6 +614,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         } catch {
           /* ignore */
         }
+        await loadAccess();
         await refreshPageData();
         persistWorkspaceBoot(name);
         setWorkspaceReady(true);
@@ -608,7 +622,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
         if (showLoader) setBooting(false);
       }
     },
-    [workspaceReady, refreshPageData],
+    [workspaceReady, refreshPageData, loadAccess],
   );
 
   useEffect(() => {
@@ -626,6 +640,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
               setAuthenticated(true);
               setUsername(name);
               setSetupRequired(false);
+              void loadAccess();
               void refreshPageData();
             }
             return;
@@ -647,6 +662,7 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
           .catch(() => ({}));
         if (cancelled) return;
         if (me.authenticated && me.username) {
+          if (me.permissions) setAccess(me.permissions as ModulePermissions);
           if (bootUserRef.current === me.username) {
             void refreshPageData();
             return;
@@ -670,11 +686,19 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
     session?.user?.username,
     session?.user?.name,
     sessionStatus,
+    loadAccess,
   ]);
 
   useEffect(() => {
     document.title = page === "settings" ? "Settings · Spanwrap Pipeline" : "Spanwrap Blog Pipeline";
   }, [page]);
+
+  useEffect(() => {
+    if (!access) return;
+    if (homeView === "topics" && access.topics === "none") setHomeView("runs");
+    if (homeView === "create" && access.runs !== "edit" && access.runs !== "full") setHomeView("runs");
+    if (homeView === "runs" && access.runs === "none" && access.topics !== "none") setHomeView("topics");
+  }, [access, homeView]);
 
   // When navigating home ↔ settings inside the persistent shell, load that page's data.
   useEffect(() => {
@@ -931,7 +955,14 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                       ),
                     },
                   ] as const
-                ).map(({ id, label, icon }) => (
+                )
+                  .filter(({ id }) => {
+                    if (!access) return true;
+                    if (id === "topics") return access.topics !== "none";
+                    if (id === "create") return access.runs === "edit" || access.runs === "full";
+                    return access.runs !== "none";
+                  })
+                  .map(({ id, label, icon }) => (
                   <button
                     key={id}
                     type="button"
@@ -1089,6 +1120,8 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
             llm={llm}
             templates={templates}
             users={users}
+            currentUsername={username}
+            access={access}
             logs={logs}
             autopilot={autopilot}
             autopilotCycles={autopilotCycles}
@@ -1185,17 +1218,42 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
               }>(`/api/templates/${encodeURIComponent(id)}`);
               return data;
             }}
-            onAddUser={async (u, password) => {
+            onAddUser={async (u, password, permissions) => {
               try {
                 await callApi("/api/users", {
                   method: "POST",
-                  body: JSON.stringify({ username: u, password }),
+                  body: JSON.stringify({ username: u, password, permissions }),
                 });
                 toast("Person added");
                 await loadUsers();
                 await loadLogs();
               } catch (e) {
                 toast(e instanceof Error ? e.message : "Add user failed", true);
+              }
+            }}
+            onUpdateUser={async (u, patch) => {
+              try {
+                await callApi(`/api/users/${encodeURIComponent(u)}`, {
+                  method: "PATCH",
+                  body: JSON.stringify(patch),
+                });
+                toast(patch.password && !patch.permissions ? "Password updated" : "Person updated");
+                await loadUsers();
+                await loadAccess();
+                await loadLogs();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Update failed", true);
+                throw e;
+              }
+            }}
+            onDeleteUser={async (u) => {
+              try {
+                await callApi(`/api/users/${encodeURIComponent(u)}`, { method: "DELETE" });
+                toast("Person deleted");
+                await loadUsers();
+                await loadLogs();
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Delete failed", true);
               }
             }}
             onRefreshLogs={() => loadLogs().catch((e) => toast(e.message, true))}

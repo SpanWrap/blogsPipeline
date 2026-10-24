@@ -2,6 +2,7 @@ import type { Collection, Document } from "mongodb";
 import { appConfig } from "../config";
 import { getDataFs } from "./data-fs";
 import { connectMongo } from "./mongo-connection";
+import { NO_READER_AUDIENCE, NO_READER_ID, NO_READER_LABEL } from "./reader-constants";
 
 export type ReaderProfile = {
   id: string;
@@ -118,9 +119,22 @@ function parseStored(raw: unknown): ReaderProfileSettings | null {
   const requested = String(obj.defaultProfileId ?? "");
   return {
     profiles: unique,
-    defaultProfileId: ids.has(requested) ? requested : unique[0]!.id,
+    defaultProfileId: requested === NO_READER_ID || ids.has(requested) ? requested : unique[0]!.id,
     updatedAt: typeof obj.updatedAt === "string" ? obj.updatedAt : new Date().toISOString(),
   };
+}
+
+function pickDefaultProfileId(
+  requested: unknown,
+  profiles: ReaderProfile[],
+  fallback: string,
+): string {
+  if (requested === NO_READER_ID) return NO_READER_ID;
+  if (typeof requested === "string" && profiles.some((profile) => profile.id === requested)) {
+    return requested;
+  }
+  if (fallback === NO_READER_ID || profiles.some((profile) => profile.id === fallback)) return fallback;
+  return profiles[0]?.id ?? NO_READER_ID;
 }
 
 async function readerSettingsCollection(): Promise<Collection<Document> | null> {
@@ -170,10 +184,12 @@ export async function getReaderProfileSettings(): Promise<ReaderProfileSettings>
   return cache;
 }
 
-export function activeReaderProfile(settings: ReaderProfileSettings): ReaderProfile {
+export function activeReaderProfile(settings: ReaderProfileSettings): ReaderProfile | null {
+  if (settings.defaultProfileId === NO_READER_ID) return null;
   return (
     settings.profiles.find((profile) => profile.id === settings.defaultProfileId) ??
-    settings.profiles[0]!
+    settings.profiles[0] ??
+    null
   );
 }
 
@@ -190,14 +206,22 @@ export async function saveReaderProfileSettings(input: {
         })
       : null;
   const next: ReaderProfileSettings = parsed
-    ? { ...parsed, updatedAt: new Date().toISOString() }
+    ? {
+        ...parsed,
+        defaultProfileId: pickDefaultProfileId(
+          input.defaultProfileId ?? parsed.defaultProfileId,
+          parsed.profiles,
+          parsed.defaultProfileId,
+        ),
+        updatedAt: new Date().toISOString(),
+      }
     : {
         ...current,
-        defaultProfileId:
-          typeof input.defaultProfileId === "string" &&
-          current.profiles.some((profile) => profile.id === input.defaultProfileId)
-            ? input.defaultProfileId
-            : current.defaultProfileId,
+        defaultProfileId: pickDefaultProfileId(
+          input.defaultProfileId,
+          current.profiles,
+          current.defaultProfileId,
+        ),
         updatedAt: new Date().toISOString(),
       };
   await writeStored(next);
@@ -214,8 +238,8 @@ export function publicReaderProfiles(settings: ReaderProfileSettings) {
       summary: readerSummary(profile),
     })),
     defaultProfileId: settings.defaultProfileId,
-    activeLabel: active.label,
-    activeSummary: readerSummary(active),
+    activeLabel: active?.label ?? NO_READER_LABEL,
+    activeSummary: active ? readerSummary(active) : NO_READER_AUDIENCE,
     updatedAt: settings.updatedAt,
   };
 }

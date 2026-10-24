@@ -209,6 +209,7 @@ export class AutopilotScheduler {
     const { activeReaderProfile, getReaderProfileSettings, readerSummary } = await import(
       "./reader-profiles"
     );
+    const { NO_READER_LABEL } = await import("./reader-constants");
     const readerSettings = await getReaderProfileSettings();
     const reader = activeReaderProfile(readerSettings);
     const onVercel = Boolean(process.env.VERCEL);
@@ -241,7 +242,7 @@ export class AutopilotScheduler {
         generateImages: cfg.generateImages,
         minQualityScore: cfg.minQualityScore,
         deduplicationDays: cfg.topicDeduplicationDays,
-        readerLabel: reader?.label ?? null,
+        readerLabel: reader?.label ?? NO_READER_LABEL,
         readerSummary: reader ? readerSummary(reader) : null,
       },
     };

@@ -12,7 +12,22 @@ import { ensureLlmSettings, getResolvedLlmConfig, publicLlmStatus, saveLlmSettin
 import { getAutopilotScheduler, maybeStartAutopilotScheduler } from "../services/scheduler";
 import { retryCycleEmail } from "../services/autopilot-email-retry";
 import { getAutopilotLogStore } from "../services/autopilot-log";
-import { createUser, ensureSeedUser, getUserStore, type SessionUser } from "../services/auth";
+import {
+  effectivePermissions,
+  hasAccess,
+  normalizePermissions,
+  requiredAccess,
+  ROLE_PRESETS,
+} from "../services/access";
+import {
+  createUser,
+  deleteUser,
+  ensureSeedUser,
+  getUserStore,
+  normalizeUsername,
+  updateUserAccount,
+  type SessionUser,
+} from "../services/auth";
 import { getActivityLogStore, recordActivity } from "../services/activity-log";
 import { enrichRunView } from "../services/enrichment";
 import { fetchAndExtract } from "../services/extraction";
@@ -145,10 +160,16 @@ export async function handleApiRequest(
       const username =
         nextSession?.user?.username || nextSession?.user?.name || null;
       const setupRequired = (await getUserStore().count()) === 0;
+      let permissions = null;
+      if (username) {
+        const user = await getUserStore().get(username);
+        if (user && user.active !== false) permissions = effectivePermissions(user);
+      }
       return jsonResponse(200, {
         authenticated: Boolean(username),
         username,
         setupRequired,
+        permissions,
       });
     }
 
@@ -204,6 +225,15 @@ async function handleAuthedApi(
     });
 
   try {
+    const actor = await getUserStore().get(session.username);
+    if (!actor || actor.active === false) {
+      return jsonResponse(401, { error: "Sign in required" });
+    }
+    const need = requiredAccess(method, pathname);
+    if (need && !hasAccess(actor, need.module, need.level)) {
+      return jsonResponse(403, { error: "You don't have access to that" });
+    }
+
     if (method === "GET" && pathname === "/api/logs") {
       const limitRaw = url.searchParams.get("limit");
       const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 80;
@@ -212,13 +242,25 @@ async function handleAuthedApi(
     }
 
     if (method === "GET" && pathname === "/api/users") {
+      if (!hasAccess(actor, "people", "view")) {
+        return jsonResponse(403, { error: "You don't have access to that" });
+      }
       const users = await getUserStore().list();
       return jsonResponse(200, { users });
     }
 
     if (method === "POST" && pathname === "/api/users") {
+      if (!hasAccess(actor, "people", "edit")) {
+        return jsonResponse(403, { error: "You don't have access to that" });
+      }
       const body = (await readJsonBody(request)) as Record<string, unknown>;
-      const created = await createUser(String(body.username ?? ""), String(body.password ?? ""));
+      const permissions = normalizePermissions(
+        body.permissions === undefined ? ROLE_PRESETS.editor.permissions : body.permissions,
+      );
+      if (permissions.people === "full" && !hasAccess(actor, "people", "full")) {
+        return jsonResponse(403, { error: "Only an administrator can create an administrator" });
+      }
+      const created = await createUser(String(body.username ?? ""), String(body.password ?? ""), permissions);
       await recordActivity({
         username: session.username,
         action: "user_created",
@@ -228,6 +270,52 @@ async function handleAuthedApi(
         details: { createdUsername: created.username },
       });
       return jsonResponse(201, created);
+    }
+
+    const userMatch = pathname.match(/^\/api\/users\/([^/]+)$/);
+    if (userMatch && (method === "PATCH" || method === "DELETE")) {
+      const target = normalizeUsername(decodeURIComponent(userMatch[1]!));
+      const isSelf = target === normalizeUsername(session.username);
+      const admin = hasAccess(actor, "people", "full");
+      if (method === "DELETE") {
+        if (!admin) return jsonResponse(403, { error: "You don't have access to that" });
+        await deleteUser(session.username, target);
+        await recordActivity({
+          username: session.username,
+          action: "user_deleted",
+          method,
+          path: pathname,
+          ip,
+          details: { createdUsername: target },
+        });
+        return jsonResponse(200, { deleted: true });
+      }
+      const body = (await readJsonBody(request)) as Record<string, unknown>;
+      const wantsPassword = typeof body.password === "string" && body.password.length > 0;
+      const wantsAccess = body.permissions !== undefined || typeof body.active === "boolean";
+      if (!wantsPassword && !wantsAccess) {
+        return jsonResponse(400, { error: "Nothing to update" });
+      }
+      if (wantsPassword && !isSelf && !admin) {
+        return jsonResponse(403, { error: "You can only change your own password" });
+      }
+      if (wantsAccess && !admin) {
+        return jsonResponse(403, { error: "You don't have access to that" });
+      }
+      const updated = await updateUserAccount(target, {
+        password: wantsPassword ? String(body.password) : undefined,
+        permissions: wantsAccess && body.permissions !== undefined ? body.permissions : undefined,
+        active: wantsAccess && typeof body.active === "boolean" ? body.active : undefined,
+      });
+      await recordActivity({
+        username: session.username,
+        action: wantsPassword && !wantsAccess ? "user_password_changed" : "user_updated",
+        method,
+        path: pathname,
+        ip,
+        details: { createdUsername: target },
+      });
+      return jsonResponse(200, updated);
     }
 
     if (method === "GET" && pathname === "/api/health") {

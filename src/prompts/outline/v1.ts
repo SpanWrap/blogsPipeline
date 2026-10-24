@@ -5,6 +5,7 @@ export function buildOutlinePrompt(input: {
   analysisJson: string;
   sourceIds: string[];
   templateMarkdown?: string | null;
+  freeReader?: boolean;
 }): string {
   const templateBlock = input.templateMarkdown?.trim()
     ? `\nTemplate (required sections/instructions):\n${input.templateMarkdown}\n- Follow template section order/headings.\n`
@@ -18,7 +19,7 @@ Analysis: ${input.analysisJson}
 Allowed source IDs: ${input.sourceIds.join(",") || "(none)"}
 ${templateBlock}
 Rules:
-- section.sourceIds only from allowed IDs
+${input.freeReader ? "- do not shape sections for one job title or persona; let the topic decide the angle\n" : ""}- section.sourceIds only from allowed IDs
 - unless a template dictates otherwise: include intro, 5–8 body sections, and conclusion
 - each body section needs a clear purpose and 4–6 concrete keyPoints (examples, comparisons, pitfalls, how-tos)
 - cover context/why-now, core concepts, practical application, trade-offs or alternatives, and takeaways

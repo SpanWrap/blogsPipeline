@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { NO_READER_AUDIENCE, NO_READER_ID } from "../../services/reader-constants";
 import { ReaderProfilesConfig, StylePreset, TemplateRecord } from "./types";
 
 type CreateRunViewProps = {
@@ -31,12 +32,21 @@ export function CreateRunView({
   const seededReader = useRef(false);
 
   useEffect(() => {
-    if (seededReader.current || !readerProfiles?.profiles.length) return;
+    if (seededReader.current || !readerProfiles) return;
     seededReader.current = true;
+    if (readerProfiles.defaultProfileId === NO_READER_ID) {
+      setReaderId(NO_READER_ID);
+      setAudience("");
+      return;
+    }
     const selected =
       readerProfiles.profiles.find((profile) => profile.id === readerProfiles.defaultProfileId) ||
       readerProfiles.profiles[0];
-    if (!selected) return;
+    if (!selected) {
+      setReaderId(NO_READER_ID);
+      setAudience("");
+      return;
+    }
     setReaderId(selected.id);
     setAudience(selected.summary || selected.audience);
   }, [readerProfiles]);
@@ -46,7 +56,10 @@ export function CreateRunView({
     const sourceUrl = String(fd.get("sourceUrl") || "").trim();
     return {
       topic: String(fd.get("topic") || "").trim(),
-      targetAudience: audience.trim() || String(fd.get("targetAudience") || "").trim(),
+      targetAudience:
+        readerId === NO_READER_ID
+          ? NO_READER_AUDIENCE
+          : audience.trim() || String(fd.get("targetAudience") || "").trim(),
       tone: String(fd.get("tone") || "").trim(),
       keywords: String(fd.get("keywords") || ""),
       templateId: String(fd.get("templateId") || "") || null,
@@ -92,10 +105,15 @@ export function CreateRunView({
             onChange={(e) => {
               const id = e.target.value;
               setReaderId(id);
+              if (id === NO_READER_ID) {
+                setAudience("");
+                return;
+              }
               const selected = readerProfiles?.profiles.find((profile) => profile.id === id);
               setAudience(selected?.summary || selected?.audience || "");
             }}
           >
+            <option value={NO_READER_ID}>No reader</option>
             <option value="">Custom</option>
             {(readerProfiles?.profiles || []).map((profile) => (
               <option key={profile.id} value={profile.id}>
@@ -109,7 +127,12 @@ export function CreateRunView({
           <input
             name="targetAudience"
             value={audience}
-            placeholder="Who should this article be for?"
+            placeholder={
+              readerId === NO_READER_ID
+                ? "Not tied to a reader"
+                : "Who should this article be for?"
+            }
+            disabled={readerId === NO_READER_ID}
             onChange={(e) => {
               setAudience(e.target.value);
               setReaderId("");

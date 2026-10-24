@@ -8,6 +8,7 @@ import {
 } from "../../providers/research";
 import { fetchAndExtract } from "../../services/extraction";
 import { logger } from "../../services/logger";
+import { isNoReaderAudience } from "../../services/reader-constants";
 import { createId } from "../../utils/idempotency";
 import { normalizeUrl, sourceNameFromUrl } from "../../utils/url";
 
@@ -88,7 +89,9 @@ export async function researchStage(
           const synthetic = [
             item.title ?? brief.topic,
             item.snippet ?? "",
-            `This source discusses ${brief.topic} for ${brief.targetAudience}.`,
+            isNoReaderAudience(brief.targetAudience)
+              ? `This source discusses ${brief.topic}.`
+              : `This source discusses ${brief.topic} for ${brief.targetAudience}.`,
             brief.keywords.map((k) => `Keyword context: ${k}.`).join(" "),
           ]
             .filter(Boolean)

@@ -11,6 +11,11 @@ import type { IncomingMessage } from "node:http";
 import type { Collection, Document } from "mongodb";
 import path from "node:path";
 import { appConfig } from "../config";
+import {
+  effectivePermissions,
+  normalizePermissions,
+  type ModulePermissions,
+} from "./access";
 import { getDataFs, LocalDataFs, type DataFs, usesS3Storage } from "./data-fs";
 import { connectMongo, formatMongoError } from "./mongo-connection";
 import { logger } from "./logger";
@@ -25,6 +30,18 @@ export type AuthUser = {
   passwordHash: string;
   createdAt: string;
   lastLoginAt?: string | null;
+  /** False disables sign-in. Missing means active. */
+  active?: boolean;
+  /** Missing means the account was created before roles and is an administrator. */
+  permissions?: ModulePermissions | null;
+};
+
+export type PublicUser = {
+  username: string;
+  createdAt: string;
+  lastLoginAt?: string | null;
+  active: boolean;
+  permissions: ModulePermissions;
 };
 
 export type SessionUser = { username: string };
@@ -32,9 +49,24 @@ export type SessionUser = { username: string };
 export type UserStore = {
   count(): Promise<number>;
   get(username: string): Promise<AuthUser | null>;
-  list(): Promise<Array<Omit<AuthUser, "passwordHash">>>;
+  list(): Promise<PublicUser[]>;
   upsert(user: AuthUser): Promise<AuthUser>;
+  delete(username: string): Promise<boolean>;
 };
+
+export function publicUser(user: AuthUser): PublicUser {
+  return {
+    username: user.username,
+    createdAt: user.createdAt,
+    lastLoginAt: user.lastLoginAt ?? null,
+    active: user.active !== false,
+    permissions: effectivePermissions(user),
+  };
+}
+
+function isActiveAdmin(user: { active?: boolean; permissions?: unknown }): boolean {
+  return user.active !== false && effectivePermissions(user).people === "full";
+}
 
 const MAX_LOGIN_ATTEMPTS = 8;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
@@ -243,7 +275,7 @@ export class FileUserStore implements UserStore {
   }
 
   async list() {
-    return (await this.readAll()).map(({ passwordHash: _h, ...rest }) => rest);
+    return (await this.readAll()).map(publicUser);
   }
 
   async upsert(user: AuthUser) {
@@ -251,6 +283,15 @@ export class FileUserStore implements UserStore {
     users.push(user);
     await this.writeAll(users);
     return user;
+  }
+
+  async delete(username: string) {
+    const id = normalizeUsername(username);
+    const users = await this.readAll();
+    const next = users.filter((u) => u.username !== id);
+    if (next.length === users.length) return false;
+    await this.writeAll(next);
+    return true;
   }
 }
 
@@ -285,16 +326,19 @@ export class MongoUserStore implements UserStore {
   async list() {
     const col = await this.col();
     const docs = await col.find({}).sort({ username: 1 }).toArray();
-    return docs.map((d) => {
-      const u = toAuthUser(d);
-      return { username: u.username, createdAt: u.createdAt, lastLoginAt: u.lastLoginAt };
-    });
+    return docs.map((d) => publicUser(toAuthUser(d)));
   }
 
   async upsert(user: AuthUser) {
     const col = await this.col();
     await col.replaceOne({ username: user.username }, user as unknown as Document, { upsert: true });
     return user;
+  }
+
+  async delete(username: string) {
+    const col = await this.col();
+    const result = await col.deleteOne({ username: normalizeUsername(username) });
+    return result.deletedCount > 0;
   }
 }
 
@@ -306,11 +350,17 @@ function isAuthUser(value: unknown): value is AuthUser {
 
 function toAuthUser(doc: Document): AuthUser {
   const rec = doc as unknown as Record<string, unknown>;
+  const permissions =
+    rec.permissions && typeof rec.permissions === "object"
+      ? normalizePermissions(rec.permissions)
+      : undefined;
   return {
     username: String(rec.username),
     passwordHash: String(rec.passwordHash),
     createdAt: typeof rec.createdAt === "string" ? rec.createdAt : new Date().toISOString(),
     lastLoginAt: typeof rec.lastLoginAt === "string" ? rec.lastLoginAt : null,
+    active: rec.active === false ? false : undefined,
+    permissions,
   };
 }
 
@@ -369,7 +419,11 @@ export async function ensureSeedUser(): Promise<void> {
   await seedPromise;
 }
 
-export async function createUser(usernameRaw: string, password: string): Promise<Omit<AuthUser, "passwordHash">> {
+export async function createUser(
+  usernameRaw: string,
+  password: string,
+  permissions?: unknown,
+): Promise<PublicUser> {
   const username = assertUsername(usernameRaw);
   const store = getUserStore();
   if (await store.get(username)) {
@@ -380,9 +434,57 @@ export async function createUser(usernameRaw: string, password: string): Promise
     passwordHash: await hashPassword(assertPassword(password)),
     createdAt: new Date().toISOString(),
     lastLoginAt: null,
+    active: true,
+    permissions: permissions === undefined ? undefined : normalizePermissions(permissions),
   };
   await store.upsert(user);
-  return { username: user.username, createdAt: user.createdAt, lastLoginAt: user.lastLoginAt };
+  return publicUser(user);
+}
+
+async function countActiveAdmins(store: UserStore): Promise<number> {
+  const users = await store.list();
+  return users.filter((user) => isActiveAdmin(user)).length;
+}
+
+export async function updateUserAccount(
+  targetRaw: string,
+  patch: { password?: string; permissions?: unknown; active?: boolean },
+): Promise<PublicUser> {
+  const target = assertUsername(targetRaw);
+  const store = getUserStore();
+  const existing = await store.get(target);
+  if (!existing) throw new Error("User not found");
+  const next: AuthUser = { ...existing };
+  if (typeof patch.password === "string" && patch.password.length > 0) {
+    next.passwordHash = await hashPassword(assertPassword(patch.password));
+  }
+  if (patch.permissions !== undefined) {
+    next.permissions = normalizePermissions(patch.permissions);
+  }
+  if (typeof patch.active === "boolean") next.active = patch.active;
+  if (isActiveAdmin(existing) && !isActiveAdmin(next)) {
+    if ((await countActiveAdmins(store)) <= 1) {
+      throw new Error("You can't remove the last administrator");
+    }
+  }
+  await store.upsert(next);
+  return publicUser(next);
+}
+
+export async function deleteUser(actorUsername: string, targetRaw: string): Promise<void> {
+  const target = assertUsername(targetRaw);
+  if (target === normalizeUsername(actorUsername)) {
+    throw new Error("You can't delete the account you're signed in with");
+  }
+  const store = getUserStore();
+  const existing = await store.get(target);
+  if (!existing) throw new Error("User not found");
+  if ((await store.count()) <= 1) throw new Error("You can't delete the last account");
+  if (isActiveAdmin(existing) && (await countActiveAdmins(store)) <= 1) {
+    throw new Error("You can't delete the last administrator");
+  }
+  const removed = await store.delete(target);
+  if (!removed) throw new Error("User not found");
 }
 
 export async function authenticateUser(usernameRaw: string, password: string): Promise<AuthUser> {
@@ -392,6 +494,9 @@ export async function authenticateUser(usernameRaw: string, password: string): P
   const ok = user ? await verifyPassword(password, user.passwordHash) : false;
   if (!user || !ok) {
     throw new Error("Invalid username or password");
+  }
+  if (user.active === false) {
+    throw new Error("This account is disabled");
   }
   const next = { ...user, lastLoginAt: new Date().toISOString() };
   await store.upsert(next);

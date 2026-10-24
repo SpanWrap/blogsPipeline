@@ -1,5 +1,6 @@
 import type { PublishTarget, TopicRecommendation, ContentBriefInput } from "../models";
 import type { LLMProvider } from "../providers/llm";
+import { NO_READER_AUDIENCE } from "./reader-constants";
 import { discoverTopicRecommendations } from "./topic-discovery";
 import { logger } from "./logger";
 
@@ -142,9 +143,10 @@ function briefFor(
 ): ContentBriefInput {
   const strategy = PLATFORM_STRATEGY[platform];
   const forSpanwrap = platform === "spanwrap";
+  const freeReader = audience === NO_READER_AUDIENCE;
   return {
     topic,
-    targetAudience: audience?.trim() || strategy.audience,
+    targetAudience: freeReader ? NO_READER_AUDIENCE : audience?.trim() || strategy.audience,
     tone: forSpanwrap ? "technical but easy to understand" : strategy.tone,
     contentType: forSpanwrap ? "technical guide" : strategy.contentType,
     keywords,
@@ -164,12 +166,19 @@ async function llmSelectTopics(
     .map((c, i) => `${i + 1}. [heat=${c.heatScore}] ${c.topic} — ${c.whyItMatters}`)
     .join("\n");
 
+  const freeReader = audience === NO_READER_AUDIENCE;
   const platformDescriptions = platforms
     .map((p) => {
       const s = PLATFORM_STRATEGY[p];
-      return `- ${p}: ${s.style} (audience: ${s.audience})`;
+      return freeReader ? `- ${p}: ${s.style}` : `- ${p}: ${s.style} (audience: ${s.audience})`;
     })
     .join("\n");
+
+  const readerBlock = freeReader
+    ? `\n## Reader\nNo specific reader. Do not tailor the topic, title, or angle to one job title or persona. Let the topic decide the framing. Still write a technical, practical article, not a short social post.`
+    : audience?.trim()
+      ? `\n## Reader\n${audience.trim()}\nWrite a technical, practical article for this reader. Do not write a short social post.`
+      : "";
 
   const prompt = `You are a tech blog content strategist maximizing views and engagement.
 
@@ -178,11 +187,7 @@ ${candidateList}
 
 ## Target Platforms (${postsPerPlatform} unique posts each)
 ${platformDescriptions}
-${
-  audience?.trim()
-    ? `\n## Reader\n${audience.trim()}\nWrite a technical, practical article for this reader. Do not write a short social post.`
-    : ""
-}
+${readerBlock}
 
 ## Instructions
 Select exactly ${totalNeeded} topics from the list above. Rules:
@@ -191,7 +196,7 @@ Select exactly ${totalNeeded} topics from the list above. Rules:
 3. Each platform needs exactly ${postsPerPlatform} topic(s) — assign each topic to the best-fit platform
 4. NO duplicate topics — each selected topic must be unique
 5. Favor topics with higher heat scores, but also consider "blog-worthiness" (can it become an engaging long-form post?)
-6. For each pick, craft a catchy, click-worthy title angle tailored to that platform's audience
+6. For each pick, craft a catchy, click-worthy title angle${freeReader ? " from the topic itself, not for one reader persona" : " tailored to that platform's audience"}
 7. Suggest 3-5 SEO keywords for each
 
 Respond ONLY with a JSON array (no markdown code fences):

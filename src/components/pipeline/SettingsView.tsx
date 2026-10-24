@@ -16,6 +16,15 @@ import {
   TemplateRecord,
   UserRecord,
 } from "./types";
+import {
+  ACCESS_LEVELS,
+  APP_MODULES,
+  ROLE_PRESETS,
+  roleLabel,
+  type ModuleId,
+  type ModulePermissions,
+} from "../../services/access";
+import { NO_READER_ID } from "../../services/reader-constants";
 import { activityLabel, formatWhen } from "./utils";
 import { SidebarToggleIcon } from "./SidebarToggleIcon";
 
@@ -30,6 +39,94 @@ const SETTINGS_NAV: { id: SettingsSection; label: string }[] = [
   { id: "people", label: "People" },
   { id: "activity", label: "Activity" },
 ];
+
+const SECTION_MODULE: Partial<Record<SettingsSection, ModuleId>> = {
+  llm: "llm",
+  templates: "templates",
+  autopilot: "autopilot",
+  email: "email",
+  activity: "activity",
+};
+
+function presetIdFor(perms: ModulePermissions): string {
+  for (const [id, preset] of Object.entries(ROLE_PRESETS)) {
+    const same = APP_MODULES.every((mod) => preset.permissions[mod.id] === perms[mod.id]);
+    if (same) return id;
+  }
+  return "custom";
+}
+
+function PermissionFields({
+  value,
+  onChange,
+  disabled,
+  lockPeopleAdmin,
+}: {
+  value: ModulePermissions;
+  onChange: (next: ModulePermissions) => void;
+  disabled?: boolean;
+  lockPeopleAdmin?: boolean;
+}) {
+  const preset = presetIdFor(value);
+  return (
+    <div className="perm-fields">
+      <label>
+        Role
+        <select
+          value={preset}
+          disabled={disabled}
+          onChange={(e) => {
+            const id = e.target.value;
+            if (lockPeopleAdmin && id === "admin") return;
+            if (id !== "custom" && ROLE_PRESETS[id]) onChange(ROLE_PRESETS[id].permissions);
+          }}
+        >
+          {Object.entries(ROLE_PRESETS).map(([id, preset]) => (
+            <option key={id} value={id} disabled={lockPeopleAdmin && id === "admin"}>
+              {preset.label}
+            </option>
+          ))}
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+      <p className="hint">
+        None hides the module. View is read-only. Edit can create and change. Full can also delete,
+        publish, and manage people. Everyone can change their own password.
+      </p>
+      <div className="perm-grid">
+        {APP_MODULES.map((mod) => (
+          <label key={mod.id}>
+            <span>{mod.label}</span>
+            <select
+              aria-label={`${mod.label} access`}
+              value={value[mod.id]}
+              disabled={disabled}
+              onChange={(e) =>
+                onChange({ ...value, [mod.id]: e.target.value as ModulePermissions[ModuleId] })
+              }
+            >
+              {ACCESS_LEVELS.map((level) => (
+                <option
+                  key={level}
+                  value={level}
+                  disabled={lockPeopleAdmin && mod.id === "people" && level === "full"}
+                >
+                  {level === "none"
+                    ? "None"
+                    : level === "view"
+                      ? "View"
+                      : level === "edit"
+                        ? "Edit"
+                        : "Full"}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 type SettingsViewProps = {
   health: HealthData | null;
@@ -58,7 +155,14 @@ type SettingsViewProps = {
     markdown: string;
     filename?: string | null;
   }>;
-  onAddUser: (username: string, password: string) => void;
+  currentUsername: string;
+  access: ModulePermissions | null;
+  onAddUser: (username: string, password: string, permissions: ModulePermissions) => void;
+  onUpdateUser: (
+    username: string,
+    patch: { password?: string; permissions?: ModulePermissions; active?: boolean },
+  ) => Promise<void>;
+  onDeleteUser: (username: string) => Promise<void>;
   onRefreshLogs: () => void;
   onToggleAutopilot: () => void;
   onTriggerAutopilot: () => void;
@@ -220,7 +324,11 @@ export function SettingsView({
   onUpdateTemplate,
   onDeleteTemplate,
   onFetchTemplate,
+  currentUsername,
+  access,
   onAddUser,
+  onUpdateUser,
+  onDeleteUser,
   onRefreshLogs,
   onToggleAutopilot,
   onTriggerAutopilot,
@@ -243,6 +351,14 @@ export function SettingsView({
   const [templateMarkdown, setTemplateMarkdown] = useState("");
   const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [section, setSection] = useState<SettingsSection>("status");
+  const [createPerms, setCreatePerms] = useState<ModulePermissions>(ROLE_PRESETS.editor.permissions);
+  const [personEdit, setPersonEdit] = useState<UserRecord | null>(null);
+  const [editPassword, setEditPassword] = useState("");
+  const [editPerms, setEditPerms] = useState<ModulePermissions>(ROLE_PRESETS.editor.permissions);
+  const [editActive, setEditActive] = useState(true);
+  const rank = { none: 0, view: 1, edit: 2, full: 3 } as const;
+  const canPeople = (level: "view" | "edit" | "full") =>
+    !access || rank[access.people] >= rank[level];
   const [retryingCycleId, setRetryingCycleId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [preview, setPreview] = useState<{
@@ -262,6 +378,11 @@ export function SettingsView({
   const [emailRecipients, setEmailRecipients] = useState("");
   const [readerDraft, setReaderDraft] = useState<ReaderProfile[]>([]);
   const [defaultReaderId, setDefaultReaderId] = useState("");
+
+  useEffect(() => {
+    const mod = SECTION_MODULE[section];
+    if (mod && access && access[mod] === "none") setSection("status");
+  }, [section, access]);
 
   useEffect(() => {
     setReaderDraft(readerProfiles?.profiles?.map((profile) => ({ ...profile })) || []);
@@ -452,7 +573,11 @@ export function SettingsView({
           </button>
         </div>
         <nav id="settings-sidebar-nav" className="home-nav" aria-label="Settings sections">
-          {SETTINGS_NAV.map(({ id, label }) => (
+          {SETTINGS_NAV.filter(({ id }) => {
+            const mod = SECTION_MODULE[id];
+            if (!mod || !access) return true;
+            return access[mod] !== "none";
+          }).map(({ id, label }) => (
             <button
               key={id}
               type="button"
@@ -469,7 +594,9 @@ export function SettingsView({
       </aside>
 
       <main className="home-main">
-        <div className="settings-main">
+        <div
+          className={`settings-main${section === "autopilot" || section === "people" ? " settings-main-wide" : ""}`}
+        >
           {section === "status" ? (
             <section className="panel">
               <h2>Status</h2>
@@ -719,7 +846,7 @@ export function SettingsView({
                   </div>
                   <div>
                     <dt>Reader</dt>
-                    <dd>{cfg.readerLabel || readerProfiles?.activeLabel || "—"}</dd>
+                    <dd>{readerProfiles?.activeLabel || cfg.readerLabel || "—"}</dd>
                   </div>
                   <div>
                     <dt>Min quality</dt>
@@ -753,8 +880,8 @@ export function SettingsView({
                   </button>
                 </div>
                 <p className="hint">
-                  The daily draft uses the selected reader. Tone stays technical; this only changes
-                  who the article is for.
+                  Choose a reader to aim the daily draft at that person. No reader leaves the angle
+                  open, so the draft is not written for one job or persona.
                 </p>
                 <label>
                   Default reader
@@ -762,6 +889,7 @@ export function SettingsView({
                     value={defaultReaderId}
                     onChange={(e) => setDefaultReaderId(e.target.value)}
                   >
+                    <option value={NO_READER_ID}>No reader</option>
                     {readerDraft.map((profile) => (
                       <option key={profile.id} value={profile.id}>
                         {profile.label}
@@ -1012,53 +1140,149 @@ export function SettingsView({
                 <h2>People</h2>
               </div>
               <p className="hint">
-                Add another person who can sign in to this UI. Passwords are stored hashed on the
-                server.
+                Passwords are stored hashed. An administrator can change anyone&apos;s password and
+                access. You can always change your own password.
               </p>
-              <ul className="activity-list">
-                {!users.length ? (
-                  <li className="empty">No people yet.</li>
-                ) : (
-                  users.map((u) => (
-                    <li key={u.username}>
-                      <strong>{u.username}</strong>
-                      <div className="meta">
-                        added {formatWhen(u.createdAt)}
-                        {u.lastLoginAt ? ` · last sign-in ${formatWhen(u.lastLoginAt)}` : ""}
-                      </div>
-                    </li>
-                  ))
-                )}
-              </ul>
-              <form
-                className="form-grid"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const fd = new FormData(e.currentTarget);
-                  onAddUser(String(fd.get("username") || ""), String(fd.get("password") || ""));
-                  e.currentTarget.reset();
-                }}
-              >
-                <label>
-                  Username
-                  <input name="username" autoComplete="off" required minLength={2} />
-                </label>
-                <label>
-                  Password
-                  <input
-                    name="password"
-                    type="password"
-                    autoComplete="new-password"
-                    required
-                    minLength={8}
-                  />
-                </label>
-                <div className="form-actions">
-                  <button type="submit" className="btn primary">
-                    Add person
-                  </button>
+              {canPeople("view") ? (
+                <div className="table-scroll">
+                  <table className="people-table">
+                    <thead>
+                      <tr>
+                        <th>Username</th>
+                        <th>Role</th>
+                        <th>Status</th>
+                        <th>Last sign-in</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {!users.length ? (
+                        <tr>
+                          <td colSpan={5} className="empty">
+                            No people yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        users.map((u) => {
+                          const isSelf = u.username === currentUsername;
+                          const perms = u.permissions;
+                          return (
+                            <tr key={u.username}>
+                              <td>
+                                <strong>{u.username}</strong>
+                                {isSelf ? <span className="meta"> · you</span> : null}
+                              </td>
+                              <td>{perms ? roleLabel(perms) : "Administrator"}</td>
+                              <td>{u.active === false ? "Inactive" : "Active"}</td>
+                              <td>{u.lastLoginAt ? formatWhen(u.lastLoginAt) : "—"}</td>
+                              <td className="people-actions">
+                                {isSelf || canPeople("full") ? (
+                                  <button
+                                    type="button"
+                                    className="btn ghost"
+                                    onClick={() => {
+                                      setPersonEdit(u);
+                                      setEditPassword("");
+                                      setEditPerms(perms || ROLE_PRESETS.admin.permissions);
+                                      setEditActive(u.active !== false);
+                                    }}
+                                  >
+                                    Edit
+                                  </button>
+                                ) : null}
+                                {canPeople("full") && !isSelf ? (
+                                  <button
+                                    type="button"
+                                    className="btn ghost"
+                                    onClick={() => {
+                                      if (!confirm(`Delete ${u.username}? They will no longer be able to sign in.`)) {
+                                        return;
+                                      }
+                                      void onDeleteUser(u.username);
+                                    }}
+                                  >
+                                    Delete
+                                  </button>
+                                ) : null}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
                 </div>
-              </form>
+              ) : (
+                <form
+                  className="form-grid"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const fd = new FormData(e.currentTarget);
+                    const password = String(fd.get("password") || "");
+                    if (!currentUsername) return;
+                    void onUpdateUser(currentUsername, { password });
+                    e.currentTarget.reset();
+                  }}
+                >
+                  <label>
+                    New password
+                    <input
+                      name="password"
+                      type="password"
+                      autoComplete="new-password"
+                      required
+                      minLength={8}
+                    />
+                  </label>
+                  <div className="form-actions">
+                    <button type="submit" className="btn primary" disabled={busy}>
+                      Change your password
+                    </button>
+                  </div>
+                </form>
+              )}
+              {canPeople("edit") ? (
+                <form
+                  className="form-grid people-create"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const fd = new FormData(e.currentTarget);
+                    onAddUser(
+                      String(fd.get("username") || ""),
+                      String(fd.get("password") || ""),
+                      createPerms,
+                    );
+                    e.currentTarget.reset();
+                    setCreatePerms(ROLE_PRESETS.editor.permissions);
+                  }}
+                >
+                  <h3>Add person</h3>
+                  <label>
+                    Username
+                    <input name="username" autoComplete="off" required minLength={2} />
+                  </label>
+                  <label>
+                    Password
+                    <input
+                      name="password"
+                      type="password"
+                      autoComplete="new-password"
+                      required
+                      minLength={8}
+                    />
+                  </label>
+                  <PermissionFields
+                    value={createPerms}
+                    onChange={setCreatePerms}
+                    lockPeopleAdmin={!canPeople("full")}
+                  />
+                  <div className="form-actions">
+                    <button type="submit" className="btn primary" disabled={busy}>
+                      Add person
+                    </button>
+                  </div>
+                </form>
+              ) : null}
             </section>
           ) : null}
 
@@ -1103,6 +1327,84 @@ export function SettingsView({
           ) : null}
         </div>
       </main>
+
+      {personEdit ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPersonEdit(null);
+          }}
+        >
+          <div className="modal-dialog modal-narrow" role="dialog" aria-modal="true" aria-labelledby="edit-person-title">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const isSelf = personEdit.username === currentUsername;
+                const patch: {
+                  password?: string;
+                  permissions?: ModulePermissions;
+                  active?: boolean;
+                } = {};
+                if (editPassword) patch.password = editPassword;
+                if (canPeople("full")) {
+                  patch.permissions = editPerms;
+                  if (!isSelf) patch.active = editActive;
+                }
+                void onUpdateUser(personEdit.username, patch)
+                  .then(() => setPersonEdit(null))
+                  .catch(() => {});
+              }}
+            >
+              <div className="modal-head">
+                <div className="modal-head-copy">
+                  <h2 id="edit-person-title">Edit {personEdit.username}</h2>
+                </div>
+                <button type="button" className="btn ghost" onClick={() => setPersonEdit(null)}>
+                  Close
+                </button>
+              </div>
+              <div className="modal-body">
+                <label>
+                  New password
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={8}
+                    value={editPassword}
+                    placeholder="Leave blank to keep the current password"
+                    onChange={(e) => setEditPassword(e.target.value)}
+                  />
+                </label>
+                {canPeople("full") ? (
+                  <>
+                    <PermissionFields value={editPerms} onChange={setEditPerms} />
+                    {personEdit.username !== currentUsername ? (
+                      <label className="check-row">
+                        <input
+                          type="checkbox"
+                          checked={editActive}
+                          onChange={(e) => setEditActive(e.target.checked)}
+                        />
+                        Active
+                      </label>
+                    ) : (
+                      <p className="hint">You can&apos;t deactivate the account you&apos;re signed in with.</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="hint">You can change your own password. An administrator sets access.</p>
+                )}
+                <div className="form-actions">
+                  <button type="submit" className="btn primary" disabled={busy || (!editPassword && !canPeople("full"))}>
+                    Save changes
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       {preview ? (
         <div
