@@ -1,6 +1,7 @@
 import { appConfig } from "../config";
 import { logger } from "./logger";
 import { runAutopilotCycle, type AutopilotCycleOptions } from "./autopilot";
+import { retryQueuedAutopilotEmails } from "./autopilot-email-retry";
 import { getAutopilotLogStore, type AutopilotCycleLog } from "./autopilot-log";
 
 // ── Lightweight cron expression parser ──
@@ -107,6 +108,8 @@ export type AutopilotSchedulerStatus = {
 
 export class AutopilotScheduler {
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private emailTimer: ReturnType<typeof setInterval> | null = null;
+  private emailDrainBusy = false;
   private cronFields: CronFields | null = null;
   private nextRunTime: Date | null = null;
   private cycleBusy = false;
@@ -139,6 +142,7 @@ export class AutopilotScheduler {
 
     this._enabled = true;
     this.scheduleNext();
+    this.scheduleEmailRetries();
 
     logger.info("Autopilot scheduler started", {
       cron: cronExpr,
@@ -152,9 +156,41 @@ export class AutopilotScheduler {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    if (this.emailTimer) {
+      clearInterval(this.emailTimer);
+      this.emailTimer = null;
+    }
     this._enabled = false;
     this.nextRunTime = null;
     logger.info("Autopilot scheduler stopped");
+  }
+
+  private scheduleEmailRetries(): void {
+    if (this.emailTimer) return;
+    void this.drainEmailQueue(true);
+    this.emailTimer = setInterval(() => {
+      void this.drainEmailQueue();
+    }, 60_000);
+    if (typeof this.emailTimer === "object" && "unref" in this.emailTimer) {
+      this.emailTimer.unref();
+    }
+  }
+
+  private async drainEmailQueue(force = false): Promise<void> {
+    if (this.emailDrainBusy) return;
+    this.emailDrainBusy = true;
+    try {
+      const retried = await retryQueuedAutopilotEmails({ force });
+      if (retried > 0) {
+        logger.info("Autopilot email queue drained", { retried });
+      }
+    } catch (error) {
+      logger.warn("Autopilot email queue drain failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      this.emailDrainBusy = false;
+    }
   }
 
   /** Manually trigger an autopilot cycle right now. */
@@ -264,12 +300,18 @@ export class AutopilotScheduler {
 }
 
 // ── Singleton ──
+// Next bundles instrumentation and the API route separately. A module-local
+// instance makes Settings read a scheduler that never started.
 
-let defaultScheduler: AutopilotScheduler | null = null;
+const schedulerGlobal = globalThis as typeof globalThis & {
+  __pipelineAutopilotScheduler?: AutopilotScheduler;
+};
 
 export function getAutopilotScheduler(): AutopilotScheduler {
-  if (!defaultScheduler) defaultScheduler = new AutopilotScheduler();
-  return defaultScheduler;
+  if (!schedulerGlobal.__pipelineAutopilotScheduler) {
+    schedulerGlobal.__pipelineAutopilotScheduler = new AutopilotScheduler();
+  }
+  return schedulerGlobal.__pipelineAutopilotScheduler;
 }
 
 /**

@@ -46,25 +46,29 @@ and restrict the Lightsail firewall after HTTPS is configured.
 
 ## 2. Add GitHub configuration
 
-In the repository's **Settings → Environments → production** (or repository
-Actions secrets), keep these secrets:
+Repository: [SpanWrap/blogsPipeline](https://github.com/SpanWrap/blogsPipeline).
 
-- `LIGHTSAIL_HOST`: the instance's static IP or hostname.
-- `LIGHTSAIL_USER`: the SSH user (for example `jai` or `ubuntu`).
-- `LIGHTSAIL_SSH_PRIVATE_KEY`: the full contents of the Lightsail `.pem` key.
-- `LIGHTSAIL_KNOWN_HOSTS`: the verified SSH host-key line. Generate a candidate
-  with `ssh-keyscan -H <static-ip>` and compare its fingerprint with the host
-  before saving it.
-- `LIGHTSAIL_ENV_FILE`: the complete production `.env` contents (secret).
-  This is optional after the first deploy; when omitted, the existing server
-  `.env` remains unchanged.
+Create the environment **production**
+([environments](https://github.com/SpanWrap/blogsPipeline/settings/environments)),
+then add these secrets on that environment
+([environment secrets](https://github.com/SpanWrap/blogsPipeline/settings/environments)):
+
+- `LIGHTSAIL_HOST`: `13.234.23.23`
+- `LIGHTSAIL_USER`: `ubuntu`
+- `LIGHTSAIL_SSH_PRIVATE_KEY`: the full Lightsail `.pem` file, including the
+  BEGIN and END lines. Do not commit that file.
+- `LIGHTSAIL_KNOWN_HOSTS`: the ed25519 host key for `13.234.23.23`.
+  Fingerprint `SHA256:ZUycJjZ9Gc9PPprwti1tcXoivOW2s7tDTtfA9xktvtc`.
+- `LIGHTSAIL_ENV_FILE`: the complete production `.env`. Optional after the
+  first deploy; when omitted, the server `.env` is left as it is.
 
 Do **not** put `.env` contents in an Actions variable. Put them only in the
 `LIGHTSAIL_ENV_FILE` secret.
 
-Optionally add the Actions variable `LIGHTSAIL_DEPLOY_PATH`. It must be a
-single absolute path such as `/home/jai/pipeline`. Leave it unset to use
-`/home/<LIGHTSAIL_USER>/pipeline`.
+Leave the variable `LIGHTSAIL_DEPLOY_PATH` unset, or set it to exactly
+`/home/ubuntu/pipeline`. Anything with `=` or more than one line is rejected.
+The app already runs at that path. This workflow does not change nginx or the
+other site on the instance.
 
 At minimum, put this in the `LIGHTSAIL_ENV_FILE` secret (not in
 `LIGHTSAIL_DEPLOY_PATH`):
@@ -73,8 +77,7 @@ At minimum, put this in the `LIGHTSAIL_ENV_FILE` secret (not in
 NODE_ENV=production
 PORT=3000
 AUTH_SECRET=replace-with-openssl-rand-hex-32
-AUTH_URL=http://YOUR_STATIC_IP:3000
-PIPELINE_PUBLIC_URL=http://YOUR_STATIC_IP:3000
+PIPELINE_PUBLIC_URL=https://pipeline.spanwrap.com
 ```
 
 Generate a real `AUTH_SECRET` with `openssl rand -hex 32`. Add the storage and
@@ -83,8 +86,10 @@ provider credentials described in `.env.example`. Runtime data lives in
 
 ## 3. Deploy
 
-Push to `main`, or run **Deploy to AWS Lightsail** from the GitHub Actions tab.
-The app will be available at `http://<static-ip>:3000`.
+Push to `main`, or run **Deploy to AWS Lightsail** from the Actions tab.
+Nginx on the instance already serves https://pipeline.spanwrap.com and proxies
+to the app on port 3000. The workflow only replaces `/home/ubuntu/pipeline`
+and reloads PM2.
 
 Useful server commands:
 

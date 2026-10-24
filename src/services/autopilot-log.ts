@@ -19,6 +19,21 @@ export interface AutopilotRunRecord {
 /**
  * Persistent log entry for one autopilot cycle execution.
  */
+export type AutopilotEmailStatus = "pending" | "sent" | "failed" | "skipped";
+
+/** Delivery record for the draft email of one cycle. Stored with the cycle. */
+export interface AutopilotEmailDelivery {
+  status: AutopilotEmailStatus;
+  error?: string;
+  messageId?: string;
+  runId?: string;
+  attempts: number;
+  lastAttemptAt?: string;
+  /** Failed sends stay queued until a retry succeeds or the attempt limit is reached. */
+  queued: boolean;
+  nextRetryAt?: string;
+}
+
 export interface AutopilotCycleLog {
   id: string;
   startedAt: string;
@@ -30,11 +45,13 @@ export interface AutopilotCycleLog {
   runsPublished: number;
   runsNeedingReview: number;
   errors: string[];
+  email?: AutopilotEmailDelivery;
 }
 
 export interface AutopilotLogStore {
   create(log: AutopilotCycleLog): Promise<AutopilotCycleLog>;
   update(log: AutopilotCycleLog): Promise<AutopilotCycleLog>;
+  get(id: string): Promise<AutopilotCycleLog | null>;
   list(limit?: number): Promise<AutopilotCycleLog[]>;
   latest(): Promise<AutopilotCycleLog | null>;
   close?(): Promise<void>;
@@ -56,6 +73,12 @@ export class FileAutopilotLogStore implements AutopilotLogStore {
 
   async update(log: AutopilotCycleLog): Promise<AutopilotCycleLog> {
     return this.create(log);
+  }
+
+  async get(id: string): Promise<AutopilotCycleLog | null> {
+    const raw = await this.fs.readText(this.key(id));
+    if (!raw) return null;
+    return JSON.parse(raw) as AutopilotCycleLog;
   }
 
   async list(limit = 20): Promise<AutopilotCycleLog[]> {
@@ -131,6 +154,14 @@ export class MongoAutopilotLogStore implements AutopilotLogStore {
       { upsert: true },
     );
     return log;
+  }
+
+  async get(id: string): Promise<AutopilotCycleLog | null> {
+    const col = await this.ensureConnected();
+    const doc = await col.findOne({ _id: id as unknown as Document });
+    if (!doc) return null;
+    const { _id, ...rest } = doc as unknown as Record<string, unknown>;
+    return { ...rest, id: String(_id) } as AutopilotCycleLog;
   }
 
   async list(limit = 20): Promise<AutopilotCycleLog[]> {

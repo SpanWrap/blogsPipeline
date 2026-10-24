@@ -10,6 +10,7 @@ import { discoverTechDigest } from "../services/tech-digest";
 import { getTopicStore } from "../services/topic-store";
 import { ensureLlmSettings, getResolvedLlmConfig, publicLlmStatus, saveLlmSettings } from "../services/llm-settings";
 import { getAutopilotScheduler, maybeStartAutopilotScheduler } from "../services/scheduler";
+import { retryCycleEmail } from "../services/autopilot-email-retry";
 import { getAutopilotLogStore } from "../services/autopilot-log";
 import { createUser, ensureSeedUser, getUserStore, type SessionUser } from "../services/auth";
 import { getActivityLogStore, recordActivity } from "../services/activity-log";
@@ -70,12 +71,14 @@ async function readJsonBody(request: Request): Promise<unknown> {
   return JSON.parse(text || "{}");
 }
 
-let bootStarted = false;
+const bootFlag = globalThis as typeof globalThis & { __pipelineBoot?: boolean };
 
-/** Call once on first API request (idempotent). Starts autopilot scheduler when enabled. */
+/** Call once per process. Starts the autopilot scheduler when enabled. */
 export function ensureBoot(): void {
-  if (bootStarted) return;
-  bootStarted = true;
+  // Instrumentation and the API route are separate bundles, so a module-local
+  // flag would start two schedulers.
+  if (bootFlag.__pipelineBoot) return;
+  bootFlag.__pipelineBoot = true;
   maybeStartAutopilotScheduler();
 
   // Local restarts leave runs stuck mid-stage. Force age skip, but never steal an active lease.
@@ -291,6 +294,24 @@ async function handleAuthedApi(
       }
       await log(body.enabled ? "autopilot_enabled" : "autopilot_disabled", {});
       return jsonResponse(200, await scheduler.status());
+    }
+
+    const retryEmailMatch = pathname.match(/^\/api\/autopilot\/cycles\/([^/]+)\/retry-email$/);
+    if (method === "POST" && retryEmailMatch) {
+      const cycleId = decodeURIComponent(retryEmailMatch[1] ?? "");
+      try {
+        const cycle = await retryCycleEmail(cycleId);
+        await log("autopilot_email_retried", {
+          cycleId,
+          emailStatus: cycle.email?.status ?? null,
+          queued: cycle.email?.queued ?? false,
+        });
+        return jsonResponse(200, cycle);
+      } catch (error) {
+        return jsonResponse(400, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
 
     if (method === "GET" && pathname === "/api/autopilot/history") {

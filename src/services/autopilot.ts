@@ -7,8 +7,10 @@ import {
   getAutopilotLogStore,
   newCycleLog,
   type AutopilotCycleLog,
+  type AutopilotEmailDelivery,
   type AutopilotRunRecord,
 } from "./autopilot-log";
+import { emailDeliveryFromResult, recordEmailDelivery } from "./autopilot-email-retry";
 import { logger } from "./logger";
 
 export type AutopilotCycleOptions = {
@@ -93,13 +95,14 @@ export async function runAutopilotCycle(
 
     // 3. Create and process pipeline runs for each pick
     for (const pick of picks) {
-      const record = await processAutopilotPick(orch, pick, cycle.id, {
+      const { record, email } = await processAutopilotPick(orch, pick, cycle.id, {
         dryRun,
         generateImages: cfg.generateImages,
         templateId: cfg.templateId,
         readerLabel: reader.label,
       });
       cycle.runsCreated.push(record);
+      if (email) recordEmailDelivery(cycle, email);
 
       if (record.status === "PUBLISHED") {
         cycle.runsPublished++;
@@ -148,7 +151,7 @@ async function processAutopilotPick(
     templateId?: string;
     readerLabel: string;
   },
-): Promise<AutopilotRunRecord> {
+): Promise<{ record: AutopilotRunRecord; email?: AutopilotEmailDelivery }> {
   const record: AutopilotRunRecord = {
     runId: "",
     topic: pick.titleAngle,
@@ -193,7 +196,7 @@ async function processAutopilotPick(
 
     if (run.status === "FAILED") {
       record.error = run.error ?? "Pipeline failed";
-      return record;
+      return { record };
     }
 
     logger.info("Autopilot: draft ready for review. Nothing is published.", {
@@ -204,12 +207,23 @@ async function processAutopilotPick(
       dryRun: options.dryRun,
     });
 
-    // Email the completed draft (.md attachment) when Brevo + recipients are configured.
-    if (run.article?.content && !options.dryRun) {
+    let email: AutopilotEmailDelivery;
+    if (!run.article?.content) {
+      email = emailDeliveryFromResult(created.id, {
+        sent: false,
+        skipped: "no article content to attach",
+      });
+    } else if (options.dryRun) {
+      email = emailDeliveryFromResult(created.id, {
+        sent: false,
+        skipped: "dry run",
+      });
+    } else {
       try {
         const { notifyAutopilotDraftEmail } = await import("./autopilot-email");
         const latest = (await store.require(created.id)) as PipelineRun;
         const mail = await notifyAutopilotDraftEmail(latest);
+        email = emailDeliveryFromResult(created.id, mail);
         if (mail.sent) {
           logger.info("Autopilot: draft email sent", {
             runId: created.id,
@@ -227,14 +241,16 @@ async function processAutopilotPick(
           });
         }
       } catch (mailError) {
+        const message = mailError instanceof Error ? mailError.message : String(mailError);
+        email = emailDeliveryFromResult(created.id, { sent: false, error: message });
         logger.warn("Autopilot: draft email error", {
           runId: created.id,
-          error: mailError instanceof Error ? mailError.message : String(mailError),
+          error: message,
         });
       }
     }
 
-    return record;
+    return { record, email };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     record.status = "FAILED";
@@ -244,7 +260,7 @@ async function processAutopilotPick(
       platform: "spanwrap",
       error: message,
     });
-    return record;
+    return { record };
   }
 }
 

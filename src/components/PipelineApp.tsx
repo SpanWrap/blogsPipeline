@@ -1268,6 +1268,32 @@ export function PipelineApp({ initialPage = "home" }: PipelineAppProps) {
                 setBusy(false);
               }
             }}
+            onRetryCycleEmail={async (cycleId) => {
+              try {
+                const cycle = await callApi<AutopilotCycle>(
+                  `/api/autopilot/cycles/${encodeURIComponent(cycleId)}/retry-email`,
+                  { method: "POST" },
+                );
+                await loadAutopilotHistory();
+                const email = cycle.email as
+                  | { status?: string; error?: string; queued?: boolean }
+                  | undefined;
+                if (email?.status === "sent") {
+                  toast("Draft email sent");
+                } else if (email?.status === "skipped") {
+                  toast(email.error || "Email skipped");
+                } else {
+                  toast(
+                    email?.queued
+                      ? `${email.error || "Email failed"}. Queued for retry.`
+                      : email?.error || "Email failed",
+                    true,
+                  );
+                }
+              } catch (e) {
+                toast(e instanceof Error ? e.message : "Email retry failed", true);
+              }
+            }}
             onTestEmailNotify={async () => {
               setBusy(true);
               try {

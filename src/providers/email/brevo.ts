@@ -1,5 +1,10 @@
+import dns from "node:dns";
 import { appConfig } from "../../config";
 import { logger } from "../../services/logger";
+
+// Lightsail is dual-stack. Brevo sees the IPv6 egress address unless lookups
+// prefer the IPv4 address that is on the API allowlist.
+dns.setDefaultResultOrder("ipv4first");
 
 export type BrevoRecipient = { email: string; name?: string };
 

@@ -38,11 +38,12 @@ jobs:
       - name: Build standalone release
         run: |
           npm run build
-          mkdir -p release public
+          mkdir -p release/.next release/public
           cp -a .next/standalone/. release/
-          mkdir -p release/.next
           cp -a .next/static release/.next/static
-          cp -a public/. release/public/
+          if [ -d public ] && [ -n "$(ls -A public)" ]; then
+            cp -a public/. release/public/
+          fi
           cp ecosystem.config.cjs release/
           # Next can copy local dotenv files into standalone; never ship them.
           rm -f release/.env release/.env.*
@@ -109,15 +110,17 @@ jobs:
 
       - name: Upload release
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y rsync
           REMOTE="${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}"
-          SSH_ARGS=(-i ~/.ssh/lightsail -o IdentitiesOnly=yes)
+          SSH_ARGS=(-i ~/.ssh/lightsail -o IdentitiesOnly=yes -o ConnectTimeout=20)
 
           ssh "${SSH_ARGS[@]}" "$REMOTE" "mkdir -p '$DEPLOY_PATH' '$DEPLOY_PATH/.data'"
 
           rsync -az --delete \
             --exclude='.env' \
             --exclude='.data/' \
-            -e "ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes" \
+            -e "ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes -o ConnectTimeout=20" \
             ./release/ "$REMOTE:$DEPLOY_PATH/"
 
           if [[ -n "$LIGHTSAIL_ENV_FILE" ]]; then

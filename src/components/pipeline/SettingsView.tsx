@@ -69,6 +69,7 @@ type SettingsViewProps = {
   }) => Promise<void>;
   onSaveEmailNotify: (input: { enabled: boolean; recipients: string[] }) => Promise<void>;
   onTestEmailNotify: () => Promise<void>;
+  onRetryCycleEmail: (cycleId: string) => Promise<void>;
 };
 
 function NavIcon({ id }: { id: SettingsSection }) {
@@ -147,6 +148,61 @@ function NavIcon({ id }: { id: SettingsSection }) {
   }
 }
 
+function cycleNeedsEmailRetry(cycle: AutopilotCycle): boolean {
+  const email = cycle.email as { status?: string } | undefined;
+  if (email?.status === "sent" || email?.status === "skipped") return false;
+  if (email?.status === "failed" || email?.status === "pending") return true;
+  return Boolean(cycle.runsCreated?.some((run: { runId?: string }) => run.runId));
+}
+
+function CycleEmailStatus({
+  cycle,
+  retrying,
+  onRetry,
+}: {
+  cycle: AutopilotCycle;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  const email = cycle.email as
+    | { status?: string; error?: string; queued?: boolean }
+    | undefined;
+  const status = email?.status;
+  const label =
+    status === "sent"
+      ? "email sent"
+      : status === "failed"
+        ? "email failed"
+        : status === "skipped"
+          ? "email skipped"
+          : status === "pending"
+            ? "email queued"
+            : cycle.runsCreated?.some((run: { runId?: string }) => run.runId)
+              ? "email not sent"
+              : null;
+  if (!label) return null;
+  const badgeClass =
+    status === "sent" ? "completed" : status === "skipped" ? "disabled" : status === "pending" ? "running" : "failed";
+  return (
+    <>
+      <span className={`ap-badge ${badgeClass}`} title={email?.error || undefined}>
+        {label}
+      </span>
+      {status === "failed" && email?.error ? (
+        <span className="ap-email-error" title={email.error}>
+          {email.error}
+        </span>
+      ) : null}
+      {email?.queued ? <span className="ap-badge running">queued for retry</span> : null}
+      {cycleNeedsEmailRetry(cycle) ? (
+        <button type="button" className="btn ap-retry" disabled={retrying} onClick={onRetry}>
+          {retrying ? "Sending…" : "Retry email"}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
 export function SettingsView({
   health,
   healthError,
@@ -172,6 +228,7 @@ export function SettingsView({
   onSaveReaderProfiles,
   onSaveEmailNotify,
   onTestEmailNotify,
+  onRetryCycleEmail,
 }: SettingsViewProps) {
   const providers: LlmProvider[] = llm.providers?.length
     ? llm.providers
@@ -186,6 +243,7 @@ export function SettingsView({
   const [templateMarkdown, setTemplateMarkdown] = useState("");
   const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [section, setSection] = useState<SettingsSection>("status");
+  const [retryingCycleId, setRetryingCycleId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [preview, setPreview] = useState<{
     id: string;
@@ -815,8 +873,20 @@ export function SettingsView({
                           return (
                             <tr key={c.id}>
                               <td title={c.id}>{String(c.id).slice(0, 12)}…</td>
-                              <td>
+                              <td className="ap-status-cell">
                                 <span className={`ap-badge ${statusClass}`}>{c.status}</span>
+                                <CycleEmailStatus
+                                  cycle={c}
+                                  retrying={retryingCycleId === c.id}
+                                  onRetry={() => {
+                                    setRetryingCycleId(c.id);
+                                    void onRetryCycleEmail(c.id).finally(() =>
+                                      setRetryingCycleId((current) =>
+                                        current === c.id ? null : current,
+                                      ),
+                                    );
+                                  }}
+                                />
                               </td>
                               <td>{c.topicsSelected}</td>
                               <td>{c.runsCreated ? c.runsCreated.length : 0}</td>

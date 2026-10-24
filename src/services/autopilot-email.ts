@@ -33,8 +33,9 @@ function buildMarkdownAttachment(run: PipelineRun): { name: string; content: str
 
   const markdown = parts.filter((p, i) => !(p === "" && parts[i - 1] === "")).join("\n");
   const slug = (article.slug || run.id || "draft").replace(/[^a-z0-9-_]+/gi, "-");
+  // Brevo rejects a .md attachment ("Unsupported file format: md").
   return {
-    name: `${slug}.md`,
+    name: `${slug}.txt`,
     content: Buffer.from(markdown, "utf8").toString("base64"),
     markdown,
   };
@@ -96,7 +97,7 @@ export async function notifyAutopilotDraftEmail(run: PipelineRun): Promise<{
           : ""
       }
       <p><a href="${escapeHtml(reviewUrl)}">Review this draft</a></p>
-      <p style="color:#5f574c;font-size:0.9rem">The markdown draft is attached. Other sites stay on the checklist until you push or mark them.</p>
+      <p style="color:#5f574c;font-size:0.9rem">The markdown draft is attached as a .txt file. Other sites stay on the checklist until you push or mark them.</p>
     </div>
   `.trim();
 
